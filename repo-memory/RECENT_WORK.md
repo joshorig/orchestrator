@@ -4,6 +4,21 @@ _Append-only log. New entries go at the top. One entry per completed task or mil
 
 ---
 
+## 2026-04-13 — Pass-2 first item: BRAID pre-flight CheckBaseline + topology-error whitelist
+
+**Summary:** Closed the #30 misdiagnosis class at both the graph level and the worker level. Highest-leverage pass-2 item per the plan's "Out of scope for pass 1" list.
+
+**Changed:**
+- `braid/templates/lvc-implement-operator.mmd` — added `CheckBaseline` after `ReadTests`; failed path routes to `EmitBaselineRed → End` via `BRAID_TOPOLOGY_ERROR: baseline_red`.
+- `braid/generators/lvc-implement-operator.prompt.md` — `CheckBaseline` listed as mandatory Check 0; new "Topology-error exit contract" section enumerating `template_missing`, `baseline_red`, `graph_unreachable`, `graph_malformed` as the only legitimate reason codes.
+- `bin/worker.py` — added `VALID_TOPOLOGY_REASONS` + `topology_reason_is_valid()`; codex trailer handler now rejects unrecognized reasons as `false_blocker_claim` and moves the task to `failed/` without polluting `topology_errors` or enqueuing regen.
+
+**Validation:** 12-case table (6 accept / 6 reject) run inline — all pass, including exact wording of the original misdiagnosis ("unrelated pre-existing classpath issue outside my change set").
+
+**Follow-on:** Next time an operator task runs, confirm the solver actually traverses `CheckBaseline` and emits `baseline_red` on a seeded red-baseline test. Also worth revisiting the `lvc-implement-operator` `topology_errors` counter — 1 of the current 4 was the spurious #30 entry.
+
+---
+
 ## 2026-04-13 — Pass-1 vertical slice closed, repo made agent-driven
 
 **Summary:** Orchestrator initialized as its own git repo with a substantive README and this `repo-memory/` directory. Closes out pass-1 follow-ups #30/#31/#32 (InterprocessIpcPolicyTest misdiagnosis post-mortem, codex slot timeout bump 600s→1800s, planner slice classifier).

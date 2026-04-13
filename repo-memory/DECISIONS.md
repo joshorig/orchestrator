@@ -11,6 +11,18 @@ _Architectural decisions with enough context that a future agent can tell whethe
 
 ---
 
+## 2026-04-13 — BRAID pre-flight CheckBaseline + topology-error reason whitelist
+
+**Context:** The 2026-04-13 InterprocessIpcPolicyTest misdiagnosis (see `lvc-standard/repo-memory/FAILURES.md`) showed that a codex solver could exit a task via `BRAID_TOPOLOGY_ERROR: unrelated pre-existing classpath issue` without the orchestrator ever verifying the claim. The failure was a transient worktree flake that did not reproduce on canonical main, but it still polluted the `topology_errors` counter and triggered a pointless regeneration. 1 of the 4 recorded operator-template topology errors in pass-1 turned out to be spurious.
+
+**Decision:** Close the gap with two coordinated changes:
+1. **Template (`braid/templates/lvc-implement-operator.mmd`)**: insert a new `CheckBaseline[Check: baseline smoke green on unmodified worktree]` node right after `ReadTests`. Failed check routes to `EmitBaselineRed → BRAID_TOPOLOGY_ERROR: baseline_red → End`. Generator prompt updated to require this as Check 0 and to spec the legitimate topology-error reason codes.
+2. **Worker (`bin/worker.py`)**: add a `VALID_TOPOLOGY_REASONS` whitelist (`template_missing`, `baseline_red`, `graph_unreachable`, `graph_malformed`) and a `topology_reason_is_valid()` gate. Codex trailers whose reason does not contain one of these codes are rejected as `false_blocker_claim` — the task moves to `failed/` (not `blocked/`), `topology_errors` is NOT incremented, and no regen task is enqueued.
+
+**Consequences:** The solver's only legitimate path to exit with a "pre-existing failure" claim is now through `CheckBaseline`, which forces it to run the smoke suite on the unmodified worktree first. The whitelist is defense in depth: even if a graph regression re-opens a direct exit, any prose-style "unrelated" reason is caught at the worker level. Rules out ad-hoc blame-shifting by the solver; the graph and the worker both agree that `baseline_red` is the only sanctioned test-failure escape. Valid rejection patterns confirmed against all wording variants from the original misdiagnosis.
+
+---
+
 ## 2026-04-13 — Post-validate planner-emitted slices with a keyword classifier
 
 **Context:** In pass-1 the planner emitted several `lvc-implement-operator` slices whose summaries were actually CI/docs/release work ("Rewrite CI version-bump workflow", "Audit docs and release automation"). Prompt-level guidance alone did not prevent it.

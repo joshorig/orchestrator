@@ -286,6 +286,30 @@ def classify_slice(template, summary):
     return True, None
 
 
+# Legitimate reason codes that may appear after `BRAID_TOPOLOGY_ERROR:`.
+# The lesson from the 2026-04-13 InterprocessIpcPolicy misdiagnosis: a codex
+# solver is NOT allowed to declare an "unrelated" or "pre-existing" failure
+# as a topology error — it must route through the CheckBaseline node and
+# emit `baseline_red` instead. Any trailer whose reason does not contain one
+# of these codes is a false_blocker_claim; we move the task to failed/
+# (not blocked/), do NOT increment topology_errors, and do NOT enqueue a
+# regeneration task (a new template won't fix a false claim).
+VALID_TOPOLOGY_REASONS = (
+    "template_missing",
+    "baseline_red",
+    "graph_unreachable",
+    "graph_malformed",
+)
+
+
+def topology_reason_is_valid(trailer):
+    _, _, rest = trailer.partition(":")
+    rest = rest.strip().lower()
+    if not rest:
+        return False
+    return any(code in rest for code in VALID_TOPOLOGY_REASONS)
+
+
 def run_claude_planner(task, cfg, timeout, log_path):
     """Freeform planner: claude reads memory and emits slice proposals."""
     task_id = task["task_id"]
@@ -680,6 +704,23 @@ def run_codex_slot(task, cfg):
             return
 
         if trailer.startswith("BRAID_TOPOLOGY_ERROR"):
+            if not topology_reason_is_valid(trailer):
+                # False blocker claim — solver tried to exit with an
+                # unrecognized reason (e.g. "pre-existing unrelated
+                # failure"). Do NOT pollute topology_errors, do NOT
+                # enqueue a useless regen, do NOT block downstream work
+                # on this project.
+                def mut_fail_false(t):
+                    t["finished_at"] = o.now_iso()
+                    t["topology_error"] = None
+                    t["false_blocker_claim"] = trailer
+                o.move_task(
+                    task_id, "running", "failed",
+                    reason=f"false blocker claim: {trailer[:80]}",
+                    mutator=mut_fail_false,
+                )
+                return
+
             o.braid_template_record_use(bt, topology_error=True)
             regen = o.new_task(
                 role="planner",
