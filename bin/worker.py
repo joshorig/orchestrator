@@ -82,6 +82,245 @@ def remove_worktree(project_path, wt_path, branch):
         log(f"worktree cleanup warn: {exc}")
 
 
+# --- push + pr-body (pattern B delivery) ------------------------------------
+#
+# When a target task passes smoke.sh in its worktree, we always write a
+# pr-body.md artifact capturing the task context, BRAID provenance, diff,
+# smoke-log tail, and reviewer verdict. A human (or a future automated step)
+# can feed this to `gh pr create --body-file` verbatim.
+#
+# If the project has `auto_push: true`, we additionally commit-and-push the
+# worktree branch to origin under a distinct agent identity so a PR can be
+# opened against it. Human-opened PRs still benefit from pr-body.md regardless.
+#
+# Secret scanning runs before any commit or push. Any hit aborts the push
+# (target task → failed with push_failure) while leaving the worktree intact
+# for human inspection.
+
+AGENT_GIT_IDENTITY = [
+    "-c", "user.name=devmini-orchestrator",
+    "-c", "user.email=devmini-orchestrator@joshorig.com",
+]
+
+_SECRET_PATTERNS = [
+    (re.compile(r"\btelegram\.json\b"), "telegram.json"),
+    (re.compile(r"(^|/)\.env(\.|$)"), ".env file"),
+    (re.compile(r"BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY"), "private key"),
+    (re.compile(r"\bghp_[A-Za-z0-9]{20,}"), "github personal token"),
+    (re.compile(r"\bghs_[A-Za-z0-9]{20,}"), "github server token"),
+    (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}"), "slack token"),
+    (re.compile(r"\bsk-[A-Za-z0-9]{20,}"), "openai-style key"),
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "aws access key"),
+    (re.compile(r"\bcredentials\.json\b"), "credentials.json"),
+]
+
+
+def scan_for_secrets(text):
+    """Return a list of (label, snippet) for any secret patterns found."""
+    if not text:
+        return []
+    hits = []
+    for pat, label in _SECRET_PATTERNS:
+        m = pat.search(text)
+        if m:
+            start = max(0, m.start() - 20)
+            end = min(len(text), m.end() + 20)
+            hits.append((label, text[start:end].replace("\n", " ")))
+    return hits
+
+
+def _git(worktree, *args, check=False, timeout=30):
+    return subprocess.run(
+        ["git", "-C", str(worktree), *args],
+        capture_output=True, text=True, check=check, timeout=timeout,
+    )
+
+
+def _git_agent(worktree, *args, check=False, timeout=60):
+    return subprocess.run(
+        ["git", "-C", str(worktree), *AGENT_GIT_IDENTITY, *args],
+        capture_output=True, text=True, check=check, timeout=timeout,
+    )
+
+
+def write_pr_body(target, project, qa_log_path, driver_task_id):
+    """Write artifacts/<target_id>/pr-body.md with PR-ready evidence.
+
+    Always called on smoke pass, independent of auto_push. Returns the written
+    path or None on failure (non-fatal).
+    """
+    target_id = target.get("task_id", "unknown")
+    wt = target.get("worktree")
+    if not wt or not pathlib.Path(wt).exists():
+        return None
+
+    art_dir = o.STATE_ROOT / "artifacts" / target_id
+    art_dir.mkdir(parents=True, exist_ok=True)
+    out_path = art_dir / "pr-body.md"
+
+    branch = f"agent/{target_id}"
+    diff_stat = _git(wt, "diff", "main", "--stat").stdout.strip()
+    commit_log = _git(wt, "log", "main..HEAD", "--pretty=format:- %h %s").stdout.strip()
+    if not commit_log:
+        commit_log = "(no commits yet — pending auto-commit on push)"
+    changed_files = _git(wt, "diff", "main", "--name-only").stdout.strip() or "(no changes vs main)"
+
+    log_tail = ""
+    try:
+        if qa_log_path and pathlib.Path(qa_log_path).exists():
+            lines = pathlib.Path(qa_log_path).read_text(errors="replace").splitlines()
+            log_tail = "\n".join(lines[-40:])
+    except Exception as exc:
+        log_tail = f"(could not read qa log: {exc})"
+
+    bt = target.get("braid_template") or "(none)"
+    bt_hash = target.get("braid_template_hash") or "(none)"
+    parent = target.get("parent_task_id") or "(none)"
+    review_verdict = target.get("review_verdict") or "(not reviewed)"
+    reviewed_by = target.get("reviewed_by") or ""
+
+    body = f"""# {target.get('summary', target_id)}
+
+<!--
+  devmini-orchestrator: PR body artifact for task {target_id}.
+  Smoke gate passed via driver task {driver_task_id} at {o.now_iso()}.
+-->
+
+@codex please review this change.
+
+## Task
+
+- **Task id:** `{target_id}`
+- **Project:** `{project['name']}`
+- **Parent:** `{parent}`
+- **Branch:** `{branch}`
+- **Summary:** {target.get('summary', '(no summary)')}
+
+## BRAID provenance
+
+- **Template:** `{bt}`
+- **Template hash:** `{bt_hash}`
+- **Reviewer verdict:** {review_verdict}{' (by ' + reviewed_by + ')' if reviewed_by else ''}
+
+## Changes
+
+### Files touched
+
+```
+{changed_files}
+```
+
+### Commits on branch
+
+{commit_log}
+
+### Diff stat vs main
+
+```
+{diff_stat or '(empty)'}
+```
+
+## QA evidence
+
+Smoke script: `{project.get('qa', {}).get('smoke', '(none)')}`
+Smoke log (last 40 lines):
+
+```
+{log_tail}
+```
+
+Full log: `{qa_log_path}`
+
+## Manual PR open
+
+```
+gh -R <owner>/{pathlib.Path(project['path']).name} pr create \\
+  --head {branch} --base main \\
+  --title {shlex.quote(target.get('summary', target_id))} \\
+  --body-file {out_path}
+```
+"""
+    out_path.write_text(body)
+    return out_path
+
+
+def push_worktree_branch(target, project, worktree, branch, log_path):
+    """Commit any pending worktree changes and push the branch to origin.
+
+    Returns (ok: bool, reason: str, commit_sha: str|None,
+             commit_count: int, pushed_at: str|None).
+
+    Safety gates:
+      - never pushes `main`
+      - aborts if `git diff main` hits secret patterns
+      - uses a distinct `devmini-orchestrator` commit identity
+      - leaves the worktree intact on failure for human inspection
+    """
+    if branch == "main" or branch.endswith("/main"):
+        return (False, "refuse to push main", None, 0, None)
+
+    wt = pathlib.Path(worktree)
+    if not wt.exists():
+        return (False, "worktree missing", None, 0, None)
+
+    # Secret scan: look at the full diff vs main AND staged-but-uncommitted.
+    full_diff = _git(wt, "diff", "main").stdout or ""
+    staged = _git(wt, "diff", "--cached").stdout or ""
+    unstaged = _git(wt, "diff").stdout or ""
+    combined = full_diff + "\n" + staged + "\n" + unstaged
+    hits = scan_for_secrets(combined)
+    if hits:
+        labels = ", ".join(sorted({h[0] for h in hits}))
+        try:
+            with open(log_path, "a") as f:
+                f.write(f"\n# PUSH ABORTED: secret-scan hit ({labels})\n")
+                for label, snippet in hits[:8]:
+                    f.write(f"#   {label}: …{snippet}…\n")
+        except Exception:
+            pass
+        return (False, f"secret-scan hit: {labels}", None, 0, None)
+
+    # Auto-commit anything the agent left uncommitted. The agent process is
+    # expected to commit its own work, but we fall back to a single squash
+    # commit so pattern-B still delivers a pushable branch.
+    status = _git(wt, "status", "--porcelain").stdout
+    if status.strip():
+        add = _git_agent(wt, "add", "-A")
+        if add.returncode != 0:
+            return (False, f"git add failed: {add.stderr.strip()}", None, 0, None)
+        msg = f"agent: {target.get('summary', target.get('task_id', 'auto-commit'))}\n\ntask_id: {target.get('task_id')}\n"
+        commit = _git_agent(wt, "commit", "-m", msg)
+        if commit.returncode != 0:
+            return (False, f"git commit failed: {commit.stderr.strip()}", None, 0, None)
+
+    # Any commits on branch ahead of main?
+    count_proc = _git(wt, "rev-list", "--count", "main..HEAD")
+    try:
+        commit_count = int((count_proc.stdout or "0").strip() or "0")
+    except ValueError:
+        commit_count = 0
+    if commit_count == 0:
+        return (False, "no commits ahead of main", None, 0, None)
+
+    sha = _git(wt, "rev-parse", "HEAD").stdout.strip() or None
+
+    push = _git_agent(wt, "push", "-u", "origin", branch, timeout=120)
+    if push.returncode != 0:
+        return (False, f"git push failed: {push.stderr.strip()[:400]}", sha, commit_count, None)
+
+    try:
+        with open(log_path, "a") as f:
+            f.write(f"\n# PUSHED {branch} @ {sha} ({commit_count} commit{'s' if commit_count != 1 else ''})\n")
+            if push.stdout:
+                f.write(push.stdout)
+            if push.stderr:
+                f.write(push.stderr)
+    except Exception:
+        pass
+
+    return (True, "ok", sha, commit_count, o.now_iso())
+
+
 # --- memory context ---------------------------------------------------------
 
 def read_memory_context(project_path):
@@ -976,11 +1215,60 @@ def run_qa_slot(task, cfg):
 
         if proc.returncode == 0:
             if contract_kind == "smoke" and target_id:
-                def mut_target_ok(t):
-                    t["finished_at"] = o.now_iso()
-                    t["qa_passed_at"] = o.now_iso()
-                o.move_task(target_id, "awaiting-qa", "done",
-                            reason=f"smoke pass via {task_id}", mutator=mut_target_ok)
+                # Pattern B: always write pr-body.md; push only if opted-in.
+                pr_body_path = None
+                try:
+                    pr_body_path = write_pr_body(
+                        target=target, project=project,
+                        qa_log_path=log_path, driver_task_id=task_id,
+                    )
+                except Exception as exc:
+                    log(f"write_pr_body failed: {exc}")
+
+                pushed_info = None
+                push_failure = None
+                if project.get("auto_push"):
+                    try:
+                        ok, reason, sha, ccount, pushed_at = push_worktree_branch(
+                            target=target, project=project,
+                            worktree=target_wt, branch=f"agent/{target_id}",
+                            log_path=log_path,
+                        )
+                    except Exception as exc:
+                        ok, reason, sha, ccount, pushed_at = False, f"push crashed: {exc}", None, 0, None
+                        log(f"push_worktree_branch crashed: {exc}")
+                    if ok:
+                        pushed_info = {
+                            "pushed_at": pushed_at,
+                            "push_commit_sha": sha,
+                            "push_commit_count": ccount,
+                            "push_branch": f"agent/{target_id}",
+                        }
+                    else:
+                        push_failure = reason
+
+                if push_failure:
+                    def mut_target_push_fail(t):
+                        t["finished_at"] = o.now_iso()
+                        t["qa_passed_at"] = o.now_iso()
+                        t["push_failure"] = push_failure
+                        if pr_body_path:
+                            t["pr_body_path"] = str(pr_body_path)
+                    o.move_task(target_id, "awaiting-qa", "failed",
+                                reason=f"smoke ok but push failed: {push_failure}",
+                                mutator=mut_target_push_fail)
+                else:
+                    def mut_target_ok(t):
+                        t["finished_at"] = o.now_iso()
+                        t["qa_passed_at"] = o.now_iso()
+                        if pr_body_path:
+                            t["pr_body_path"] = str(pr_body_path)
+                        if pushed_info:
+                            t.update(pushed_info)
+                    o.move_task(target_id, "awaiting-qa", "done",
+                                reason=f"smoke pass via {task_id}", mutator=mut_target_ok)
+
+                # Driver task ran the script successfully regardless of push outcome.
                 def mut_driver_ok(t):
                     t["finished_at"] = o.now_iso()
                 o.move_task(task_id, "running", "done",

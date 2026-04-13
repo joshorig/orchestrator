@@ -15,6 +15,7 @@
       "path": "/Volumes/devssd/repos/ull/lvc-standard",
       "type": "library",
       "playwright": false,
+      "auto_push": false,
       "qa": {
         "smoke": "qa/smoke.sh",
         "regression": "qa/regression.sh",
@@ -27,6 +28,7 @@
       "path": "/Volumes/devssd/repos/ull/dag_framework",
       "type": "library",
       "playwright": false,
+      "auto_push": false,
       "qa": {
         "smoke": "qa/smoke.sh",
         "regression": "qa/regression.sh",
@@ -39,6 +41,7 @@
       "path": "/Volumes/devssd/repos/apps/trade-research-platform",
       "type": "application",
       "playwright": true,
+      "auto_push": false,
       "qa": {
         "smoke": "qa/smoke.sh",
         "regression": "qa/regression.sh",

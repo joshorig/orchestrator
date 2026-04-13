@@ -67,6 +67,31 @@ Seeded task types (pass 1, lvc-standard only):
 | `lvc-historian-update` | Append an entry to `repo-memory/RECENT_WORK.md` | codex |
 | `lvc-reviewer-pass` | Architectural + doc-drift review of a worktree diff | codex (small graph, still benefits from structure) |
 
+## Delivery (worktrees → origin)
+
+Codex executes inside a dedicated branch `agent/<task_id>` in an isolated worktree. On a clean smoke-pass, the QA worker always emits a **PR body artifact** and — if the project opts in — pushes the branch to origin so a human can open the PR.
+
+**Artifact (always):** `artifacts/<target_task_id>/pr-body.md`. Contents:
+
+- Task id, summary, parent, branch name
+- BRAID template + hash + reviewer verdict
+- `git log main..HEAD` commit list and `git diff main --stat`
+- Last 40 lines of the smoke log (`logs/<driver_task_id>.log`)
+- A ready-to-paste `gh pr create --body-file …` command
+- An `@codex` mention on the first content line so that GitHub's codex code review fires on PR open
+
+Human workflow: review `pr-body.md`, run the `gh pr create` line it suggests, done. No LLM in the loop; the pr-body is deterministic from task state.
+
+**Auto-push (opt-in per project):** set `"auto_push": true` on a project entry in `config/orchestrator.json`. On smoke pass the worker will:
+
+1. Run a secret scan over the full `git diff main` + staged + unstaged diff. Any hit (patterns for `.env`, `telegram.json`, `credentials.json`, `BEGIN … PRIVATE KEY`, `ghp_`/`ghs_`, `xoxb-`, `sk-…`, `AKIA…`) aborts the push and transitions the target task to `failed/` with `push_failure` set. The worktree is left intact for human inspection.
+2. Auto-commit any remaining uncommitted changes under a distinct identity (`devmini-orchestrator <devmini-orchestrator@joshorig.com>`) — separate from the human's git identity so automated commits are traceable.
+3. `git push -u origin agent/<task_id>`. Never pushes `main`.
+
+Push failures mark the target task `failed` with `push_failure=<reason>`; the driver QA task still transitions to `done` because its script succeeded. Push successes stamp the target with `pushed_at`, `push_commit_sha`, `push_commit_count`, `push_branch`, `pr_body_path`.
+
+Defaults: `auto_push: false` on all projects. Opt in per project when you're ready to let the agent touch origin.
+
 ## Directory layout
 
 ```

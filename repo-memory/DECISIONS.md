@@ -11,6 +11,30 @@ _Architectural decisions with enough context that a future agent can tell whethe
 
 ---
 
+## 2026-04-13 — Pattern B delivery: always-on pr-body artifact + opt-in auto-push
+
+**Context:** Before this change the orchestrator had zero delivery path out of the worktree. Codex produced a branch inside `worktrees/<repo>/<task_id>/`, smoke ran against it, a reviewer approved it, and then nothing happened — no commit back to origin, no PR, no signal to a human that the change was ready. Four delivery patterns were considered (fully manual; worker auto-commit + push with human PR; worker opens the PR via `gh`; auto-merge on green). Pattern B was chosen as the prototype: strictly bounded (human stays in the loop for PR creation), but removes the "nothing happens" dead-end that made pass-1 useless for actual shipping.
+
+Additionally, any PR opened this way should include the QA evidence the orchestrator already has on hand — the diff, smoke log tail, BRAID provenance, reviewer verdict — so the reviewer doesn't have to reconstruct state, and so that codex's GitHub code review can be invoked automatically via an `@codex` mention in the body.
+
+**Decision:** Implement pattern B in `bin/worker.py` with two distinct pieces, both fired on the smoke-success branch of `run_qa_slot`:
+
+1. **`write_pr_body(target, project, qa_log_path, driver_task_id)`** — always runs on smoke pass, regardless of opt-in. Writes `artifacts/<target_id>/pr-body.md` with: `@codex please review` ping, task metadata, BRAID template + hash, reviewer verdict, `git log main..HEAD`, `git diff main --stat`, last 40 lines of the smoke log, and a `gh pr create --body-file …` template. Deterministic from task state — no LLM involved in the pr-body itself.
+2. **`push_worktree_branch(target, project, worktree, branch, log_path)`** — runs only if `project.auto_push == True`. Scans the full diff for secret patterns (`.env`, `telegram.json`, `credentials.json`, private keys, `ghp_`/`ghs_`, `xoxb-`, `sk-`, `AKIA`) and aborts the push if any hit. Auto-commits remaining uncommitted work under a dedicated `devmini-orchestrator <devmini-orchestrator@joshorig.com>` identity (distinct from the human's identity so automated commits are traceable in `git log --author`). Refuses to push a branch named `main`. Pushes `-u origin agent/<task_id>`.
+
+Task state mutations on smoke pass:
+
+- pr-body write failure → logged, non-fatal, target still → done.
+- auto_push disabled → target → done with `pr_body_path` set.
+- push success → target → done with `pushed_at`, `push_commit_sha`, `push_commit_count`, `push_branch`, `pr_body_path`.
+- push failure (secret scan, git failure, no commits ahead) → target → failed with `push_failure=<reason>`, `qa_passed_at`, `pr_body_path`. Driver QA task still → done because its smoke script succeeded.
+
+Config: `"auto_push": false` explicitly set on all three projects (`lvc-standard`, `dag-framework`, `trade-research-platform`). Opt-in per project; default is always off.
+
+**Consequences:** The orchestrator now has a deliverable contract — every smoke-green worktree produces a pr-body.md a human can paste into `gh pr create --body-file`, and with one config flip, the branch is pre-pushed. The `@codex` mention in the body means codex's GitHub reviewer fires automatically when the PR opens, so code review and QA evidence land together without a separate step. Rules out unattended PR creation (pattern C) and auto-merge (pattern D) until we have more observation time — both are future work. The distinct commit identity prevents co-mingling agent commits with human commits in `git blame` / `git log --author` queries. Secret scan is defense in depth: the engineering-memory skill already forbids committing these files, but the orchestrator enforces it at the push boundary. The "driver done even on push failure" split preserves the invariant that QA slot state reflects what the script did; delivery failures are attached to the target, not the driver.
+
+---
+
 ## 2026-04-13 — BRAID pre-flight CheckBaseline + topology-error reason whitelist
 
 **Context:** The 2026-04-13 InterprocessIpcPolicyTest misdiagnosis (see `lvc-standard/repo-memory/FAILURES.md`) showed that a codex solver could exit a task via `BRAID_TOPOLOGY_ERROR: unrelated pre-existing classpath issue` without the orchestrator ever verifying the claim. The failure was a transient worktree flake that did not reproduce on canonical main, but it still polluted the `topology_errors` counter and triggered a pointless regeneration. 1 of the 4 recorded operator-template topology errors in pass-1 turned out to be spurious.
