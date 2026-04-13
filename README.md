@@ -24,6 +24,9 @@ python3 bin/orchestrator.py qa
 # rescue: sweep stale claims (dead pids) back to queued
 python3 bin/orchestrator.py reap
 
+# delivery hygiene: remove worktrees for merged/closed PRs
+python3 bin/orchestrator.py cleanup-worktrees [--dry-run]
+
 # generate a status report (also pushed via telegram bot when running)
 python3 bin/orchestrator.py report morning
 ```
@@ -67,30 +70,56 @@ Seeded task types (pass 1, lvc-standard only):
 | `lvc-historian-update` | Append an entry to `repo-memory/RECENT_WORK.md` | codex |
 | `lvc-reviewer-pass` | Architectural + doc-drift review of a worktree diff | codex (small graph, still benefits from structure) |
 
-## Delivery (worktrees → origin)
+## Delivery (worktrees → origin → PR → cleanup)
 
-Codex executes inside a dedicated branch `agent/<task_id>` in an isolated worktree. On a clean smoke-pass, the QA worker always emits a **PR body artifact** and — if the project opts in — pushes the branch to origin so a human can open the PR.
+Codex executes inside a dedicated branch `agent/<task_id>` in an isolated worktree. On a clean smoke-pass the QA worker always emits a **PR body artifact**, and — if the project opts in — pushes the branch to origin and opens a PR via `gh`. A periodic sweep cleans up worktrees whose PRs have been merged or closed.
 
-**Artifact (always):** `artifacts/<target_task_id>/pr-body.md`. Contents:
+### 1. PR body artifact (always written)
 
+Path: `artifacts/<target_task_id>/pr-body.md`. Contents:
+
+- `@codex please review this change.` ping on line 1 so GitHub's codex review fires automatically on PR open
 - Task id, summary, parent, branch name
 - BRAID template + hash + reviewer verdict
 - `git log main..HEAD` commit list and `git diff main --stat`
 - Last 40 lines of the smoke log (`logs/<driver_task_id>.log`)
-- A ready-to-paste `gh pr create --body-file …` command
-- An `@codex` mention on the first content line so that GitHub's codex code review fires on PR open
+- A ready-to-paste `gh pr create --body-file ...` command as a human fallback
 
-Human workflow: review `pr-body.md`, run the `gh pr create` line it suggests, done. No LLM in the loop; the pr-body is deterministic from task state.
+Deterministic from task state — no LLM in the loop.
 
-**Auto-push (opt-in per project):** set `"auto_push": true` on a project entry in `config/orchestrator.json`. On smoke pass the worker will:
+### 2. Auto-push + auto-PR (opt-in per project)
 
-1. Run a secret scan over the full `git diff main` + staged + unstaged diff. Any hit (patterns for `.env`, `telegram.json`, `credentials.json`, `BEGIN … PRIVATE KEY`, `ghp_`/`ghs_`, `xoxb-`, `sk-…`, `AKIA…`) aborts the push and transitions the target task to `failed/` with `push_failure` set. The worktree is left intact for human inspection.
-2. Auto-commit any remaining uncommitted changes under a distinct identity (`devmini-orchestrator <devmini-orchestrator@joshorig.com>`) — separate from the human's git identity so automated commits are traceable.
-3. `git push -u origin agent/<task_id>`. Never pushes `main`.
+Set `"auto_push": true` on a project entry in `config/orchestrator.json`. On smoke pass the worker will:
 
-Push failures mark the target task `failed` with `push_failure=<reason>`; the driver QA task still transitions to `done` because its script succeeded. Push successes stamp the target with `pushed_at`, `push_commit_sha`, `push_commit_count`, `push_branch`, `pr_body_path`.
+1. **Secret scan** over the full `git diff main` + staged + unstaged diff. Any hit (patterns for `.env`, `telegram.json`, `credentials.json`, `BEGIN ... PRIVATE KEY`, `ghp_`/`ghs_`, `xoxb-`, `sk-...`, `AKIA...`) aborts delivery and transitions the target task to `failed/` with `push_failure` set. The worktree is left intact for human inspection.
+2. **Auto-commit** any remaining uncommitted changes under a distinct identity (`devmini-orchestrator <devmini-orchestrator@joshorig.com>`) — separate from the human's git identity so automated commits are traceable via `git log --author`.
+3. **Push** `agent/<task_id>` to origin. Never pushes `main`.
+4. **Open the PR** via `gh pr create --head agent/<task_id> --base main --title <summary> --body-file artifacts/<task_id>/pr-body.md`.
 
-Defaults: `auto_push: false` on all projects. Opt in per project when you're ready to let the agent touch origin.
+Task state on success: target → `done` with `pushed_at`, `push_commit_sha`, `push_commit_count`, `push_branch`, `pr_body_path`, `pr_url`, `pr_number`, `pr_created_at`. The driver QA task always → `done` because its script succeeded.
+
+Failures:
+
+| Failure stage | Target state | Fields set | Notes |
+|---|---|---|---|
+| secret scan hit | `failed` | `push_failure=secret-scan hit: <labels>` | worktree preserved |
+| `git push` error | `failed` | `push_failure=<git stderr>` | worktree preserved |
+| `gh pr create` error | `done` | `pr_create_failure=<reason>` | push succeeded; human opens PR from pr-body.md |
+| `gh` not installed or unauthenticated | `done` | `pr_create_failure=...` | same as above |
+
+Defaults: `auto_push: false` on all three projects. Opt in per project when you're ready to let the agent touch origin.
+
+### 3. Worktree cleanup on PR resolution
+
+`orchestrator.py cleanup-worktrees` scans `queue/done/` for tasks that have a `pr_number` and no `cleaned_at`, queries `gh pr view <n> --json state,mergedAt,closedAt` in the project's canonical repo, and on **MERGED** or **CLOSED**:
+
+- Removes the worktree via `git worktree remove --force <path>`
+- Deletes the local branch via `git branch -D agent/<task_id>`
+- Stamps `cleaned_at`, `pr_final_state`, `pr_merged_at`, `pr_closed_at` on the task JSON in place (task stays in `done/`)
+
+Remote branches are **not** touched — GitHub's per-repo "Delete branch on merge" setting (or the human's one-click delete on close) owns remote cleanup.
+
+Run it yourself anytime: `python3 bin/orchestrator.py cleanup-worktrees [--dry-run]`. A launchd plist (`com.devmini.orchestrator.cleanup-worktrees`) runs it hourly.
 
 ## Directory layout
 
@@ -153,6 +182,7 @@ The orchestrator is launchd-driven. All plists live in `~/Library/LaunchAgents/c
 | `reviewer` | StartInterval=300s | Promotes `awaiting_review` tasks |
 | `qa-scheduler` | StartInterval=900s | Promotes `awaiting_qa` tasks |
 | `reaper` | StartInterval=60s | Recovers stale claims |
+| `cleanup-worktrees` | StartInterval=3600s | Removes worktrees + local branches for merged/closed PRs |
 | `regression` | Weekly (lvc-standard) | Full JMH sweep under exclusive project lock |
 | `telegram-bot` | KeepAlive | Real bot, long-polling, allowlist-gated |
 | `reports-morning` / `reports-evening` | 08:00 / 18:00 | Markdown status + bot push |

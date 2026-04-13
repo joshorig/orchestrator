@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import uuid
@@ -292,6 +293,103 @@ def reap():
                 )
                 reaped += 1
     return reaped
+
+
+def cleanup_worktrees(dry_run=False):
+    """Sweep closed/merged PRs and remove their local worktrees + branches.
+
+    Scans queue/done/ for tasks that have a pr_number and no cleaned_at yet,
+    queries `gh pr view <n> --json state,mergedAt,closedAt` in the project's
+    canonical repo, and on MERGED or CLOSED removes the agent worktree via
+    `git worktree remove --force` and the local branch via `git branch -D`.
+
+    Remote branches are NOT touched — GitHub's per-repo "Delete branch on
+    merge" setting (or the human's one-click on close) is the source of
+    truth. This function only cleans local state.
+
+    Task JSON is updated in place: stamps cleaned_at, pr_final_state,
+    pr_merged_at, pr_closed_at. Does not move the task file out of done/.
+
+    Returns (checked, cleaned, skipped).
+    """
+    if shutil.which("gh") is None:
+        print("cleanup: gh CLI not installed, nothing to do", file=sys.stderr)
+        return (0, 0, 0)
+
+    config = load_config()
+    done_dir = queue_dir("done")
+
+    checked = 0
+    cleaned = 0
+    skipped = 0
+
+    for task_file in sorted(done_dir.glob("*.json")):
+        task = read_json(task_file, {})
+        pr_number = task.get("pr_number")
+        if not pr_number or task.get("cleaned_at"):
+            continue
+
+        checked += 1
+        project_name = task.get("project")
+        try:
+            project = get_project(config, project_name)
+        except KeyError:
+            print(f"cleanup {task.get('task_id')}: unknown project {project_name}, skip")
+            skipped += 1
+            continue
+
+        repo_path = project["path"]
+        proc = subprocess.run(
+            ["gh", "pr", "view", str(pr_number),
+             "--json", "state,mergedAt,closedAt,url"],
+            cwd=repo_path,
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode != 0:
+            print(f"cleanup {task.get('task_id')}: gh pr view failed: {proc.stderr.strip()[:200]}")
+            skipped += 1
+            continue
+        try:
+            info = json.loads(proc.stdout or "{}")
+        except json.JSONDecodeError:
+            print(f"cleanup {task.get('task_id')}: bad gh pr view json")
+            skipped += 1
+            continue
+
+        state = info.get("state", "")
+        if state not in ("CLOSED", "MERGED"):
+            continue  # still OPEN — leave it alone
+
+        wt_path = task.get("worktree")
+        branch = task.get("push_branch") or f"agent/{task.get('task_id')}"
+
+        if dry_run:
+            print(f"DRY-RUN cleanup {task.get('task_id')}: {state} would remove worktree={wt_path} branch={branch}")
+            continue
+
+        if wt_path and pathlib.Path(wt_path).exists():
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", wt_path],
+                cwd=repo_path,
+                capture_output=True, text=True, check=False,
+            )
+        subprocess.run(
+            ["git", "branch", "-D", branch],
+            cwd=repo_path,
+            capture_output=True, text=True, check=False,
+        )
+
+        task["cleaned_at"] = now_iso()
+        task["pr_final_state"] = state
+        task["pr_merged_at"] = info.get("mergedAt")
+        task["pr_closed_at"] = info.get("closedAt")
+        write_json_atomic(task_file, task)
+        append_transition(task.get("task_id", "?"), "done", "done",
+                          reason=f"cleanup: {state}")
+        cleaned += 1
+        print(f"cleaned {task.get('task_id')}: {state}")
+
+    return (checked, cleaned, skipped)
 
 
 # --- BRAID template registry -------------------------------------------------
@@ -782,6 +880,9 @@ def main(argv=None):
 
     sub.add_parser("reap")
 
+    p_clean = sub.add_parser("cleanup-worktrees")
+    p_clean.add_argument("--dry-run", action="store_true")
+
     p_rep = sub.add_parser("report")
     p_rep.add_argument("kind", default="morning", nargs="?")
 
@@ -836,6 +937,9 @@ def main(argv=None):
     elif args.cmd == "reap":
         n = reap()
         print(f"reaped {n}")
+    elif args.cmd == "cleanup-worktrees":
+        checked, cleaned, skipped = cleanup_worktrees(dry_run=args.dry_run)
+        print(f"cleanup: {checked} checked, {cleaned} cleaned, {skipped} skipped")
     elif args.cmd == "report":
         print(report(args.kind))
     elif args.cmd == "process-telegram":

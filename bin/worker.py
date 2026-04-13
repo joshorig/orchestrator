@@ -321,6 +321,66 @@ def push_worktree_branch(target, project, worktree, branch, log_path):
     return (True, "ok", sha, commit_count, o.now_iso())
 
 
+def create_pr(target, project, branch, pr_body_path, log_path):
+    """Open a GitHub PR for the pushed agent branch via `gh pr create`.
+
+    Returns (ok, reason, pr_url, pr_number). Non-fatal on failure — the
+    caller records pr_create_failure on the target and still marks it done
+    because smoke + push both succeeded; a human can open the PR manually
+    from the written pr-body.md.
+    """
+    if shutil.which("gh") is None:
+        return (False, "gh CLI not installed", None, None)
+    if not pr_body_path or not pathlib.Path(pr_body_path).exists():
+        return (False, "pr-body missing", None, None)
+    if branch == "main" or branch.endswith("/main"):
+        return (False, "refuse to open PR against main branch", None, None)
+
+    title = (target.get("summary") or target.get("task_id") or "agent change").splitlines()[0]
+    if len(title) > 120:
+        title = title[:117] + "..."
+
+    cmd = [
+        "gh", "pr", "create",
+        "--head", branch,
+        "--base", "main",
+        "--title", title,
+        "--body-file", str(pr_body_path),
+    ]
+    try:
+        proc = subprocess.run(
+            cmd, cwd=project["path"],
+            capture_output=True, text=True, timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        return (False, "gh pr create timeout", None, None)
+
+    if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip()[:400]
+        return (False, f"gh pr create failed: {stderr}", None, None)
+
+    stdout = (proc.stdout or "").strip()
+    pr_url = None
+    for line in reversed(stdout.splitlines()):
+        line = line.strip()
+        if line.startswith("http"):
+            pr_url = line
+            break
+    pr_number = None
+    if pr_url:
+        m = re.search(r"/pull/(\d+)", pr_url)
+        if m:
+            pr_number = int(m.group(1))
+
+    try:
+        with open(log_path, "a") as f:
+            f.write(f"\n# PR OPENED: {pr_url or stdout}\n")
+    except Exception:
+        pass
+
+    return (True, "ok", pr_url, pr_number)
+
+
 # --- memory context ---------------------------------------------------------
 
 def read_memory_context(project_path):
@@ -1244,6 +1304,24 @@ def run_qa_slot(task, cfg):
                             "push_commit_count": ccount,
                             "push_branch": f"agent/{target_id}",
                         }
+                        # Pattern C: also open the PR via gh.
+                        try:
+                            pr_ok, pr_reason, pr_url, pr_number = create_pr(
+                                target=target, project=project,
+                                branch=f"agent/{target_id}",
+                                pr_body_path=pr_body_path,
+                                log_path=log_path,
+                            )
+                        except Exception as exc:
+                            pr_ok, pr_reason = False, f"create_pr crashed: {exc}"
+                            pr_url, pr_number = None, None
+                            log(f"create_pr crashed: {exc}")
+                        if pr_ok:
+                            pushed_info["pr_url"] = pr_url
+                            pushed_info["pr_number"] = pr_number
+                            pushed_info["pr_created_at"] = o.now_iso()
+                        else:
+                            pushed_info["pr_create_failure"] = pr_reason
                     else:
                         push_failure = reason
 

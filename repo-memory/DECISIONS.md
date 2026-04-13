@@ -11,6 +11,28 @@ _Architectural decisions with enough context that a future agent can tell whethe
 
 ---
 
+## 2026-04-13 — Upgrade pattern B → pattern C: worker opens the PR + worktree cleanup
+
+**Context:** Pattern B (the earlier decision below) committed + pushed `agent/<task_id>` but required a human to still run `gh pr create` by hand. That removed the biggest source of delivery friction but left two gaps: (1) a human still had to type the PR creation step, meaning the feedback loop from agent → reviewable PR was not fully automated, and (2) nothing cleaned up worktrees after PRs resolved — every merged/closed PR left a stale `worktrees/<repo>/<task_id>/` + local `agent/<task_id>` branch, which would accumulate without bound.
+
+**Decision:** Two coordinated changes:
+
+1. **Worker opens the PR.** `bin/worker.py` gains a `create_pr(target, project, branch, pr_body_path, log_path)` helper that runs `gh pr create --head agent/<task_id> --base main --title <summary> --body-file <pr_body_path>` from the project's canonical repo path. It runs immediately after a successful push (not as a separate task). Success stamps `pr_url`, `pr_number`, `pr_created_at` on the target task. Failure stamps `pr_create_failure=<reason>` but keeps the target in `done/` because smoke + push both succeeded — a human can still open the PR manually from the already-written `pr-body.md`. `gh` not installed, `gh auth` broken, and duplicate-PR errors all fall into this graceful path.
+2. **Periodic worktree cleanup.** `bin/orchestrator.py` gains a `cleanup_worktrees(dry_run=False)` function plus a `cleanup-worktrees` CLI subcommand. It walks `queue/done/` for tasks with `pr_number` set and no `cleaned_at`, queries `gh pr view <n> --json state,mergedAt,closedAt` in the project repo, and on MERGED or CLOSED removes the worktree via `git worktree remove --force` and deletes the local branch via `git branch -D`. The task JSON stays in `done/`; we stamp `cleaned_at`, `pr_final_state`, `pr_merged_at`, `pr_closed_at` in place. A new launchd plist `com.devmini.orchestrator.cleanup-worktrees` runs this hourly.
+
+**Scope boundaries (explicit non-goals):**
+
+- **Remote branches are not deleted.** GitHub's per-repo "Delete branch on merge" setting (or a human's one-click delete on close) is the source of truth. Cleaning remote refs from the agent's side would race with users and would also require a higher GitHub token scope than we want the orchestrator to hold.
+- **No auto-merge.** Pattern D (the agent merging its own PR) stays out of scope until we have observation time on pattern C. Merge is still a human action.
+- **Failed tasks are not cleaned.** Target tasks in `failed/` have their worktrees preserved by policy — a human may want to salvage state before anything is removed.
+- **Cleanup is idempotent** by the `cleaned_at` check, so a failed mid-run (e.g. `git worktree remove` crashes) can be retried safely on the next tick.
+
+**Consequences:** The orchestrator now has a full closed loop for deliverable changes: codex produces a branch, smoke gates it, reviewer approves it, QA pushes + PRs it with a `@codex` mention, and when a human merges or closes, cleanup harvests the local state within an hour. Pass-1 delivery latency drops from "manual forever" to "~3600s after a human decision". The `cleaned_at` stamp gives us a simple audit trail — `queue/done/` retains every task file as a historical record, with cleanup visible via a field rather than a file move. Rules out silent state drift from accumulated worktrees on a 16GB M4; `/Volumes/devssd/worktrees/` bloat is bounded by the PR decision latency rather than the task count. Also rules out race conditions between the orchestrator and a human manually cleaning up — `git worktree remove` and `git branch -D` are idempotent and both tolerate absence.
+
+**Known gap caught during rollout:** `gh auth status` reported an invalid token for account `joshorig` when this landed. The code handles it gracefully (PR create fails, target stays `done` with `pr_create_failure`, pr-body.md is still written for a human fallback), but until `gh auth login -h github.com` is re-run, pattern C effectively degrades to pattern B. This is documented so the next person is not surprised that `pr_url` is null on otherwise-successful tasks.
+
+---
+
 ## 2026-04-13 — Pattern B delivery: always-on pr-body artifact + opt-in auto-push
 
 **Context:** Before this change the orchestrator had zero delivery path out of the worktree. Codex produced a branch inside `worktrees/<repo>/<task_id>/`, smoke ran against it, a reviewer approved it, and then nothing happened — no commit back to origin, no PR, no signal to a human that the change was ready. Four delivery patterns were considered (fully manual; worker auto-commit + push with human PR; worker opens the PR via `gh`; auto-merge on green). Pattern B was chosen as the prototype: strictly bounded (human stays in the loop for PR creation), but removes the "nothing happens" dead-end that made pass-1 useless for actual shipping.
