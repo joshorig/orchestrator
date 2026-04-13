@@ -11,6 +11,21 @@ _Architectural decisions with enough context that a future agent can tell whethe
 
 ---
 
+## 2026-04-13 — Feature-branch delivery model + 6-slot codex fleet
+
+**Context:** Pattern C shipped tiny PRs one task at a time. Planner bundles logically-related tasks into a feature. Execution fanout was 1 codex slot.
+
+**Decision:**
+
+- `planner.create_feature()` stays header-only; the first worker lazily creates `feature/<id>`
+- codex tasks inherit `feature_id`; `atomic_claim()` serializes siblings within a feature
+- task PRs target `feature/<id>` and auto-merge there when mergeable and approved
+- `pr-sweep` addresses review comments via the `pr-address-feedback` BRAID graph
+- `feature-finalize` opens the feature->main PR for human review only
+- codex capacity scales from 1 slot to a 6-slot global fleet
+
+**Consequences:** Locks in `feature_id` on every codex task, per-feature serialization in `atomic_claim`, and human review at feature granularity. Rules out per-task human review, auto-merge to `main`, and remote branch deletion from the orchestrator side. Known gaps: degraded `gh auth` still causes `pr-sweep`/`feature-finalize` to skip, and the first autonomous PR-feedback run depends on the `pr-address-feedback` template being present.
+
 ## 2026-04-13 — Upgrade pattern B → pattern C: worker opens the PR + worktree cleanup
 
 **Context:** Pattern B (the earlier decision below) committed + pushed `agent/<task_id>` but required a human to still run `gh pr create` by hand. That removed the biggest source of delivery friction but left two gaps: (1) a human still had to type the PR creation step, meaning the feedback loop from agent → reviewable PR was not fully automated, and (2) nothing cleaned up worktrees after PRs resolved — every merged/closed PR left a stale `worktrees/<repo>/<task_id>/` + local `agent/<task_id>` branch, which would accumulate without bound.

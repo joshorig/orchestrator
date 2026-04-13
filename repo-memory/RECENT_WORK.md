@@ -4,6 +4,8 @@ _Append-only log. New entries go at the top. One entry per completed task or mil
 
 ---
 
+2026-04-13 — feature-branch delivery model + 6-slot codex fleet landed (phases 1-5).
+
 ## 2026-04-13 — Pass-2 first item: BRAID pre-flight CheckBaseline + topology-error whitelist
 
 **Summary:** Closed the #30 misdiagnosis class at both the graph level and the worker level. Highest-leverage pass-2 item per the plan's "Out of scope for pass 1" list.

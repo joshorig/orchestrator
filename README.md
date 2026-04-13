@@ -24,7 +24,10 @@ python3 bin/orchestrator.py qa
 # rescue: sweep stale claims (dead pids) back to queued
 python3 bin/orchestrator.py reap
 
-# delivery hygiene: remove worktrees for merged/closed PRs
+# delivery ticks + hygiene
+python3 bin/orchestrator.py features [--status open]
+python3 bin/orchestrator.py pr-sweep [--dry-run]
+python3 bin/orchestrator.py feature-finalize [--dry-run]
 python3 bin/orchestrator.py cleanup-worktrees [--dry-run]
 
 # generate a status report (also pushed via telegram bot when running)
@@ -70,56 +73,55 @@ Seeded task types (pass 1, lvc-standard only):
 | `lvc-historian-update` | Append an entry to `repo-memory/RECENT_WORK.md` | codex |
 | `lvc-reviewer-pass` | Architectural + doc-drift review of a worktree diff | codex (small graph, still benefits from structure) |
 
-## Delivery (worktrees → origin → PR → cleanup)
+## Delivery (feature branches → task PRs → feature PR → human)
 
-Codex executes inside a dedicated branch `agent/<task_id>` in an isolated worktree. On a clean smoke-pass the QA worker always emits a **PR body artifact**, and — if the project opts in — pushes the branch to origin and opens a PR via `gh`. A periodic sweep cleans up worktrees whose PRs have been merged or closed.
+Codex still executes inside isolated `agent/<task_id>` worktrees, but delivery now happens in two stages: each task PR targets a shared `feature/<id>` branch, then a single feature PR targets `main` once every child task has landed. `pr-sweep` only auto-merges PRs whose base starts with `feature/`; feature PRs remain human-reviewed and human-merged.
 
-### 1. PR body artifact (always written)
+### 1. Planner emits feature sets
 
-Path: `artifacts/<target_task_id>/pr-body.md`. Contents:
+Each planner tick creates a feature record under `state/features/<feature_id>.json` and binds emitted codex slices to that `feature_id`. The git branch itself is lazy-created by the first codex worker that needs it. Feature records track `child_task_ids`, `status`, and the eventual `final_pr_number` / `final_pr_url`.
 
-- `@codex please review this change.` ping on line 1 so GitHub's codex review fires automatically on PR open
-- Task id, summary, parent, branch name
-- BRAID template + hash + reviewer verdict
-- `git log main..HEAD` commit list and `git diff main --stat`
-- Last 40 lines of the smoke log (`logs/<driver_task_id>.log`)
-- A ready-to-paste `gh pr create --body-file ...` command as a human fallback
+### 2. Codex task PRs target `feature/<id>`
 
-Deterministic from task state — no LLM in the loop.
+On smoke pass the QA worker always writes `artifacts/<task_id>/pr-body.md`, runs the existing secret scan, uses the distinct `devmini-orchestrator <devmini-orchestrator@joshorig.com>` commit identity, and if `auto_push` is enabled pushes `agent/<task_id>` plus opens:
 
-### 2. Auto-push + auto-PR (opt-in per project)
+```bash
+gh pr create --head agent/<task_id> --base feature/<id> --title "<summary>" --body-file artifacts/<task_id>/pr-body.md
+```
 
-Set `"auto_push": true` on a project entry in `config/orchestrator.json`. On smoke pass the worker will:
+The PR body still carries the `@codex` mention, BRAID provenance, diff stat, smoke log tail, and a manual fallback command. Task JSON is stamped with `push_base_branch`, `push_branch`, `pr_number`, and `pr_url` when the PR opens.
 
-1. **Secret scan** over the full `git diff main` + staged + unstaged diff. Any hit (patterns for `.env`, `telegram.json`, `credentials.json`, `BEGIN ... PRIVATE KEY`, `ghp_`/`ghs_`, `xoxb-`, `sk-...`, `AKIA...`) aborts delivery and transitions the target task to `failed/` with `push_failure` set. The worktree is left intact for human inspection.
-2. **Auto-commit** any remaining uncommitted changes under a distinct identity (`devmini-orchestrator <devmini-orchestrator@joshorig.com>`) — separate from the human's git identity so automated commits are traceable via `git log --author`.
-3. **Push** `agent/<task_id>` to origin. Never pushes `main`.
-4. **Open the PR** via `gh pr create --head agent/<task_id> --base main --title <summary> --body-file artifacts/<task_id>/pr-body.md`.
+### 3. Auto-merge to feature branch when green
 
-Task state on success: target → `done` with `pushed_at`, `push_commit_sha`, `push_commit_count`, `push_branch`, `pr_body_path`, `pr_url`, `pr_number`, `pr_created_at`. The driver QA task always → `done` because its script succeeded.
+`python3 bin/orchestrator.py pr-sweep [--dry-run]` polls open task PRs from `queue/done/`. When a PR is mergeable, approved, free of actionable comments, and its base ref starts with `feature/`, `pr-sweep` runs `gh pr merge --squash --delete-branch`. It never auto-merges a PR whose base is `main`.
 
-Failures:
+On `gh` auth problems or HTTP 401s, the sweep logs and skips without mutating task or feature state.
 
-| Failure stage | Target state | Fields set | Notes |
-|---|---|---|---|
-| secret scan hit | `failed` | `push_failure=secret-scan hit: <labels>` | worktree preserved |
-| `git push` error | `failed` | `push_failure=<git stderr>` | worktree preserved |
-| `gh pr create` error | `done` | `pr_create_failure=<reason>` | push succeeded; human opens PR from pr-body.md |
-| `gh` not installed or unauthenticated | `done` | `pr_create_failure=...` | same as above |
+### 4. pr-sweep addresses PR feedback autonomously
 
-Defaults: `auto_push: false` on all three projects. Opt in per project when you're ready to let the agent touch origin.
+When a task PR on a feature branch has conflicts or actionable review comments, `pr-sweep` enqueues a codex `pr-address-feedback` slice bound to the same `feature_id`. That BRAID graph handles rebases, review-comment edits, and follow-up pushes without human intervention unless the configured feedback-round ceiling is exhausted.
 
-### 3. Worktree cleanup on PR resolution
+### 5. feature-finalize opens the feature->main PR
 
-`orchestrator.py cleanup-worktrees` scans `queue/done/` for tasks that have a `pr_number` and no `cleaned_at`, queries `gh pr view <n> --json state,mergedAt,closedAt` in the project's canonical repo, and on **MERGED** or **CLOSED**:
+`python3 bin/orchestrator.py feature-finalize [--dry-run]` scans open features and waits until every child task is:
 
-- Removes the worktree via `git worktree remove --force <path>`
-- Deletes the local branch via `git branch -D agent/<task_id>`
-- Stamps `cleaned_at`, `pr_final_state`, `pr_merged_at`, `pr_closed_at` on the task JSON in place (task stays in `done/`)
+- in `queue/done/`
+- stamped with `cleaned_at`
+- stamped with `pr_final_state=MERGED`
 
-Remote branches are **not** touched — GitHub's per-repo "Delete branch on merge" setting (or the human's one-click delete on close) owns remote cleanup.
+Once ready, it aggregates the child PR evidence into `artifacts/<feature_id>/final-pr-body.md`, confirms `feature/<id>` exists on origin, and opens:
 
-Run it yourself anytime: `python3 bin/orchestrator.py cleanup-worktrees [--dry-run]`. A launchd plist (`com.devmini.orchestrator.cleanup-worktrees`) runs it hourly.
+```bash
+gh pr create --base main --head feature/<id> --title "<feature summary>" --body-file artifacts/<feature_id>/final-pr-body.md
+```
+
+This PR is for human review only. The orchestrator never calls `gh pr merge` on a feature PR.
+
+### 6. Cleanup on feature merge
+
+`python3 bin/orchestrator.py cleanup-worktrees [--dry-run]` still removes task worktrees and local `agent/<task_id>` branches once task PRs are merged or closed. It also watches features in `finalizing`: when the feature PR is merged it deletes the local `feature/<id>` branch and stamps the feature `merged`; when the feature PR is closed without merge it stamps the feature `abandoned`.
+
+Remote branches are never deleted from the orchestrator side. GitHub settings or humans own remote cleanup.
 
 ## Directory layout
 
@@ -177,11 +179,14 @@ The orchestrator is launchd-driven. All plists live in `~/Library/LaunchAgents/c
 
 | Plist | Cadence | Purpose |
 |---|---|---|
-| `worker.claude` / `worker.codex` / `worker.qa` | KeepAlive + ThrottleInterval | One task per run |
+| `worker.claude` / `worker.qa` | KeepAlive + ThrottleInterval | One task per run |
+| `worker.codex-{1..6}` | KeepAlive + ThrottleInterval=15 | 6-slot codex fleet |
 | `planner` | StartInterval=180s | Enqueues per-project planner ticks |
 | `reviewer` | StartInterval=300s | Promotes `awaiting_review` tasks |
 | `qa-scheduler` | StartInterval=900s | Promotes `awaiting_qa` tasks |
 | `reaper` | StartInterval=60s | Recovers stale claims |
+| `pr-sweep` | StartInterval=600 | Auto-merge task PRs into feature branches + address PR feedback |
+| `feature-finalize` | StartInterval=600 | Opens feature->main PRs |
 | `cleanup-worktrees` | StartInterval=3600s | Removes worktrees + local branches for merged/closed PRs |
 | `regression` | Weekly (lvc-standard) | Full JMH sweep under exclusive project lock |
 | `telegram-bot` | KeepAlive | Real bot, long-polling, allowlist-gated |

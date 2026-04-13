@@ -47,7 +47,85 @@ def log(msg):
 
 # --- git worktree management ------------------------------------------------
 
-def make_worktree(project_path, task_id):
+def base_branch_for_task(task):
+    """Return the branch name agent work should be based on.
+
+    Tasks with a feature_id base their agent branch on `feature/<id>` so that
+    sibling slices of the same feature compose on a shared integration branch.
+    Tasks without a feature_id (historian, one-off manual runs) base on main.
+    """
+    fid = task.get("feature_id") if task else None
+    return f"feature/{fid}" if fid else "main"
+
+
+def ensure_feature_branch(project_path, feature_branch):
+    """Create `feature_branch` locally + on origin if it doesn't already exist.
+
+    Idempotent. Safe to call repeatedly — the first caller creates the branch,
+    subsequent callers observe it already present and return. Uses origin/main
+    as the starting point so every feature branch begins from the current
+    trunk HEAD at the moment of first use.
+
+    Returns True if the branch was newly created, False if it already existed.
+    """
+    # Fast path: branch already present locally.
+    probe = subprocess.run(
+        ["git", "-C", project_path, "rev-parse", "--verify", "--quiet", feature_branch],
+        capture_output=True, text=True,
+    )
+    if probe.returncode == 0:
+        return False
+
+    # Fetch origin so we can check + start from a fresh main.
+    subprocess.run(
+        ["git", "-C", project_path, "fetch", "origin", "main",
+         f"+refs/heads/{feature_branch}:refs/remotes/origin/{feature_branch}"],
+        capture_output=True, text=True,
+    )
+    # If origin already has the branch, track it locally and return.
+    remote_probe = subprocess.run(
+        ["git", "-C", project_path, "rev-parse", "--verify", "--quiet",
+         f"refs/remotes/origin/{feature_branch}"],
+        capture_output=True, text=True,
+    )
+    if remote_probe.returncode == 0:
+        subprocess.run(
+            ["git", "-C", project_path, "branch", feature_branch,
+             f"origin/{feature_branch}"],
+            capture_output=True, text=True, check=False,
+        )
+        return False
+
+    # Create the branch locally off origin/main and push it to origin so sibling
+    # worktrees can fetch it. Use the agent git identity for the push.
+    create = subprocess.run(
+        ["git", "-C", project_path, "branch", feature_branch, "origin/main"],
+        capture_output=True, text=True,
+    )
+    if create.returncode != 0:
+        raise RuntimeError(
+            f"failed to create feature branch {feature_branch}: {create.stderr.strip()}"
+        )
+    push = subprocess.run(
+        ["git", "-C", project_path, *AGENT_GIT_IDENTITY,
+         "push", "-u", "origin", feature_branch],
+        capture_output=True, text=True, timeout=120,
+    )
+    if push.returncode != 0:
+        # Non-fatal: the branch exists locally and codex can still work on it.
+        # A later slice or the finalize step will retry the push.
+        log(f"ensure_feature_branch: push {feature_branch} failed: {push.stderr.strip()[:200]}")
+    return True
+
+
+def make_worktree(project_path, task_id, base_branch="main"):
+    """Create an isolated worktree + agent branch rooted at base_branch.
+
+    Returns (wt_path, agent_branch, base_branch). The base_branch is returned
+    so downstream helpers (push, pr-body, create_pr) can target the same ref
+    the agent branched from — critical when the base is a feature branch that
+    may advance between slices.
+    """
     WORKTREES_ROOT.mkdir(parents=True, exist_ok=True)
     repo_name = pathlib.Path(project_path).name
     wt_root = WORKTREES_ROOT / repo_name
@@ -55,13 +133,13 @@ def make_worktree(project_path, task_id):
     wt_path = wt_root / task_id
     branch = f"agent/{task_id}"
     subprocess.run(
-        ["git", "worktree", "add", str(wt_path), "-b", branch],
+        ["git", "worktree", "add", str(wt_path), "-b", branch, base_branch],
         cwd=project_path,
         check=True,
         capture_output=True,
         text=True,
     )
-    return wt_path, branch
+    return wt_path, branch, base_branch
 
 
 def remove_worktree(project_path, wt_path, branch):
@@ -143,11 +221,16 @@ def _git_agent(worktree, *args, check=False, timeout=60):
     )
 
 
-def write_pr_body(target, project, qa_log_path, driver_task_id):
+def write_pr_body(target, project, qa_log_path, driver_task_id, base_branch="main"):
     """Write artifacts/<target_id>/pr-body.md with PR-ready evidence.
 
     Always called on smoke pass, independent of auto_push. Returns the written
     path or None on failure (non-fatal).
+
+    base_branch: the git ref this work was based on. Typically "main" for
+    one-off tasks, or `feature/<id>` for slices of a feature. All diff/log
+    computations target this ref so the evidence reflects exactly what the
+    PR will show.
     """
     target_id = target.get("task_id", "unknown")
     wt = target.get("worktree")
@@ -159,11 +242,11 @@ def write_pr_body(target, project, qa_log_path, driver_task_id):
     out_path = art_dir / "pr-body.md"
 
     branch = f"agent/{target_id}"
-    diff_stat = _git(wt, "diff", "main", "--stat").stdout.strip()
-    commit_log = _git(wt, "log", "main..HEAD", "--pretty=format:- %h %s").stdout.strip()
+    diff_stat = _git(wt, "diff", base_branch, "--stat").stdout.strip()
+    commit_log = _git(wt, "log", f"{base_branch}..HEAD", "--pretty=format:- %h %s").stdout.strip()
     if not commit_log:
         commit_log = "(no commits yet — pending auto-commit on push)"
-    changed_files = _git(wt, "diff", "main", "--name-only").stdout.strip() or "(no changes vs main)"
+    changed_files = _git(wt, "diff", base_branch, "--name-only").stdout.strip() or f"(no changes vs {base_branch})"
 
     log_tail = ""
     try:
@@ -194,6 +277,7 @@ def write_pr_body(target, project, qa_log_path, driver_task_id):
 - **Project:** `{project['name']}`
 - **Parent:** `{parent}`
 - **Branch:** `{branch}`
+- **Base:** `{base_branch}`
 - **Summary:** {target.get('summary', '(no summary)')}
 
 ## BRAID provenance
@@ -214,7 +298,7 @@ def write_pr_body(target, project, qa_log_path, driver_task_id):
 
 {commit_log}
 
-### Diff stat vs main
+### Diff stat vs {base_branch}
 
 ```
 {diff_stat or '(empty)'}
@@ -235,7 +319,7 @@ Full log: `{qa_log_path}`
 
 ```
 gh -R <owner>/{pathlib.Path(project['path']).name} pr create \\
-  --head {branch} --base main \\
+  --head {branch} --base {base_branch} \\
   --title {shlex.quote(target.get('summary', target_id))} \\
   --body-file {out_path}
 ```
@@ -244,7 +328,7 @@ gh -R <owner>/{pathlib.Path(project['path']).name} pr create \\
     return out_path
 
 
-def push_worktree_branch(target, project, worktree, branch, log_path):
+def push_worktree_branch(target, project, worktree, branch, log_path, base_branch="main"):
     """Commit any pending worktree changes and push the branch to origin.
 
     Returns (ok: bool, reason: str, commit_sha: str|None,
@@ -252,9 +336,13 @@ def push_worktree_branch(target, project, worktree, branch, log_path):
 
     Safety gates:
       - never pushes `main`
-      - aborts if `git diff main` hits secret patterns
+      - aborts if `git diff <base_branch>` hits secret patterns
       - uses a distinct `devmini-orchestrator` commit identity
       - leaves the worktree intact on failure for human inspection
+
+    base_branch: the ref the agent branch was created from. Used for the
+    secret-scan diff and the ahead-count check. Typically "main" or
+    "feature/<id>".
     """
     if branch == "main" or branch.endswith("/main"):
         return (False, "refuse to push main", None, 0, None)
@@ -263,8 +351,8 @@ def push_worktree_branch(target, project, worktree, branch, log_path):
     if not wt.exists():
         return (False, "worktree missing", None, 0, None)
 
-    # Secret scan: look at the full diff vs main AND staged-but-uncommitted.
-    full_diff = _git(wt, "diff", "main").stdout or ""
+    # Secret scan: look at the full diff vs base_branch AND staged-but-uncommitted.
+    full_diff = _git(wt, "diff", base_branch).stdout or ""
     staged = _git(wt, "diff", "--cached").stdout or ""
     unstaged = _git(wt, "diff").stdout or ""
     combined = full_diff + "\n" + staged + "\n" + unstaged
@@ -275,7 +363,7 @@ def push_worktree_branch(target, project, worktree, branch, log_path):
             with open(log_path, "a") as f:
                 f.write(f"\n# PUSH ABORTED: secret-scan hit ({labels})\n")
                 for label, snippet in hits[:8]:
-                    f.write(f"#   {label}: …{snippet}…\n")
+                    f.write(f"#   {label}: ...{snippet}...\n")
         except Exception:
             pass
         return (False, f"secret-scan hit: {labels}", None, 0, None)
@@ -293,14 +381,14 @@ def push_worktree_branch(target, project, worktree, branch, log_path):
         if commit.returncode != 0:
             return (False, f"git commit failed: {commit.stderr.strip()}", None, 0, None)
 
-    # Any commits on branch ahead of main?
-    count_proc = _git(wt, "rev-list", "--count", "main..HEAD")
+    # Any commits on branch ahead of base?
+    count_proc = _git(wt, "rev-list", "--count", f"{base_branch}..HEAD")
     try:
         commit_count = int((count_proc.stdout or "0").strip() or "0")
     except ValueError:
         commit_count = 0
     if commit_count == 0:
-        return (False, "no commits ahead of main", None, 0, None)
+        return (False, f"no commits ahead of {base_branch}", None, 0, None)
 
     sha = _git(wt, "rev-parse", "HEAD").stdout.strip() or None
 
@@ -310,7 +398,7 @@ def push_worktree_branch(target, project, worktree, branch, log_path):
 
     try:
         with open(log_path, "a") as f:
-            f.write(f"\n# PUSHED {branch} @ {sha} ({commit_count} commit{'s' if commit_count != 1 else ''})\n")
+            f.write(f"\n# PUSHED {branch} @ {sha} ({commit_count} commit{'s' if commit_count != 1 else ''}) base={base_branch}\n")
             if push.stdout:
                 f.write(push.stdout)
             if push.stderr:
@@ -321,13 +409,18 @@ def push_worktree_branch(target, project, worktree, branch, log_path):
     return (True, "ok", sha, commit_count, o.now_iso())
 
 
-def create_pr(target, project, branch, pr_body_path, log_path):
+def create_pr(target, project, branch, pr_body_path, log_path, base_branch="main"):
     """Open a GitHub PR for the pushed agent branch via `gh pr create`.
 
     Returns (ok, reason, pr_url, pr_number). Non-fatal on failure — the
     caller records pr_create_failure on the target and still marks it done
     because smoke + push both succeeded; a human can open the PR manually
     from the written pr-body.md.
+
+    base_branch: the PR target branch. "main" for one-off tasks, or
+    "feature/<id>" for slices of a feature. Human review happens at the
+    feature->main PR; task->feature PRs are auto-merged by pr-sweep once
+    smoke + reviewer + comments are green (phase 3).
     """
     if shutil.which("gh") is None:
         return (False, "gh CLI not installed", None, None)
@@ -335,6 +428,8 @@ def create_pr(target, project, branch, pr_body_path, log_path):
         return (False, "pr-body missing", None, None)
     if branch == "main" or branch.endswith("/main"):
         return (False, "refuse to open PR against main branch", None, None)
+    if branch == base_branch:
+        return (False, f"head == base ({branch})", None, None)
 
     title = (target.get("summary") or target.get("task_id") or "agent change").splitlines()[0]
     if len(title) > 120:
@@ -343,7 +438,7 @@ def create_pr(target, project, branch, pr_body_path, log_path):
     cmd = [
         "gh", "pr", "create",
         "--head", branch,
-        "--base", "main",
+        "--base", base_branch,
         "--title", title,
         "--body-file", str(pr_body_path),
     ]
@@ -700,6 +795,8 @@ def run_claude_planner(task, cfg, timeout, log_path):
         "lvc-historian-update": "historian",
     }
 
+    feature_id = task.get("feature_id")
+
     enqueued = []
     dropped = []
     for s in slices[:3]:
@@ -720,9 +817,15 @@ def run_claude_planner(task, cfg, timeout, log_path):
             source=f"slice-of:{task_id}",
             braid_template=raw_tpl,
             parent_task_id=task_id,
+            feature_id=feature_id,
         )
         o.enqueue_task(child)
         enqueued.append(child["task_id"])
+        if feature_id:
+            try:
+                o.append_feature_child(feature_id, child["task_id"])
+            except FileNotFoundError:
+                pass  # feature record lost; child still lives as orphan
 
     if dropped:
         with log_path.open("a") as logf:
@@ -777,20 +880,21 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
 
     # Pull diff from the target's worktree (capped to keep prompt bounded).
     target_wt = target.get("worktree")
+    target_base = target.get("base_branch") or base_branch_for_task(target)
     diff_text = "(no worktree available)"
     if target_wt and pathlib.Path(target_wt).exists():
         try:
             stat = subprocess.run(
-                ["git", "-C", target_wt, "diff", "main", "--stat"],
+                ["git", "-C", target_wt, "diff", target_base, "--stat"],
                 capture_output=True, text=True, timeout=30,
             ).stdout
             body = subprocess.run(
-                ["git", "-C", target_wt, "diff", "main"],
+                ["git", "-C", target_wt, "diff", target_base],
                 capture_output=True, text=True, timeout=30,
             ).stdout
             if len(body) > 30000:
                 body = body[:30000] + "\n\n[...diff truncated at 30k chars...]\n"
-            diff_text = (stat + "\n\n" + body).strip() or "(empty diff vs main)"
+            diff_text = (stat + "\n\n" + body).strip() or f"(empty diff vs {target_base})"
         except subprocess.TimeoutExpired:
             diff_text = "(git diff timed out)"
 
@@ -892,11 +996,312 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
                 reason=f"reviewed {target_id} -> {verdict}", mutator=mut_self)
 
 
+# --- pr-feedback handler ----------------------------------------------------
+#
+# pr-feedback is a codex-engine task created by orchestrator.pr_sweep when an
+# open task PR needs maintenance — either a merge conflict with its feature
+# base or new actionable review comments. The handler re-uses the target
+# task's existing worktree (no fresh make_worktree), loads the
+# `pr-address-feedback` BRAID graph, hands codex the comments + conflict flag
+# + diff, and relies on the graph to walk codex through rebase -> fix ->
+# commit. On BRAID_OK the worker re-runs smoke.sh inside the worktree and, if
+# green, force-pushes the agent branch with --force-with-lease.
+#
+# The target task stays in queue/done/ the whole time — its pr_sweep.* fields
+# track the iteration count, last-applied sha, and handled comment ids so the
+# next pr-sweep tick knows what has already been addressed.
+
+def build_pr_feedback_prompt(*, target, graph_body, base_branch, conflicts, comments, pr_number):
+    comment_blocks = []
+    for i, c in enumerate(comments or [], 1):
+        comment_blocks.append(
+            f"### Comment {i} by @{c.get('author','?')} at {c.get('created_at','?')}\n"
+            f"{c.get('body','').strip()}"
+        )
+    comments_text = "\n\n".join(comment_blocks) or "(no review comments — rebase-only run)"
+
+    header = (
+        f"PR #{pr_number} for target {target.get('task_id')} needs maintenance.\n"
+        f"Original summary: {target.get('summary','(no summary)')}\n"
+        f"Base branch: {base_branch}\n"
+        f"Conflicts with base: {conflicts}\n"
+    )
+
+    return (
+        "[BRAID REASONING GRAPH — traverse deterministically. If you cannot, "
+        "emit exactly one line `BRAID_TOPOLOGY_ERROR: <reason>` as the final line and stop.]\n\n"
+        f"{graph_body}\n\n"
+        "[END BRAID GRAPH]\n\n"
+        f"[PR FEEDBACK CONTEXT]\n{header}\n\n"
+        "[REVIEW COMMENTS TO ADDRESS]\n"
+        f"{comments_text}\n\n"
+        "[ACTIONS YOU CAN TAKE]\n"
+        f"- You are inside the target worktree on branch agent/{target.get('task_id')}.\n"
+        f"- The base branch `{base_branch}` has already been fetched from origin.\n"
+        f"- If there are conflicts, rebase onto origin/{base_branch} and resolve them.\n"
+        "- Apply fixes requested by the review comments.\n"
+        "- Commit your changes using the existing agent git identity if needed.\n"
+        "- Do NOT push — worker.py will re-run smoke and push with --force-with-lease "
+        "after it validates your work.\n\n"
+        "[OUTPUT CONTRACT]\n"
+        "Emit exactly one of these as the final line of your response:\n"
+        "  BRAID_OK: <one-line summary of what you did>\n"
+        "  BRAID_TOPOLOGY_ERROR: <reason the graph could not be traversed>\n"
+    )
+
+
+def run_pr_feedback_task(task, cfg):
+    task_id = task["task_id"]
+    eargs = task.get("engine_args") or {}
+    target_id = eargs.get("target_task_id")
+    pr_number = eargs.get("pr_number")
+    conflicts = bool(eargs.get("conflicts", False))
+    comments = eargs.get("comments") or []
+    base_branch = eargs.get("base_branch") or "main"
+
+    log_path = o.LOGS_DIR / f"{task_id}.log"
+    o.LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+    if not target_id:
+        o.move_task(task_id, "claimed", "failed", reason="pr-feedback: missing target_task_id")
+        return
+
+    target_file = o.queue_dir("done") / f"{target_id}.json"
+    target = o.read_json(target_file, None)
+    if target is None:
+        o.move_task(task_id, "claimed", "failed",
+                    reason=f"pr-feedback: target {target_id} not in done/")
+        return
+
+    wt_str = target.get("worktree")
+    if not wt_str or not pathlib.Path(wt_str).exists():
+        o.move_task(task_id, "claimed", "failed",
+                    reason=f"pr-feedback: target worktree missing: {wt_str}")
+        return
+    wt = pathlib.Path(wt_str)
+    agent_branch = f"agent/{target_id}"
+
+    try:
+        project = o.get_project(cfg, task["project"])
+    except KeyError:
+        o.move_task(task_id, "claimed", "failed", reason="pr-feedback: unknown project")
+        return
+
+    bt = task.get("braid_template") or "pr-address-feedback"
+    graph_body, graph_hash = o.braid_template_load(bt)
+    if graph_body is None:
+        if task.get("braid_generate_if_missing", True):
+            regen = o.new_task(
+                role="planner", engine="claude",
+                project=project["name"],
+                summary=f"Generate BRAID template for {bt}",
+                source=f"regen-for:{task_id}",
+                braid_template=bt,
+                engine_args={"mode": "template-gen"},
+            )
+            o.enqueue_task(regen)
+            def mut_block(t):
+                t["topology_error"] = "template_missing"
+            o.move_task(task_id, "claimed", "blocked",
+                        reason="template missing", mutator=mut_block)
+            return
+        o.move_task(task_id, "claimed", "failed",
+                    reason="template missing, regen disabled")
+        return
+
+    lock_fh = None
+    try:
+        lock_fh = acquire_lock(f"{project['name']}.lock", mode="shared", timeout_sec=60)
+
+        # Fetch latest base branch so codex sees a fresh tip when it rebases.
+        _git(wt, "fetch", "origin", base_branch, timeout=120)
+
+        prompt = build_pr_feedback_prompt(
+            target=target, graph_body=graph_body,
+            base_branch=base_branch, conflicts=conflicts, comments=comments,
+            pr_number=pr_number,
+        )
+
+        timeout = eargs.get(
+            "timeout_sec",
+            cfg.get("slots", {}).get("codex", {}).get("timeout_sec", DEFAULT_TIMEOUTS["codex"]),
+        )
+
+        last_msg_path = o.LOGS_DIR / f"{task_id}.last.txt"
+
+        def mut_running(t):
+            t["braid_template_path"] = f"braid/templates/{bt}.mmd"
+            t["braid_template_hash"] = graph_hash
+            t["worktree"] = str(wt)
+            t["base_branch"] = base_branch
+            t["started_at"] = o.now_iso()
+            t["log_path"] = str(log_path)
+        o.move_task(task_id, "claimed", "running",
+                    reason=f"pr-feedback for {target_id}", mutator=mut_running)
+
+        cmd = [
+            "codex", "exec",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--skip-git-repo-check",
+            "-C", str(wt),
+            "--ephemeral",
+            "-o", str(last_msg_path),
+            prompt,
+        ]
+
+        with log_path.open("w") as logf:
+            logf.write(f"# pr-feedback task={task_id} target={target_id} pr=#{pr_number}\n")
+            logf.write(f"# template={bt} hash={graph_hash}\n")
+            logf.write(f"# base_branch={base_branch} conflicts={conflicts}\n")
+            logf.write(f"# comments={len(comments)}\n")
+            logf.write(f"# worktree: {wt}\n\n---\n")
+            logf.flush()
+            try:
+                proc = subprocess.run(
+                    cmd, stdout=logf, stderr=subprocess.STDOUT, text=True, timeout=timeout,
+                )
+            except subprocess.TimeoutExpired:
+                def mut_fail(t):
+                    t["finished_at"] = o.now_iso()
+                    t["failure"] = f"codex timeout {timeout}s"
+                o.move_task(task_id, "running", "failed",
+                            reason=f"pr-feedback timeout {timeout}s", mutator=mut_fail)
+                return
+
+        trailer = ""
+        if last_msg_path.exists():
+            lines = [l.strip() for l in last_msg_path.read_text().splitlines() if l.strip()]
+            for line in reversed(lines[-20:]):
+                if line.startswith("BRAID_OK") or line.startswith("BRAID_TOPOLOGY_ERROR"):
+                    trailer = line
+                    break
+
+        if trailer.startswith("BRAID_TOPOLOGY_ERROR"):
+            if not topology_reason_is_valid(trailer):
+                def mut_false(t):
+                    t["finished_at"] = o.now_iso()
+                    t["false_blocker_claim"] = trailer
+                o.move_task(task_id, "running", "failed",
+                            reason=f"false blocker claim: {trailer[:80]}", mutator=mut_false)
+                return
+            o.braid_template_record_use(bt, topology_error=True)
+            regen = o.new_task(
+                role="planner", engine="claude",
+                project=project["name"],
+                summary=f"Generate BRAID template for {bt}",
+                source=f"regen-for:{task_id}",
+                braid_template=bt,
+                engine_args={"mode": "template-gen"},
+            )
+            o.enqueue_task(regen)
+            def mut_block(t):
+                t["finished_at"] = o.now_iso()
+                t["topology_error"] = trailer
+            o.move_task(task_id, "running", "blocked",
+                        reason=trailer[:80], mutator=mut_block)
+            return
+
+        if not trailer.startswith("BRAID_OK"):
+            def mut_fail(t):
+                t["finished_at"] = o.now_iso()
+            o.move_task(task_id, "running", "failed",
+                        reason=f"pr-feedback no BRAID trailer (exit {proc.returncode})",
+                        mutator=mut_fail)
+            return
+
+        # Re-run smoke inside the worktree. Same invocation shape as run_qa_slot:
+        # bash <canonical-smoke.sh> with REPO_ROOT=<worktree> so we use the latest
+        # smoke script against the worktree's code.
+        qa_cfg = project.get("qa") or {}
+        smoke_rel = qa_cfg.get("smoke")
+        if not smoke_rel:
+            def mut_fail(t):
+                t["finished_at"] = o.now_iso()
+                t["failure"] = "no qa.smoke configured"
+            o.move_task(task_id, "running", "failed",
+                        reason="no qa.smoke", mutator=mut_fail)
+            return
+
+        smoke_abs = pathlib.Path(project["path"]) / smoke_rel
+        smoke_env = os.environ.copy()
+        smoke_env["REPO_ROOT"] = str(wt)
+        with log_path.open("a") as logf:
+            logf.write(f"\n# pr-feedback smoke re-run: {smoke_abs}\n")
+            logf.write(f"# REPO_ROOT={wt}\n\n")
+            logf.flush()
+            try:
+                smoke_proc = subprocess.run(
+                    ["bash", str(smoke_abs)],
+                    cwd=project["path"],
+                    env=smoke_env,
+                    stdout=logf, stderr=subprocess.STDOUT, text=True,
+                    timeout=DEFAULT_TIMEOUTS["qa"],
+                )
+            except subprocess.TimeoutExpired:
+                def mut_fail(t):
+                    t["finished_at"] = o.now_iso()
+                    t["failure"] = "smoke re-run timeout"
+                o.move_task(task_id, "running", "failed",
+                            reason="smoke re-run timeout", mutator=mut_fail)
+                return
+
+        if smoke_proc.returncode != 0:
+            def mut_fail(t):
+                t["finished_at"] = o.now_iso()
+                t["failure"] = f"smoke re-run exit {smoke_proc.returncode}"
+            o.move_task(task_id, "running", "failed",
+                        reason="pr-feedback smoke red", mutator=mut_fail)
+            return
+
+        # Smoke green — force-push with lease so upstream gets the fix.
+        push = _git_agent(
+            wt, "push", "--force-with-lease", "origin", agent_branch, timeout=120,
+        )
+        if push.returncode != 0:
+            def mut_fail(t):
+                t["finished_at"] = o.now_iso()
+                t["failure"] = f"pr-feedback push failed: {push.stderr.strip()[:200]}"
+            o.move_task(task_id, "running", "failed",
+                        reason="pr-feedback push failed", mutator=mut_fail)
+            return
+
+        new_sha = (_git(wt, "rev-parse", "HEAD").stdout or "").strip() or None
+
+        def mut_target(t):
+            s = dict(t.get("pr_sweep") or {})
+            s["last_feedback_at"] = o.now_iso()
+            s["last_feedback_sha"] = new_sha
+            s["last_feedback_task_id"] = task_id
+            t["pr_sweep"] = s
+            if new_sha:
+                t["push_commit_sha"] = new_sha
+        o.update_task_in_place(target_file, mut_target)
+
+        o.braid_template_record_use(bt, topology_error=False)
+        def mut_ok(t):
+            t["finished_at"] = o.now_iso()
+            t["pr_feedback_new_sha"] = new_sha
+        o.move_task(task_id, "running", "done",
+                    reason=f"pr-feedback pushed {new_sha}", mutator=mut_ok)
+
+    finally:
+        if lock_fh is not None:
+            lock_fh.close()
+
+
 # --- codex slot -------------------------------------------------------------
 
 def run_codex_slot(task, cfg):
     task_id = task["task_id"]
     bt = task.get("braid_template")
+
+    # pr-feedback mode: re-use an existing target worktree to address review
+    # comments and/or rebase, then re-run smoke and force-push. Distinct from
+    # the normal "agent implements a slice from scratch" path because it
+    # operates on a task that is already merged-waiting in done/.
+    mode = (task.get("engine_args") or {}).get("mode")
+    if mode == "pr-feedback":
+        return run_pr_feedback_task(task, cfg)
 
     if not bt:
         o.move_task(task_id, "claimed", "failed", reason="codex task has no braid_template")
@@ -933,11 +1338,18 @@ def run_codex_slot(task, cfg):
     lock_fh = None
     wt_path = None
     branch = None
+    base_branch = "main"
     try:
         # Shared lock to coexist with other codex workers; blocks against regression exclusive.
         lock_fh = acquire_lock(f"{project['name']}.lock", mode="shared", timeout_sec=60)
 
-        wt_path, branch = make_worktree(project["path"], task_id)
+        base_branch = base_branch_for_task(task)
+        if base_branch != "main":
+            ensure_feature_branch(project["path"], base_branch)
+
+        wt_path, branch, base_branch = make_worktree(
+            project["path"], task_id, base_branch=base_branch,
+        )
 
         memory_ctx = read_memory_context(project["path"])
         prompt = build_codex_prompt(task, graph_body, memory_ctx)
@@ -954,6 +1366,7 @@ def run_codex_slot(task, cfg):
             t["braid_template_path"] = f"braid/templates/{bt}.mmd"
             t["braid_template_hash"] = graph_hash
             t["worktree"] = str(wt_path)
+            t["base_branch"] = base_branch
             t["started_at"] = o.now_iso()
             t["log_path"] = str(log_path)
         o.move_task(task_id, "claimed", "running", reason="codex exec", mutator=mut_running)
@@ -1275,12 +1688,17 @@ def run_qa_slot(task, cfg):
 
         if proc.returncode == 0:
             if contract_kind == "smoke" and target_id:
+                # Resolve the base branch once from the target's persisted
+                # state. Tasks set by run_codex_slot carry `base_branch` — fall
+                # back to deriving it from feature_id for older records.
+                target_base = target.get("base_branch") or base_branch_for_task(target)
                 # Pattern B: always write pr-body.md; push only if opted-in.
                 pr_body_path = None
                 try:
                     pr_body_path = write_pr_body(
                         target=target, project=project,
                         qa_log_path=log_path, driver_task_id=task_id,
+                        base_branch=target_base,
                     )
                 except Exception as exc:
                     log(f"write_pr_body failed: {exc}")
@@ -1293,6 +1711,7 @@ def run_qa_slot(task, cfg):
                             target=target, project=project,
                             worktree=target_wt, branch=f"agent/{target_id}",
                             log_path=log_path,
+                            base_branch=target_base,
                         )
                     except Exception as exc:
                         ok, reason, sha, ccount, pushed_at = False, f"push crashed: {exc}", None, 0, None
@@ -1303,6 +1722,7 @@ def run_qa_slot(task, cfg):
                             "push_commit_sha": sha,
                             "push_commit_count": ccount,
                             "push_branch": f"agent/{target_id}",
+                            "push_base_branch": target_base,
                         }
                         # Pattern C: also open the PR via gh.
                         try:
@@ -1311,6 +1731,7 @@ def run_qa_slot(task, cfg):
                                 branch=f"agent/{target_id}",
                                 pr_body_path=pr_body_path,
                                 log_path=log_path,
+                                base_branch=target_base,
                             )
                         except Exception as exc:
                             pr_ok, pr_reason = False, f"create_pr crashed: {exc}"

@@ -1,0 +1,52 @@
+flowchart TD;
+    Start[Start] -- "always" --> ReadCtx[Read: parse conflict flag + comment list];
+    ReadCtx -- "context parsed" --> ReadBranch[Read: confirm on agent/<target_id> branch];
+    ReadBranch -- "branch confirmed" --> CheckBaseline;
+    subgraph SB0[Baseline Gate]
+        CheckBaseline[Check: baseline smoke green on target worktree]
+    end
+    CheckBaseline -- "baseline red" --> ExitRed[Exit: BRAID_TOPOLOGY_ERROR baseline_red];
+    CheckBaseline -- "baseline green" --> Branch[Branch: route on work type];
+    Branch -- "conflicts flagged" --> Fetch[Fetch: origin <base_branch>];
+    Branch -- "no conflicts" --> ScanComments[Scan: first unhandled <comment>];
+    Fetch -- "fetch complete" --> Rebase[Rebase: worktree onto origin/<base_branch>];
+    Rebase -- "conflict markers present" --> ResolveHunk[Resolve: apply fix for <conflict_hunk>];
+    ResolveHunk -- "hunk resolved" --> ContinueRebase[Continue: git rebase --continue];
+    ContinueRebase -- "more hunks remain" --> ResolveHunk;
+    ContinueRebase -- "rebase complete" --> ScanComments;
+    Rebase -- "rebase clean" --> ScanComments;
+    ScanComments -- "no comments left" --> C1;
+    ScanComments -- "comment selected" --> ReadComment[Read: understand <comment> intent];
+    ReadComment -- "intent clear" --> LocateFile[Locate: <file> referenced by <comment>];
+    ReadComment -- "intent ambiguous" --> RationaleOnly[Draft: rationale for Check 2];
+    LocateFile -- "file found" --> DraftFix[Draft: <fix> addressing <comment>];
+    DraftFix -- "fix drafted" --> ApplyFix[Apply: write <fix> to <file>];
+    ApplyFix -- "fix applied" --> CommitFix[Commit: agent identity, <comment> reference];
+    RationaleOnly -- "rationale recorded" --> CommitFix;
+    CommitFix -- "commit recorded" --> ScanComments;
+    subgraph S1[Conflict Gate]
+        C1[Check: conflicts resolved]
+    end
+    C1 -- "conflict markers remain" --> Revise[Revise: re-run resolve loop];
+    C1 -- "conflicts cleared" --> C2;
+    subgraph S2[Comment Gate]
+        C2[Check: each comment addressed]
+    end
+    C2 -- "comment ignored" --> Revise;
+    C2 -- "all comments handled" --> C3;
+    subgraph S3[Post-Fix Smoke Gate]
+        C3[Check: post-fix smoke green]
+    end
+    C3 -- "smoke red" --> Revise;
+    C3 -- "smoke green" --> C4;
+    subgraph S4[Scope Gate]
+        C4[Check: no new files outside scope]
+    end
+    C4 -- "scope creep detected" --> Revise;
+    C4 -- "scope clean" --> C5;
+    subgraph S5[Identity Gate]
+        C5[Check: commit authored under agent identity]
+    end
+    C5 -- "wrong author found" --> Revise;
+    C5 -- "identity confirmed" --> End[End];
+    Revise -- "fix re-applied" --> ScanComments;
