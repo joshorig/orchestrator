@@ -17,6 +17,7 @@ Design choices:
 """
 import argparse
 import datetime as dt
+import difflib
 import fcntl
 import hashlib
 import json
@@ -493,6 +494,53 @@ def read_memory_context(project_path):
     return "\n\n".join(parts) if parts else "(no repo-memory available)"
 
 
+def recent_work_entries(text, limit=50):
+    lines = text.splitlines()
+    if not lines:
+        return ""
+    prefix = []
+    idx = 0
+    while idx < len(lines) and not lines[idx].startswith("## "):
+        prefix.append(lines[idx])
+        idx += 1
+    entries = []
+    current = []
+    for line in lines[idx:]:
+        if line.startswith("## ") and current:
+            entries.append("\n".join(current))
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        entries.append("\n".join(current))
+    return "\n".join(prefix + entries[:limit]).strip()
+
+
+def markdown_sane(text):
+    stripped = text.lstrip()
+    return bool(stripped) and stripped.startswith("# ")
+
+
+def extract_markdown_document(text):
+    candidate = (text or "").strip()
+    if not candidate:
+        return ""
+    fence = re.search(r"```(?:markdown|md)?\n(.*?)\n```", candidate, re.DOTALL)
+    if fence:
+        candidate = fence.group(1).strip()
+    elif candidate.startswith("```"):
+        candidate = re.sub(r"^```[a-zA-Z0-9_-]*\n?", "", candidate)
+        candidate = re.sub(r"\n?```$", "", candidate).strip()
+    if markdown_sane(candidate):
+        return candidate
+    header_idx = candidate.find("# ")
+    if header_idx >= 0:
+        tail = candidate[header_idx:].strip()
+        if markdown_sane(tail):
+            return tail
+    return candidate
+
+
 # --- advisory lock ----------------------------------------------------------
 
 def acquire_lock(lock_name, mode, timeout_sec=0):
@@ -562,9 +610,144 @@ def run_claude_slot(task, cfg):
 
     if is_template_gen:
         return run_claude_template_gen(task, cfg, bt, timeout, log_path)
+    if mode == "memory-synthesis":
+        return run_claude_memory_synthesis(task, cfg, timeout, log_path)
     if task.get("role") == "reviewer":
         return run_claude_reviewer(task, cfg, timeout, log_path)
     return run_claude_planner(task, cfg, timeout, log_path)
+
+
+def run_claude_memory_synthesis(task, cfg, timeout, log_path):
+    task_id = task["task_id"]
+    project_name = task.get("project")
+    try:
+        project = o.get_project(cfg, project_name)
+    except KeyError:
+        o.move_task(task_id, "claimed", "failed", reason=f"unknown project {project_name}")
+        return
+
+    bt = task.get("braid_template") or "memory-synthesis"
+    graph_body, graph_hash = o.braid_template_load(bt)
+    if graph_body is None:
+        if task.get("braid_generate_if_missing", True):
+            regen = o.new_task(
+                role="planner",
+                engine="claude",
+                project=project["name"],
+                summary=f"Generate BRAID template for {bt}",
+                source=f"regen-for:{task_id}",
+                braid_template=bt,
+                engine_args={"mode": "template-gen"},
+            )
+            o.enqueue_task(regen)
+            def mut_missing(t):
+                t["topology_error"] = "template_missing"
+            o.move_task(task_id, "claimed", "blocked", reason="template missing", mutator=mut_missing)
+            return
+        o.move_task(task_id, "claimed", "failed", reason="template missing, regen disabled")
+        return
+
+    memdir = pathlib.Path(project["path"]) / "repo-memory"
+    current_path = memdir / "CURRENT_STATE.md"
+    recent_path = memdir / "RECENT_WORK.md"
+    decisions_path = memdir / "DECISIONS.md"
+    if not current_path.exists() or not recent_path.exists() or not decisions_path.exists():
+        o.move_task(task_id, "claimed", "failed", reason="repo-memory incomplete")
+        return
+
+    current_text = current_path.read_text()
+    recent_text = recent_path.read_text()
+    decisions_text = decisions_path.read_text()
+    recent_subset = recent_work_entries(recent_text, limit=50)
+
+    system_prompt = (
+        "You are the devmini historian for repo-memory synthesis.\n\n"
+        "Use this BRAID graph as a hard workflow constraint:\n"
+        f"{graph_body}\n\n"
+        "Rewrite ONLY CURRENT_STATE.md. Do not modify RECENT_WORK.md. "
+        "Do not invent new section headers unless an active subsystem was added. "
+        "Keep the resulting diff under 200 lines and exclude secrets."
+    )
+    user_prompt = (
+        f"PROJECT: {project['name']}\n\n"
+        "Return ONLY the full replacement contents for CURRENT_STATE.md.\n\n"
+        f"CURRENT_STATE.md:\n{current_text}\n\n"
+        f"RECENT_WORK.md (latest entries):\n{recent_subset}\n\n"
+        f"DECISIONS.md:\n{decisions_text}\n"
+    )
+
+    cmd = [
+        "claude",
+        "-p", user_prompt,
+        "--dangerously-skip-permissions",
+        "--system-prompt", system_prompt,
+        "--output-format", "text",
+        "--model", "sonnet",
+        "--max-budget-usd", "1.00",
+        "--no-session-persistence",
+    ]
+
+    def mut_running(t):
+        t["braid_template_path"] = f"braid/templates/{bt}.mmd"
+        t["braid_template_hash"] = graph_hash
+        t["started_at"] = o.now_iso()
+        t["log_path"] = str(log_path)
+    o.move_task(task_id, "claimed", "running", reason="claude memory synthesis", mutator=mut_running)
+
+    with log_path.open("w") as logf:
+        logf.write(f"# claude memory-synthesis task={task_id} project={project['name']}\n\n")
+        try:
+            proc = subprocess.run(
+                cmd, stdout=subprocess.PIPE, stderr=logf, text=True, timeout=timeout,
+                cwd="/tmp",
+            )
+        except subprocess.TimeoutExpired:
+            o.move_task(task_id, "running", "failed", reason=f"claude timeout {timeout}s")
+            return
+        logf.write(f"\n# exit: {proc.returncode}\n# stdout:\n{proc.stdout or ''}\n")
+
+    if proc.returncode != 0:
+        o.move_task(task_id, "running", "failed", reason=f"claude exit {proc.returncode}")
+        return
+
+    candidate = extract_markdown_document(proc.stdout or "")
+    if not markdown_sane(candidate):
+        o.move_task(task_id, "running", "failed", reason="candidate markdown invalid")
+        return
+    if scan_for_secrets(candidate):
+        o.move_task(task_id, "running", "failed", reason="candidate contains secret-like content")
+        return
+
+    diff_lines = list(
+        difflib.unified_diff(
+            current_text.splitlines(),
+            candidate.splitlines(),
+            fromfile="CURRENT_STATE.md",
+            tofile="CURRENT_STATE.md",
+            lineterm="",
+        )
+    )
+    if len(diff_lines) >= 200:
+        o.move_task(task_id, "running", "failed", reason="delta exceeds 200 lines")
+        return
+    if recent_path.read_text() != recent_text:
+        o.move_task(task_id, "running", "failed", reason="RECENT_WORK changed during synthesis")
+        return
+
+    tmp = current_path.with_suffix(".md.tmp")
+    tmp.write_text(candidate.rstrip() + "\n")
+    os.rename(tmp, current_path)
+
+    artifact_dir = o.STATE_ROOT / "artifacts" / task_id
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    diff_path = artifact_dir / "CURRENT_STATE.diff"
+    diff_path.write_text("\n".join(diff_lines) + ("\n" if diff_lines else ""))
+
+    def mut_done(t):
+        t["artifacts"] = t.get("artifacts", []) + [str(diff_path.relative_to(o.STATE_ROOT))]
+        t["finished_at"] = o.now_iso()
+        t["log_path"] = str(log_path)
+    o.move_task(task_id, "running", "done", reason="memory synthesis applied", mutator=mut_done)
 
 
 def run_claude_template_gen(task, cfg, task_type, timeout, log_path):
@@ -667,17 +850,234 @@ LVC_OPERATOR_POSITIVE_PATTERNS = (
     "position store", "replay", "cursor",
 )
 
+DAG_IMPLEMENT_NODE_POSITIVE_PATTERNS = (
+    "node", "operator", "processing-element", "processing element", "dag", "pipeline-node",
+)
+DAG_HISTORIAN_POSITIVE_PATTERNS = (
+    "history", "memory", "recent_work", "recent work", "historian", "current_state", "repo memory",
+)
+TRP_PIPELINE_STAGE_POSITIVE_PATTERNS = (
+    "stage", "pipeline", "platform-runtime", "platform runtime", "ingest", "jmh",
+)
+TRP_UI_COMPONENT_POSITIVE_PATTERNS = (
+    "component", "page", ".tsx", "playwright", "a11y", "apps/",
+)
+
+PROJECT_CROSS_MARKERS = {
+    "lvc": ("dag-framework", "trade-research-platform", "apps/", ".tsx", "playwright", "a11y"),
+    "dag": ("lvc-standard", "trade-research-platform", "apps/", ".tsx", "playwright", "a11y"),
+    "trp": ("lvc-standard", "dag-framework", "src/main/java", "operator", "repo-memory/"),
+}
+
+
+def planner_historian_template(project_name):
+    return o.project_historian_template(project_name)
+
+
+def planner_implementer_templates(project_name):
+    if project_name == "lvc-standard":
+        return ("lvc-implement-operator",)
+    if project_name == "dag-framework":
+        return ("dag-implement-node",)
+    if project_name == "trade-research-platform":
+        return ("trp-implement-pipeline-stage", "trp-ui-component")
+    return ("lvc-implement-operator",)
+
+
+def planner_template_roles(project_name):
+    roles = {
+        planner_historian_template(project_name): "historian",
+    }
+    for template in planner_implementer_templates(project_name):
+        roles[template] = "implementer"
+    return roles
+
+
+def planner_system_prompt(project_name):
+    historian_template = planner_historian_template(project_name)
+    implementer_templates = planner_implementer_templates(project_name)
+    if project_name == "lvc-standard":
+        implementer_desc = (
+            '  - "lvc-implement-operator": ONLY for adding/modifying a Java operator in '
+            "src/ under the hot path, with zero-allocation invariants verifiable via JMH + "
+            "conformance tests. Requires Java source changes in the library's hot path.\n"
+        )
+    elif project_name == "dag-framework":
+        implementer_desc = (
+            '  - "dag-implement-node": ONLY for adding/modifying one DAG runtime node or '
+            "operator in the hot path. Requires Java source changes in dag-framework runtime.\n"
+        )
+    else:
+        implementer_desc = (
+            '  - "trp-implement-pipeline-stage": ONLY for ingest/ranking/runtime stage work in '
+            "the Java pipeline hot path. Requires non-UI source changes.\n"
+            '  - "trp-ui-component": ONLY for typed React/UI/page/component work in apps/, '
+            ".tsx, Playwright, or a11y surfaces. Requires UI-facing changes.\n"
+        )
+    historian_desc = (
+        f'  - "{historian_template}": ONLY for appending observations to '
+        "repo-memory/RECENT_WORK.md, DECISIONS.md, or FAILURES.md. No source code changes.\n\n"
+    )
+    allowed = ", ".join(f'"{name}"' for name in (historian_template, *implementer_templates))
+    return (
+        "You are the BRAID generator for devmini. Your job: read the project memory "
+        "and propose at most 3 bounded CODEX execution slices for the next actionable work.\n\n"
+        "Only the following braid_template values are valid for codex slices in this project:\n"
+        f"{implementer_desc}{historian_desc}"
+        "Do NOT emit reviewer or QA slices — those are scheduled by separate tickers. "
+        "Do NOT invent other template names. Do NOT use null. "
+        "If a candidate piece of work fits NEITHER the allowed templates above "
+        "(e.g. CI workflow changes, release automation, cross-project refactors), "
+        "SKIP it — do not include it in your output. If nothing fits, emit an empty array [].\n\n"
+        f'Use only these template strings verbatim: {allowed}.\n'
+        "Every object MUST include summary and braid_template. No prose, no markdown fences.\n"
+        "Emit ONLY a JSON array of objects, each with keys:\n"
+        "  summary (≤120 chars), braid_template (one of the valid values above, verbatim).\n"
+        "No prose, no markdown fences."
+    )
+
+
+def _contains_any(text, patterns):
+    return any(p in text for p in patterns)
+
+
+def _cross_project_reason(text, project_key):
+    for marker in PROJECT_CROSS_MARKERS[project_key]:
+        if marker in text:
+            return f"cross-project marker {marker!r}"
+    return None
+
 
 def classify_slice(template, summary):
-    """Return (ok, reason). ok=False drops the slice with reason logged."""
+    """Return (ok, reason). ok=False drops the slice with reason logged.
+
+    >>> classify_slice("lvc-implement-operator", "Optimize hot path poller zero alloc jmh gate")[0]
+    True
+    >>> classify_slice("lvc-implement-operator", "Repair IPC ordering in guaranteed operator")[0]
+    True
+    >>> classify_slice("lvc-implement-operator", "Tune replay cursor on aeron hot-path")[0]
+    True
+    >>> classify_slice("lvc-implement-operator", "Rewrite CI workflow for release automation")
+    (False, "anti-pattern 'ci workflow'")
+    >>> classify_slice("lvc-implement-operator", "Add docs for README and release note")[0]
+    False
+    >>> classify_slice("lvc-implement-operator", "Build trade-research-platform .tsx page")[0]
+    False
+    >>> classify_slice("dag-implement-node", "Implement pipeline-node scheduling in dag runtime")[0]
+    True
+    >>> classify_slice("dag-implement-node", "Tighten processing-element operator traversal")[0]
+    True
+    >>> classify_slice("dag-implement-node", "Reduce allocs in dag node hot path")[0]
+    True
+    >>> classify_slice("dag-implement-node", "Add apps/dashboard/page.tsx for dag status")[0]
+    False
+    >>> classify_slice("dag-implement-node", "Update historian RECENT_WORK entry")[0]
+    False
+    >>> classify_slice("dag-implement-node", "Fix lvc-standard poller order drift")[0]
+    False
+    >>> classify_slice("dag-historian-update", "Append historian memory entry to RECENT_WORK")[0]
+    True
+    >>> classify_slice("dag-historian-update", "Update CURRENT_STATE memory after historian pass")[0]
+    True
+    >>> classify_slice("dag-historian-update", "Capture dag history note in repo memory")[0]
+    True
+    >>> classify_slice("dag-historian-update", "Implement dag node traversal optimization")[0]
+    False
+    >>> classify_slice("dag-historian-update", "Add React component in apps/ui/page.tsx")[0]
+    False
+    >>> classify_slice("dag-historian-update", "Fix lvc-standard historian note")[0]
+    False
+    >>> classify_slice("trp-implement-pipeline-stage", "Optimize ingest stage in platform-runtime with jmh")[0]
+    True
+    >>> classify_slice("trp-implement-pipeline-stage", "Adjust ranking pipeline stage contract handling")[0]
+    True
+    >>> classify_slice("trp-implement-pipeline-stage", "Tune stage batching in ingest pipeline")[0]
+    True
+    >>> classify_slice("trp-implement-pipeline-stage", "Build apps/research/page.tsx with a11y fixes")[0]
+    False
+    >>> classify_slice("trp-implement-pipeline-stage", "Append RECENT_WORK historian memory note")[0]
+    False
+    >>> classify_slice("trp-implement-pipeline-stage", "Patch dag-framework node traversal")[0]
+    False
+    >>> classify_slice("trp-ui-component", "Add .tsx component with Playwright a11y coverage")[0]
+    True
+    >>> classify_slice("trp-ui-component", "Refine apps/portfolio page component props")[0]
+    True
+    >>> classify_slice("trp-ui-component", "Update page component and accessibility flow")[0]
+    True
+    >>> classify_slice("trp-ui-component", "Optimize ingest pipeline stage jmh smoke")[0]
+    False
+    >>> classify_slice("trp-ui-component", "Append RECENT_WORK history entry")[0]
+    False
+    >>> classify_slice("trp-ui-component", "Fix lvc-standard operator semantics")[0]
+    False
+    """
     s = (summary or "").lower()
+    if not template:
+        return False, "missing braid_template"
+    if not s.strip():
+        return False, "empty summary"
     if template == "lvc-implement-operator":
         for anti in LVC_OPERATOR_ANTI_PATTERNS:
             if anti in s:
                 return False, f"anti-pattern {anti!r}"
+        reason = _cross_project_reason(s, "lvc")
+        if reason:
+            return False, reason
         if not any(p in s for p in LVC_OPERATOR_POSITIVE_PATTERNS):
             return False, "no hot-path keyword"
-    return True, None
+        return True, None
+    if template == "dag-implement-node":
+        reason = _cross_project_reason(s, "dag")
+        if reason:
+            return False, reason
+        if _contains_any(s, DAG_HISTORIAN_POSITIVE_PATTERNS):
+            return False, "historian slice misrouted to dag implementer"
+        if not _contains_any(s, DAG_IMPLEMENT_NODE_POSITIVE_PATTERNS):
+            return False, "no dag node keyword"
+        return True, None
+    if template == "dag-historian-update":
+        reason = _cross_project_reason(s, "dag")
+        if reason:
+            return False, reason
+        if _contains_any(s, TRP_UI_COMPONENT_POSITIVE_PATTERNS):
+            return False, "ui slice misrouted to historian"
+        if _contains_any(s, DAG_IMPLEMENT_NODE_POSITIVE_PATTERNS) and not _contains_any(s, DAG_HISTORIAN_POSITIVE_PATTERNS):
+            return False, "implementation slice misrouted to historian"
+        if not _contains_any(s, DAG_HISTORIAN_POSITIVE_PATTERNS):
+            return False, "no historian keyword"
+        return True, None
+    if template == "trp-implement-pipeline-stage":
+        reason = _cross_project_reason(s, "trp")
+        if reason:
+            return False, reason
+        if _contains_any(s, TRP_UI_COMPONENT_POSITIVE_PATTERNS):
+            return False, "ui slice misrouted to pipeline-stage"
+        if _contains_any(s, DAG_HISTORIAN_POSITIVE_PATTERNS):
+            return False, "historian slice misrouted to pipeline-stage"
+        if not _contains_any(s, TRP_PIPELINE_STAGE_POSITIVE_PATTERNS):
+            return False, "no pipeline-stage keyword"
+        return True, None
+    if template == "trp-ui-component":
+        reason = _cross_project_reason(s, "trp")
+        if reason:
+            return False, reason
+        if _contains_any(s, TRP_PIPELINE_STAGE_POSITIVE_PATTERNS):
+            return False, "pipeline-stage slice misrouted to ui-component"
+        if _contains_any(s, DAG_HISTORIAN_POSITIVE_PATTERNS):
+            return False, "historian slice misrouted to ui-component"
+        if not _contains_any(s, TRP_UI_COMPONENT_POSITIVE_PATTERNS):
+            return False, "no ui-component keyword"
+        return True, None
+    if template == "lvc-historian-update":
+        if _contains_any(s, TRP_UI_COMPONENT_POSITIVE_PATTERNS) or _contains_any(s, TRP_PIPELINE_STAGE_POSITIVE_PATTERNS):
+            return False, "non-historian trp slice misrouted to lvc historian"
+        if _contains_any(s, DAG_IMPLEMENT_NODE_POSITIVE_PATTERNS) and not _contains_any(s, DAG_HISTORIAN_POSITIVE_PATTERNS):
+            return False, "implementation slice misrouted to lvc historian"
+        if not _contains_any(s, DAG_HISTORIAN_POSITIVE_PATTERNS):
+            return False, "no historian keyword"
+        return True, None
+    return False, f"unknown template {template!r}"
 
 
 # Legitimate reason codes that may appear after `BRAID_TOPOLOGY_ERROR:`.
@@ -715,27 +1115,7 @@ def run_claude_planner(task, cfg, timeout, log_path):
         return
 
     memory_ctx = read_memory_context(project["path"])
-    system_prompt = (
-        "You are the BRAID generator for devmini. Your job: read the project memory "
-        "and propose at most 3 bounded CODEX execution slices for the next actionable work.\n\n"
-        "Only two braid_template values are valid for codex slices:\n"
-        "  - \"lvc-implement-operator\": ONLY for adding/modifying a Java operator in "
-        "src/ under the hot path, with zero-allocation invariants verifiable via JMH + "
-        "conformance tests. Requires Java source changes in the library's hot path.\n"
-        "  - \"lvc-historian-update\": ONLY for appending observations to "
-        "repo-memory/RECENT_WORK.md, DECISIONS.md, or FAILURES.md. No source code changes.\n\n"
-        "Do NOT emit reviewer or QA slices — those are scheduled by separate tickers. "
-        "Do NOT invent other template names. Do NOT use null. "
-        "If a candidate piece of work fits NEITHER template (e.g. CI workflow changes, "
-        "build config edits, documentation outside repo-memory, cross-module refactors), "
-        "SKIP it — do not include it in your output. If nothing fits, emit an empty array [].\n\n"
-        "Never assign \"lvc-implement-operator\" to a task that doesn't touch Java source "
-        "in the hot path. When in doubt, pick \"lvc-historian-update\" to record the "
-        "observation for a future pass, or skip.\n\n"
-        "Emit ONLY a JSON array of objects, each with keys:\n"
-        "  summary (≤120 chars), braid_template (one of the two values above, verbatim).\n"
-        "No prose, no markdown fences."
-    )
+    system_prompt = planner_system_prompt(project["name"])
     user_prompt = (
         f"PROJECT: {project['name']}\n\n"
         f"PARENT TASK: {task['summary']}\n\n"
@@ -790,10 +1170,7 @@ def run_claude_planner(task, cfg, timeout, log_path):
     # Template → role for codex slices. Slices with a template outside this set
     # are dropped — the planner prompt instructs claude to skip ill-fitting work
     # rather than invent new templates.
-    TEMPLATE_ROLE = {
-        "lvc-implement-operator": "implementer",
-        "lvc-historian-update": "historian",
-    }
+    TEMPLATE_ROLE = planner_template_roles(project["name"])
 
     feature_id = task.get("feature_id")
 

@@ -1,56 +1,36 @@
 flowchart TD;
-    Start[Start] -- "always" --> ReadModule[Read: locate <module> source tree];
-    ReadModule -- "source found" --> ReadTests[Read: locate existing tests for <module>];
-    ReadModule -- "source not found" --> Halt[Halt: invalid module path];
-    ReadTests -- "tests found" --> CheckBaseline[Check: baseline smoke green on unmodified worktree];
-    ReadTests -- "no tests exist" --> ScaffoldTests[Scaffold: create test stub for <operator>];
-    ScaffoldTests -- "stub created" --> CheckBaseline;
-    CheckBaseline -- "pass: baseline green" --> ReadAPI[Read: identify public API surface of <operator>];
-    CheckBaseline -- "fail: baseline red unmodified" --> EmitBaselineRed[Emit: BRAID_TOPOLOGY_ERROR baseline_red];
-    EmitBaselineRed -- "reason emitted" --> End;
-    ReadAPI -- "API surface mapped" --> IdentifyHotPath[Identify: mark <hot_path> boundaries];
-    IdentifyHotPath -- "hot path marked" --> IdentifyPools[Identify: find preallocated pools in scope];
-    IdentifyPools -- "pools catalogued" --> IdentifyContracts[Identify: list invariant contracts touched by <operator>];
-    IdentifyContracts -- "contracts listed" --> SketchSig[Sketch: define <operator> method signature];
-    SketchSig -- "signature drafted" --> SketchFlow[Sketch: outline control flow through <operator>];
-    SketchFlow -- "flow outlined" --> SketchAlloc[Sketch: verify no allocation sites in <hot_path>];
-    SketchAlloc -- "sketch clean" --> DraftImpl[Draft: implement <operator> in worktree];
-    DraftImpl -- "implementation written" --> DraftWire[Draft: wire <operator> into <module> registry];
-    DraftWire -- "wiring complete" --> RunUnit[Run: execute unit tests for <module>];
-    RunUnit -- "tests pass" --> CheckZeroAlloc;
-    RunUnit -- "tests fail" --> ReviseImpl[Revise: fix failing unit tests];
-    ReviseImpl -- "fix applied" --> RunUnit;
-
-    CheckZeroAlloc[Check: zero alloc on hot path] -- "pass" --> CheckGC;
-    CheckZeroAlloc -- "fail: allocation detected" --> ReviseAlloc[Revise: remove allocation from <hot_path>];
-    ReviseAlloc -- "allocation removed" --> CheckZeroAlloc;
-
-    CheckGC[Check: no GC hiccups above JMH smoke gate] -- "pass" --> CheckJava21;
-    CheckGC -- "fail: GC threshold exceeded" --> ReviseGC[Revise: reduce allocation pressure];
-    ReviseGC -- "pressure reduced" --> CheckGC;
-
-    CheckJava21[Check: Java 21 source/target] -- "pass" --> CheckIPC;
-    CheckJava21 -- "fail: downlevel construct found" --> ReviseJava[Revise: replace with Java 21 equivalent];
-    ReviseJava -- "construct replaced" --> CheckJava21;
-
-    CheckIPC[Check: IPC matches in-proc semantics] -- "pass" --> CheckPerKey;
-    CheckIPC -- "fail: semantic divergence" --> ReviseIPC[Revise: align normalization and ordering];
-    ReviseIPC -- "alignment restored" --> CheckIPC;
-
-    CheckPerKey[Check: per-key in-order in guaranteed mode] -- "pass" --> CheckFrag;
-    CheckPerKey -- "fail: reordering detected" --> ReviseOrder[Revise: restore per-key ordering];
-    ReviseOrder -- "ordering fixed" --> CheckPerKey;
-
-    CheckFrag[Check: fragmentation reassembly intact] -- "pass" --> CheckConformance;
-    CheckFrag -- "fail: reassembly broken" --> ReviseFrag[Revise: fix fragment handler];
-    ReviseFrag -- "handler fixed" --> CheckFrag;
-
-    CheckConformance[Check: conformanceSuite green] -- "pass" --> CheckJMH;
-    CheckConformance -- "fail: conformance regression" --> ReviseConf[Revise: fix conformance failure];
-    ReviseConf -- "conformance restored" --> CheckConformance;
-
-    CheckJMH[Check: jmhQuickcheck delta within noise] -- "pass" --> End;
-    CheckJMH -- "fail: delta exceeds 3 percent" --> RevisePerf[Revise: optimize <operator> perf regression];
-    RevisePerf -- "regression addressed" --> CheckJMH;
-
-    End[End];
+    Start[Start] -- "always" --> ReadMod[Read: locate affected <module>];
+    ReadMod -- "module mapped" --> ReadHot[Read: map <hot_path> boundary];
+    ReadHot -- "boundary mapped" --> ReadInv[Read: list in-scope invariants];
+    ReadInv -- "invariants listed" --> CheckBaseline[Check: baseline smoke green on unmodified worktree];
+    CheckBaseline -- "baseline red" --> ExitBaseline[Exit: BRAID_TOPOLOGY_ERROR baseline_red];
+    CheckBaseline -- "baseline green" --> Sketch[Read: sketch <operator> change];
+    Sketch -- "sketch done" --> Draft[Draft: implement <operator> change];
+    Draft -- "draft ready" --> RunUnit[Run: focused tests for <module>];
+    RunUnit -- "tests fail" --> ReviseCheck1[Revise: fix draft before gates];
+    ReviseCheck1 -- "retry" --> Draft;
+    RunUnit -- "tests pass" --> CheckAlloc[Check: zero alloc on hot path];
+    CheckAlloc -- "alloc found" --> ReviseCheck2[Revise: remove hot-path alloc];
+    ReviseCheck2 -- "retry" --> Draft;
+    CheckAlloc -- "alloc clean" --> CheckGc[Check: no gc hiccups above jmh smoke gate];
+    CheckGc -- "gc regressed" --> ReviseCheck3[Revise: tune perf-sensitive path];
+    ReviseCheck3 -- "retry" --> Draft;
+    CheckGc -- "gc clean" --> CheckJava[Check: Java 21 source/target];
+    CheckJava -- "java mismatch" --> ReviseCheck4[Revise: restore Java 21 compat];
+    ReviseCheck4 -- "retry" --> Draft;
+    CheckJava -- "java clean" --> CheckIpc[Check: IPC matches in-proc semantics];
+    CheckIpc -- "ipc mismatch" --> ReviseCheck5[Revise: align IPC semantics];
+    ReviseCheck5 -- "retry" --> Draft;
+    CheckIpc -- "ipc aligned" --> CheckOrder[Check: per-key in-order in guaranteed mode];
+    CheckOrder -- "order broke" --> ReviseCheck6[Revise: restore guaranteed ordering];
+    ReviseCheck6 -- "retry" --> Draft;
+    CheckOrder -- "order preserved" --> CheckFrag[Check: fragmentation reassembly intact];
+    CheckFrag -- "fragmentation broke" --> ReviseCheck7[Revise: restore fragment handling];
+    ReviseCheck7 -- "retry" --> Draft;
+    CheckFrag -- "reassembly intact" --> CheckConf[Check: conformanceSuite green];
+    CheckConf -- "conformance fails" --> ReviseCheck8[Revise: fix conformance drift];
+    ReviseCheck8 -- "retry" --> Draft;
+    CheckConf -- "conformance green" --> CheckJmh[Check: jmhQuickcheck delta within noise];
+    CheckJmh -- "delta high" --> ReviseCheck9[Revise: reduce benchmark delta];
+    ReviseCheck9 -- "retry" --> Draft;
+    CheckJmh -- "delta ok" --> End[End];

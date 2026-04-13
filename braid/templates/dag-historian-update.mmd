@@ -1,0 +1,12 @@
+flowchart TD;
+    Start[Start] -- "always" --> ReadRecent[Read: inspect recent memory entries];
+    ReadRecent -- "entries loaded" --> ReadState[Read: inspect current memory state];
+    ReadState -- "state loaded" --> DraftEntry[Draft: append one historian entry];
+    DraftEntry -- "draft ready" --> CheckAppend[Check: single entry append];
+    CheckAppend -- "append drifted" --> ReviseCheck1[Revise: narrow append scope];
+    ReviseCheck1 -- "retry" --> DraftEntry;
+    CheckAppend -- "append bounded" --> CheckRewrite[Check: no rewrite of prior entries];
+    CheckRewrite -- "rewrite found" --> ReviseCheck2[Revise: preserve prior lines];
+    ReviseCheck2 -- "retry" --> DraftEntry;
+    CheckRewrite -- "history preserved" --> RunWrite[Run: write historian append];
+    RunWrite -- "write complete" --> End[End];

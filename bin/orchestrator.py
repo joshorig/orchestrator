@@ -14,6 +14,8 @@ Storage layout:
 This file is both a CLI entry point and a module. worker.py imports helpers.
 """
 import argparse
+from collections import deque
+from dataclasses import dataclass
 import datetime as dt
 import errno
 import hashlib
@@ -44,6 +46,11 @@ BRAID_DIR = STATE_ROOT / "braid"
 BRAID_TEMPLATES = BRAID_DIR / "templates"
 BRAID_GENERATORS = BRAID_DIR / "generators"
 BRAID_INDEX = BRAID_DIR / "index.json"
+BRAID_NODE_DEF_RE = re.compile(r"(?P<node>[A-Za-z_][A-Za-z0-9_]*)\s*(?P<shape>\[[^\]\n]*\]|\{[^\}\n]*\})")
+BRAID_EDGE_START_RE = re.compile(r"^\s*(?P<node>[A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]\n]*\]|\{[^\}\n]*\})?")
+BRAID_EDGE_END_RE = re.compile(r"(?P<node>[A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]\n]*\]|\{[^\}\n]*\})?\s*;?\s*$")
+BRAID_BARE_EDGE_RE = re.compile(r"^\s*A\s*-->\s*B\s*;?\s*$")
+BRAID_HARD_PREFIXES = ("Start", "End", "Check:", "Revise:", "Draft:", "Run:", "Read:")
 
 STATES = (
     "queued",
@@ -61,6 +68,18 @@ VALID_ENGINES = ("claude", "codex", "qa")
 VALID_ROLES = ("planner", "implementer", "reviewer", "qa", "historian")
 
 
+@dataclass(frozen=True)
+class LintError:
+    rule: str
+    severity: str
+    message: str
+    line: int | None = None
+
+    def format(self):
+        where = f"line {self.line}: " if self.line else ""
+        return f"{self.severity} {self.rule}: {where}{self.message}"
+
+
 def now_iso():
     return dt.datetime.now().isoformat(timespec="seconds")
 
@@ -74,6 +93,17 @@ def get_project(config, name):
         if p["name"] == name:
             return p
     raise KeyError(f"unknown project: {name}")
+
+
+def project_historian_template(project_name):
+    mapping = {
+        "lvc-standard": "lvc-historian-update",
+        "dag-framework": "dag-historian-update",
+    }
+    if project_name == "trade-research-platform":
+        trp_prompt = BRAID_GENERATORS / "trp-historian-update.prompt.md"
+        return "trp-historian-update" if trp_prompt.exists() else "lvc-historian-update"
+    return mapping.get(project_name, "lvc-historian-update")
 
 
 def write_json_atomic(path, obj):
@@ -1024,6 +1054,212 @@ def braid_template_path(task_type):
     return BRAID_TEMPLATES / f"{task_type}.mmd"
 
 
+def _braid_brackets_balanced(body):
+    counts = {"[": 0, "]": 0, "{": 0, "}": 0}
+    in_quote = False
+    escaped = False
+    for ch in body:
+        if ch == "\\" and not escaped:
+            escaped = True
+            continue
+        if ch == '"' and not escaped:
+            in_quote = not in_quote
+        elif not in_quote and ch in counts:
+            counts[ch] += 1
+            if ch == "]" and counts["]"] > counts["["]:
+                return False
+            if ch == "}" and counts["}"] > counts["{"]:
+                return False
+        escaped = False
+    return counts["["] == counts["]"] and counts["{"] == counts["}"]
+
+
+def _collect_braid_nodes_and_edges(body):
+    nodes = {}
+    adjacency = {}
+    edge_lines = []
+    errors = []
+    subgraph_depth = 0
+    for lineno, raw in enumerate(body.splitlines(), 1):
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("subgraph "):
+            subgraph_depth += 1
+            continue
+        if line == "end":
+            subgraph_depth -= 1
+            if subgraph_depth < 0:
+                errors.append(LintError("R6", "error", "unexpected `end`", lineno))
+                subgraph_depth = 0
+            continue
+
+        for match in BRAID_NODE_DEF_RE.finditer(raw):
+            label = match.group("shape")[1:-1].strip()
+            node_id = match.group("node")
+            current = nodes.get(node_id)
+            if current is None or current["label"] == node_id:
+                nodes[node_id] = {"label": label, "line": lineno}
+
+        if "-->" in raw:
+            start = BRAID_EDGE_START_RE.match(raw)
+            end = BRAID_EDGE_END_RE.search(raw)
+        else:
+            start = None
+            end = None
+        if start and end:
+            src = start.group("node")
+            dst = end.group("node")
+            adjacency.setdefault(src, set()).add(dst)
+            adjacency.setdefault(dst, set())
+            edge_lines.append((lineno, src, dst))
+            nodes.setdefault(src, {"label": src, "line": lineno})
+            nodes.setdefault(dst, {"label": dst, "line": lineno})
+
+    if subgraph_depth:
+        errors.append(LintError("R6", "error", "unclosed subgraph", None))
+    return nodes, adjacency, edge_lines, errors
+
+
+def _reachable_nodes(adjacency, start):
+    seen = set()
+    queue = deque([start])
+    while queue:
+        node = queue.popleft()
+        if node in seen:
+            continue
+        seen.add(node)
+        for nxt in adjacency.get(node, ()):
+            if nxt not in seen:
+                queue.append(nxt)
+    return seen
+
+
+def _end_reachable_without_check(adjacency, nodes):
+    queue = deque([("Start", False)])
+    seen = set()
+    while queue:
+        node, saw_check = queue.popleft()
+        state = (node, saw_check)
+        if state in seen:
+            continue
+        seen.add(state)
+        label = nodes.get(node, {}).get("label", "")
+        now_checked = saw_check or label.startswith("Check:")
+        if node == "End" and not now_checked:
+            return True
+        for nxt in adjacency.get(node, ()):
+            queue.append((nxt, now_checked))
+    return False
+
+
+def _dirty_braid_template_names():
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(STATE_ROOT), "status", "--porcelain", "braid/templates"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return set()
+    if proc.returncode != 0:
+        return set()
+    names = set()
+    for line in proc.stdout.splitlines():
+        path = line[3:].strip()
+        if path.startswith("braid/templates/") and path.endswith(".mmd"):
+            names.add(pathlib.Path(path).stem)
+    return names
+
+
+def lint_template(body: str) -> list[LintError]:
+    """Lint a BRAID Mermaid template.
+
+    >>> any(e.rule == "R1" for e in lint_template("flowchart TD;\\nA[Read: one two three four five six seven eight nine ten eleven twelve thirteen fourteen]\\n"))
+    True
+    >>> any(e.rule == "R2" for e in lint_template("flowchart TD;\\nA --> B\\n"))
+    True
+    >>> any(e.rule == "R3" for e in lint_template("flowchart TD;\\nStart[Start] -- \\"always\\" --> End[End];\\n"))
+    True
+    >>> any(e.rule == "R4" for e in lint_template("flowchart TD;\\nStart[Start] -- \\"always\\" --> C1;\\nC1[Check: gate 1] -- \\"fail\\" --> Revise[Revise: generic loop];\\nC1 -- \\"pass\\" --> C2;\\nC2[Check: gate 2] -- \\"fail\\" --> Revise;\\nC2 -- \\"pass\\" --> C3;\\nC3[Check: gate 3] -- \\"fail\\" --> Revise;\\nC3 -- \\"pass\\" --> C4;\\nC4[Check: gate 4] -- \\"fail\\" --> Revise;\\nC4 -- \\"pass\\" --> C5;\\nC5[Check: gate 5] -- \\"fail\\" --> Revise;\\nC5 -- \\"pass\\" --> C6;\\nC6[Check: gate 6] -- \\"fail\\" --> Revise;\\nC6 -- \\"pass\\" --> C7;\\nC7[Check: gate 7] -- \\"fail\\" --> Revise;\\nC7 -- \\"pass\\" --> C8;\\nC8[Check: gate 8] -- \\"fail\\" --> Revise;\\nC8 -- \\"pass\\" --> C9;\\nC9[Check: gate 9] -- \\"fail\\" --> Revise;\\nC9 -- \\"pass\\" --> End[End];\\nRevise -- \\"retry\\" --> C1;\\n"))
+    True
+    >>> any(e.rule == "R5" for e in lint_template("flowchart TD;\\nStart[Start] -- \\"always\\" --> End[End];\\nOrphan[Draft: stray node]\\n"))
+    True
+    >>> any(e.rule == "R6" for e in lint_template("Start[Start] -- \\"always\\" --> End[End];\\n"))
+    True
+    >>> any(e.rule == "R7" for e in lint_template("flowchart TD;\\nStart[Start] -- \\"always\\" --> A[Read: Apache Kafka Streams];\\nA -- \\"done\\" --> End[End];\\n"))
+    True
+    """
+    errors = []
+    stripped = [line.strip() for line in body.splitlines() if line.strip()]
+    if not stripped or stripped[0] != "flowchart TD;":
+        errors.append(LintError("R6", "error", "missing `flowchart TD;` prefix", 1))
+    if not _braid_brackets_balanced(body):
+        errors.append(LintError("R6", "error", "unbalanced brackets or braces", None))
+
+    nodes, adjacency, _, parse_errors = _collect_braid_nodes_and_edges(body)
+    errors.extend(parse_errors)
+
+    for lineno, raw in enumerate(body.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("subgraph ") or line == "end":
+            continue
+        if BRAID_BARE_EDGE_RE.match(raw):
+            errors.append(LintError("R2", "error", "edge is missing a quoted label", lineno))
+
+    for node_id, meta in nodes.items():
+        label = meta["label"]
+        tokens = label.split()
+        if len(tokens) >= 15:
+            severity = "error" if label.startswith(BRAID_HARD_PREFIXES) else "warning"
+            errors.append(
+                LintError("R1", severity, f"{node_id} label has {len(tokens)} tokens", meta["line"])
+            )
+        words = re.findall(r"\b[A-Z][A-Za-z0-9_/.-]*\b", label)
+        if "<" not in label and len(words) >= 3:
+            errors.append(
+                LintError("R7", "warning", f"{node_id} label may leak repo literals", meta["line"])
+            )
+
+    if "Start" not in nodes:
+        errors.append(LintError("R5", "error", "missing Start node", None))
+    if "End" not in nodes:
+        errors.append(LintError("R3", "error", "missing End node", None))
+
+    reachable = _reachable_nodes(adjacency, "Start") if "Start" in nodes else set()
+    for node_id, meta in nodes.items():
+        if node_id != "Start" and node_id not in reachable:
+            errors.append(LintError("R5", "error", f"{node_id} is unreachable from Start", meta["line"]))
+
+    check_nodes = {node_id for node_id, meta in nodes.items() if meta["label"].startswith("Check:")}
+    check_to_end = any("End" in _reachable_nodes(adjacency, node_id) for node_id in check_nodes)
+    if "End" in nodes and not check_to_end:
+        errors.append(LintError("R3", "error", "no `Check:` node has a path to End", None))
+    if "End" in nodes and _end_reachable_without_check(adjacency, nodes):
+        errors.append(LintError("R3", "error", "End is reachable without traversing a `Check:` node", None))
+
+    revise_nodes = {
+        node_id: meta
+        for node_id, meta in nodes.items()
+        if meta["label"].startswith("Revise")
+    }
+    if len(check_nodes) >= 9 and revise_nodes:
+        distinct_revise = len(revise_nodes)
+        has_gate_placeholder = any("<gate>" in meta["label"] for meta in revise_nodes.values())
+        if distinct_revise < len(check_nodes) - 1 and not has_gate_placeholder:
+            errors.append(
+                LintError(
+                    "R4",
+                    "error",
+                    "distinct Revise nodes are underspecified for the number of Check gates",
+                    None,
+                )
+            )
+
+    return errors
+
+
 def braid_template_load(task_type):
     p = braid_template_path(task_type)
     if not p.exists():
@@ -1034,6 +1270,11 @@ def braid_template_load(task_type):
 
 
 def braid_template_write(task_type, body, generator_model):
+    errors = lint_template(body)
+    hard_failures = [err for err in errors if err.severity == "error"]
+    if hard_failures:
+        joined = "; ".join(err.format() for err in hard_failures)
+        raise ValueError(f"BRAID lint failed for {task_type}: {joined}")
     p = braid_template_path(task_type)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".mmd.tmp")
@@ -1062,6 +1303,45 @@ def braid_template_record_use(task_type, topology_error=False):
         entry["uses"] = entry.get("uses", 0) + 1
     idx[task_type] = entry
     save_braid_index(idx)
+
+
+def lint_templates_command(*, template=None, lint_all=False):
+    failures = 0
+    warnings = 0
+
+    if lint_all:
+        names = sorted(p.stem for p in BRAID_TEMPLATES.glob("*.mmd"))
+        dirty = _dirty_braid_template_names()
+        names = [name for name in names if name not in dirty]
+        if dirty:
+            print("skipped dirty templates:", ", ".join(sorted(dirty)))
+    else:
+        names = [template]
+
+    for name in names:
+        body, _ = braid_template_load(name)
+        if body is None:
+            print(f"{name}: missing template")
+            failures += 1
+            continue
+        errors = lint_template(body)
+        hard = [err for err in errors if err.severity == "error"]
+        warns = [err for err in errors if err.severity == "warning"]
+        warnings += len(warns)
+        if hard:
+            failures += 1
+            print(f"{name}: FAIL")
+            for err in hard + warns:
+                print(f"  {err.format()}")
+        else:
+            print(f"{name}: OK")
+            for err in warns:
+                print(f"  {err.format()}")
+
+    if failures:
+        return 1
+    print(f"lint summary: {len(names)} checked, {warnings} warnings")
+    return 0
 
 
 # --- Feature entities --------------------------------------------------------
@@ -1269,7 +1549,7 @@ def tick_planner():
                 f"{project['name']} (feature {feature['feature_id']})."
             ),
             source="tick-planner",
-            braid_template=None,  # planning runs are freeform; they emit slices
+            braid_template=project_historian_template(project["name"]),
             feature_id=feature["feature_id"],
         )
         enqueue_task(task)
@@ -1454,6 +1734,14 @@ def repo_status(repo_path):
     }
 
 
+def today_ymd():
+    return dt.datetime.now().strftime("%Y%m%d")
+
+
+def ppd_report_path(day=None):
+    return REPORT_DIR / f"ppd-{day or today_ymd()}.md"
+
+
 def report(kind):
     ts = dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
@@ -1487,8 +1775,60 @@ def report(kind):
         for c in st["recent_commits"]:
             lines.append(f"  - {c}")
         lines.append("")
+    if kind == "morning":
+        ppd_path = ppd_report_path()
+        if ppd_path.exists():
+            lines += ["", "## PPD", "", ppd_path.read_text().strip()]
     out.write_text("\n".join(lines))
     return out
+
+
+def has_in_flight_task(*, project, braid_template):
+    for state in ("queued", "claimed", "running"):
+        for p in queue_dir(state).glob("*.json"):
+            t = read_json(p, {})
+            if not t:
+                continue
+            if t.get("project") == project and t.get("braid_template") == braid_template:
+                return True
+    return False
+
+
+def tick_memory_synthesis(force=False):
+    """Queue weekly memory-synthesis tasks for stale repo-memory state."""
+    outstanding = engine_outstanding()
+    if outstanding.get("claude", 0) > 1:
+        write_agent_status(
+            "memory-synthesis", "gated",
+            f"Gated — claude slot busy: claude={outstanding['claude']}",
+        )
+        return []
+    write_agent_status("memory-synthesis", "running", "Scanning repo-memory freshness.")
+    cfg = load_config()
+    now = dt.datetime.now()
+    enqueued = []
+    for project in cfg.get("projects", []):
+        current_state = pathlib.Path(project["path"]) / "repo-memory" / "CURRENT_STATE.md"
+        if not current_state.exists():
+            continue
+        age_days = (now - dt.datetime.fromtimestamp(current_state.stat().st_mtime)).total_seconds() / 86400.0
+        if age_days <= 7 and not force:
+            continue
+        if has_in_flight_task(project=project["name"], braid_template="memory-synthesis"):
+            continue
+        task = new_task(
+            role="historian",
+            engine="claude",
+            project=project["name"],
+            summary=f"Weekly memory synthesis for {project['name']}.",
+            source="tick-memory-synthesis",
+            braid_template="memory-synthesis",
+            engine_args={"mode": "memory-synthesis", "force": force},
+        )
+        enqueue_task(task)
+        enqueued.append(project["name"])
+    write_agent_status("memory-synthesis", "idle", f"enqueued={enqueued or '-'} force={force}")
+    return enqueued
 
 
 def status_text():
@@ -1627,6 +1967,9 @@ def main(argv=None):
     p_regt.add_argument("--today", default=None,
                         help="Override weekday (mon|tue|...) for dry-run tests.")
 
+    p_mem = sub.add_parser("tick-memory-synthesis")
+    p_mem.add_argument("--force", action="store_true")
+
     sub.add_parser("reap")
 
     p_clean = sub.add_parser("cleanup-worktrees")
@@ -1634,6 +1977,11 @@ def main(argv=None):
 
     p_sweep = sub.add_parser("pr-sweep")
     p_sweep.add_argument("--dry-run", action="store_true")
+
+    p_lint = sub.add_parser("lint-templates")
+    lint_scope = p_lint.add_mutually_exclusive_group(required=True)
+    lint_scope.add_argument("--all", action="store_true")
+    lint_scope.add_argument("--template", default=None)
 
     p_ff = sub.add_parser("feature-finalize")
     p_ff.add_argument("--dry-run", action="store_true")
@@ -1692,6 +2040,9 @@ def main(argv=None):
     elif args.cmd == "regression-tick":
         out = tick_regression_scheduled(today=args.today)
         print("enqueued:" + (",".join(out) if out else "(none)"))
+    elif args.cmd == "tick-memory-synthesis":
+        out = tick_memory_synthesis(force=args.force)
+        print("enqueued:" + (",".join(out) if out else "(none)"))
     elif args.cmd == "reap":
         n = reap()
         print(f"reaped {n}")
@@ -1704,6 +2055,8 @@ def main(argv=None):
             f"pr-sweep: {checked} checked, {merged} merged, {fb} feedback enqueued, "
             f"{alerted} alerted, {skipped} skipped"
         )
+    elif args.cmd == "lint-templates":
+        raise SystemExit(lint_templates_command(template=args.template, lint_all=args.all))
     elif args.cmd == "feature-finalize":
         checked, opened, abandoned, skipped = feature_finalize(dry_run=args.dry_run)
         print(

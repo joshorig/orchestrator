@@ -1,0 +1,18 @@
+flowchart TD;
+    Start[Start] -- "always" --> ReadRecent[Read: inspect recent memory deltas];
+    ReadRecent -- "recent loaded" --> ReadState[Read: inspect current state];
+    ReadState -- "state loaded" --> ReadDecisions[Read: inspect pinned decisions];
+    ReadDecisions -- "decisions loaded" --> Draft[Draft: synthesize bounded state update];
+    Draft -- "draft ready" --> CheckDelta[Check: delta under 200 lines];
+    CheckDelta -- "delta too large" --> ReviseCheck1[Revise: narrow state delta];
+    ReviseCheck1 -- "retry" --> Draft;
+    CheckDelta -- "delta bounded" --> CheckSecrets[Check: no secrets in synthesized state];
+    CheckSecrets -- "secret found" --> ReviseCheck2[Revise: remove sensitive content];
+    ReviseCheck2 -- "retry" --> Draft;
+    CheckSecrets -- "state clean" --> CheckRecent[Check: RECENT_WORK unchanged];
+    CheckRecent -- "recent changed" --> ReviseCheck3[Revise: preserve recent log];
+    ReviseCheck3 -- "retry" --> Draft;
+    CheckRecent -- "recent unchanged" --> CheckMarkdown[Check: CURRENT_STATE markdown sane];
+    CheckMarkdown -- "markdown broke" --> ReviseCheck4[Revise: restore markdown structure];
+    ReviseCheck4 -- "retry" --> Draft;
+    CheckMarkdown -- "markdown sane" --> End[End];
