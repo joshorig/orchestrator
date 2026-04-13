@@ -15,7 +15,7 @@
       "path": "/Volumes/devssd/repos/ull/lvc-standard",
       "type": "library",
       "playwright": false,
-      "auto_push": false,
+      "auto_push": true,
       "qa": {
         "smoke": "qa/smoke.sh",
         "regression": "qa/regression.sh",
