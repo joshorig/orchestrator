@@ -169,7 +169,7 @@ def write_pr_body(target, project, qa_log_path, driver_task_id):
     try:
         if qa_log_path and pathlib.Path(qa_log_path).exists():
             lines = pathlib.Path(qa_log_path).read_text(errors="replace").splitlines()
-            log_tail = "\n".join(lines[-40:])
+            log_tail = "\n".join(lines[-120:])
     except Exception as exc:
         log_tail = f"(could not read qa log: {exc})"
 
@@ -223,7 +223,7 @@ def write_pr_body(target, project, qa_log_path, driver_task_id):
 ## QA evidence
 
 Smoke script: `{project.get('qa', {}).get('smoke', '(none)')}`
-Smoke log (last 40 lines):
+Smoke log (last 120 lines):
 
 ```
 {log_tail}
