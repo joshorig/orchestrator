@@ -43,7 +43,7 @@
         "smoke": "qa/smoke.sh",
         "regression": "qa/regression.sh",
         "regression_days": ["sun"],
-        "regression_threshold_pct": null
+        "regression_threshold_pct": 3
       }
     }
   ]
