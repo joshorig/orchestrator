@@ -1,0 +1,26 @@
+# Secrets — never commit
+config/telegram.json
+config/*.env
+
+# Live BRAID stats — mutates per task claim, regenerable from logs
+braid/index.json
+
+# Runtime state
+logs/
+queue/
+state/
+artifacts/
+reports/
+telegram/inbox/
+telegram/outbox/
+tmux/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/

@@ -1,0 +1,53 @@
+flowchart TD;
+    Start[Start] -- "always" --> ReadModule[Read: locate <module> source tree];
+    ReadModule -- "source found" --> ReadTests[Read: locate existing tests for <module>];
+    ReadModule -- "source not found" --> Halt[Halt: invalid module path];
+    ReadTests -- "tests found" --> ReadAPI[Read: identify public API surface of <operator>];
+    ReadTests -- "no tests exist" --> ScaffoldTests[Scaffold: create test stub for <operator>];
+    ScaffoldTests -- "stub created" --> ReadAPI;
+    ReadAPI -- "API surface mapped" --> IdentifyHotPath[Identify: mark <hot_path> boundaries];
+    IdentifyHotPath -- "hot path marked" --> IdentifyPools[Identify: find preallocated pools in scope];
+    IdentifyPools -- "pools catalogued" --> IdentifyContracts[Identify: list invariant contracts touched by <operator>];
+    IdentifyContracts -- "contracts listed" --> SketchSig[Sketch: define <operator> method signature];
+    SketchSig -- "signature drafted" --> SketchFlow[Sketch: outline control flow through <operator>];
+    SketchFlow -- "flow outlined" --> SketchAlloc[Sketch: verify no allocation sites in <hot_path>];
+    SketchAlloc -- "sketch clean" --> DraftImpl[Draft: implement <operator> in worktree];
+    DraftImpl -- "implementation written" --> DraftWire[Draft: wire <operator> into <module> registry];
+    DraftWire -- "wiring complete" --> RunUnit[Run: execute unit tests for <module>];
+    RunUnit -- "tests pass" --> CheckZeroAlloc;
+    RunUnit -- "tests fail" --> ReviseImpl[Revise: fix failing unit tests];
+    ReviseImpl -- "fix applied" --> RunUnit;
+
+    CheckZeroAlloc[Check: zero alloc on hot path] -- "pass" --> CheckGC;
+    CheckZeroAlloc -- "fail: allocation detected" --> ReviseAlloc[Revise: remove allocation from <hot_path>];
+    ReviseAlloc -- "allocation removed" --> CheckZeroAlloc;
+
+    CheckGC[Check: no GC hiccups above JMH smoke gate] -- "pass" --> CheckJava21;
+    CheckGC -- "fail: GC threshold exceeded" --> ReviseGC[Revise: reduce allocation pressure];
+    ReviseGC -- "pressure reduced" --> CheckGC;
+
+    CheckJava21[Check: Java 21 source/target] -- "pass" --> CheckIPC;
+    CheckJava21 -- "fail: downlevel construct found" --> ReviseJava[Revise: replace with Java 21 equivalent];
+    ReviseJava -- "construct replaced" --> CheckJava21;
+
+    CheckIPC[Check: IPC matches in-proc semantics] -- "pass" --> CheckPerKey;
+    CheckIPC -- "fail: semantic divergence" --> ReviseIPC[Revise: align normalization and ordering];
+    ReviseIPC -- "alignment restored" --> CheckIPC;
+
+    CheckPerKey[Check: per-key in-order in guaranteed mode] -- "pass" --> CheckFrag;
+    CheckPerKey -- "fail: reordering detected" --> ReviseOrder[Revise: restore per-key ordering];
+    ReviseOrder -- "ordering fixed" --> CheckPerKey;
+
+    CheckFrag[Check: fragmentation reassembly intact] -- "pass" --> CheckConformance;
+    CheckFrag -- "fail: reassembly broken" --> ReviseFrag[Revise: fix fragment handler];
+    ReviseFrag -- "handler fixed" --> CheckFrag;
+
+    CheckConformance[Check: conformanceSuite green] -- "pass" --> CheckJMH;
+    CheckConformance -- "fail: conformance regression" --> ReviseConf[Revise: fix conformance failure];
+    ReviseConf -- "conformance restored" --> CheckConformance;
+
+    CheckJMH[Check: jmhQuickcheck delta within noise] -- "pass" --> End;
+    CheckJMH -- "fail: delta exceeds 3 percent" --> RevisePerf[Revise: optimize <operator> perf regression];
+    RevisePerf -- "regression addressed" --> CheckJMH;
+
+    End[End];

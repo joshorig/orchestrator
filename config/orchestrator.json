@@ -1,0 +1,38 @@
+{
+  "slots": {
+    "claude": { "timeout_sec": 1800, "max_budget_usd": 0.50 },
+    "codex":  { "timeout_sec": 1800 },
+    "qa":     { "timeout_sec": 900 }
+  },
+  "concurrency": {
+    "coding_workers": 1,
+    "review_workers": 1,
+    "qa_workers": 1
+  },
+  "projects": [
+    {
+      "name": "lvc-standard",
+      "path": "/Volumes/devssd/repos/ull/lvc-standard",
+      "type": "library",
+      "playwright": false,
+      "qa": {
+        "smoke": "qa/smoke.sh",
+        "regression": "qa/regression.sh",
+        "regression_days": ["sun", "wed"],
+        "regression_threshold_pct": 3
+      }
+    },
+    {
+      "name": "dag-framework",
+      "path": "/Volumes/devssd/repos/ull/dag_framework",
+      "type": "library",
+      "playwright": false
+    },
+    {
+      "name": "trade-research-platform",
+      "path": "/Volumes/devssd/repos/apps/trade-research-platform",
+      "type": "application",
+      "playwright": true
+    }
+  ]
+}

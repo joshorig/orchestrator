@@ -1,0 +1,6 @@
+{
+  "_comment": "Copy to telegram.json (chmod 600) and fill in real values. telegram.json is gitignored.",
+  "bot_token": "REPLACE_WITH_REAL_TOKEN_FROM_BOTFATHER",
+  "allowed_chat_ids": [123456789],
+  "push_reports": true
+}
