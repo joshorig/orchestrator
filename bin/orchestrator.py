@@ -462,6 +462,117 @@ def _comment_is_actionable(comment):
     return _pr_body_has_orchestrator_mention(comment.get("body", ""))
 
 
+def _unresolved_bot_review_threads(repo_path, pr_number, pr_url=None):
+    """Return unresolved PR review threads started by allowlisted bots.
+
+    This is the merge-gate equivalent of `_comment_is_actionable`: both share
+    the AUTO_HANDLE_COMMENT_AUTHORS allowlist, but this path uses GraphQL to
+    reach `reviewThreads.isResolved`, which the REST `comments` field on
+    `gh pr view` does NOT expose. Without this check, a P2 review-thread
+    comment from chatgpt-codex-connector is invisible to pr-sweep — the PR
+    shows reviewDecision="" (no formal "Changes Requested") and Case 4 merges
+    through it. That is exactly how PR #13 shipped a buggy
+    AgronaHistogram.addToBucket past an unresolved bot review.
+
+    Mirrors the GraphQL query in
+    .github/workflows/unresolved-bot-review.yml so the client-side and
+    GitHub-side gates agree on what counts as blocking.
+
+    Fail-open on GH API errors: returns [] so a transient GraphQL flake
+    does not stall every auto-merge. The GitHub Action remains the
+    belt-and-suspenders backstop when it is wired up as a required status
+    check on the target branch.
+    """
+    owner = name = None
+    if pr_url:
+        m = re.search(r"github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?/pull/", pr_url)
+        if m:
+            owner, name = m.group(1), m.group(2)
+    if not owner or not name:
+        try:
+            gp = subprocess.run(
+                ["gh", "repo", "view", "--json", "owner,name"],
+                cwd=repo_path,
+                capture_output=True, text=True, timeout=15,
+            )
+        except subprocess.TimeoutExpired:
+            return []
+        if gp.returncode == 0:
+            try:
+                d = json.loads(gp.stdout or "{}")
+                owner = (d.get("owner") or {}).get("login")
+                name = d.get("name")
+            except json.JSONDecodeError:
+                return []
+    if not owner or not name:
+        return []
+
+    query = (
+        "query($owner:String!, $repo:String!, $number:Int!) {"
+        "  repository(owner:$owner, name:$repo) {"
+        "    pullRequest(number:$number) {"
+        "      reviewThreads(first:100) {"
+        "        pageInfo { hasNextPage }"
+        "        nodes {"
+        "          isResolved"
+        "          path"
+        "          line"
+        "          comments(first:1) {"
+        "            nodes { author { login } url body }"
+        "          }"
+        "        }"
+        "      }"
+        "    }"
+        "  }"
+        "}"
+    )
+    try:
+        proc = subprocess.run(
+            ["gh", "api", "graphql",
+             "-F", f"owner={owner}",
+             "-F", f"repo={name}",
+             "-F", f"number={pr_number}",
+             "-f", f"query={query}"],
+            cwd=repo_path,
+            capture_output=True, text=True, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return []
+    if proc.returncode != 0:
+        print(f"pr-sweep: graphql reviewThreads failed: {(proc.stderr or '').strip()[:200]}")
+        return []
+    try:
+        data = json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError:
+        return []
+
+    threads = (
+        (((data.get("data") or {}).get("repository") or {}).get("pullRequest") or {})
+        .get("reviewThreads", {})
+        .get("nodes", [])
+    ) or []
+    out = []
+    for t in threads:
+        if t.get("isResolved"):
+            continue
+        first_nodes = (t.get("comments") or {}).get("nodes") or []
+        if not first_nodes:
+            continue
+        first = first_nodes[0]
+        login = ((first.get("author") or {}).get("login") or "").lower()
+        normalized = login[:-5] if login.endswith("[bot]") else login
+        if normalized not in AUTO_HANDLE_COMMENT_AUTHORS:
+            continue
+        out.append({
+            "login": (first.get("author") or {}).get("login", ""),
+            "path": t.get("path"),
+            "line": t.get("line"),
+            "url": first.get("url"),
+            "body": (first.get("body") or "")[:500],
+        })
+    return out
+
+
 def _extract_actionable_comments(pr_info, already_handled):
     """Return list of {id, author, body, created_at} for unhandled actionables."""
     out = []
@@ -849,6 +960,43 @@ def pr_sweep(dry_run=False):
                 "last_mergeable": mergeable,
                 "last_merge_state": merge_state,
             }))
+            continue
+
+        # Case 3.5: unresolved review threads from allowlisted bots block
+        # merge. reviewDecision stays "" when a bot leaves a plain review
+        # comment instead of a formal Changes Requested review, so Case 4
+        # would otherwise merge straight through. GraphQL is the only path
+        # to reviewThreads.isResolved — REST `gh pr view --json comments`
+        # does not expose it. Mirrors
+        # .github/workflows/unresolved-bot-review.yml (the GH-side backstop).
+        unresolved_bot_threads = _unresolved_bot_review_threads(
+            repo_path, pr_number, pr_url,
+        )
+        if unresolved_bot_threads:
+            count = len(unresolved_bot_threads)
+            updates = {
+                "last_mergeable": mergeable,
+                "unresolved_bot_threads": count,
+                "last_feedback_reason": "unresolved_bot_review_threads",
+            }
+            if not sweep.get("bot_review_alerted_at"):
+                sample = unresolved_bot_threads[0]
+                _write_pr_alert(
+                    project_name, task.get("task_id"), pr_number,
+                    f"{count} unresolved review thread(s) from allowlisted "
+                    f"bot(s); first: @{sample.get('login') or '(bot)'} at "
+                    f"{sample.get('path') or '(none)'}:"
+                    f"{sample.get('line') or 0}",
+                    pr_url,
+                )
+                updates["bot_review_alerted_at"] = now_iso()
+                alerted += 1
+            task = update_task_in_place(task_file, stamp_sweep(updates))
+            print(
+                f"pr-sweep {task.get('task_id')}: blocked on {count} "
+                f"unresolved bot review thread(s)"
+            )
+            skipped += 1
             continue
 
         # Case 4: fully green — auto-merge (feature-targeted only).
