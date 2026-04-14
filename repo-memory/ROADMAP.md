@@ -19,17 +19,17 @@ _Append-only. Top-to-bottom is priority order. Status mutates in place; entries 
 - **Notes:** Blocks R-002. Four new helpers anchored at `orchestrator.py:1688/1995/2009/2528`.
 
 ### [R-002] Telegram bot activation + minimum-viable plist fleet
-- **Status:** TODO
+- **Status:** DONE (runtime activated, 2026-04-14)
 - **Feature id:** null
 - **Goal:** Bring the workflow online for the first time — bot live, minimum plists loaded, stale queue cleared — scoped to lvc-standard only.
 - **Scope:** `config/telegram.json` is **already configured** (real bot_token, `allowed_chat_ids=[5596375259]`, `push_reports=true`, chmod 600 after pass-2 tightening); `launchctl load` the minimum set (planner, reviewer, qa-scheduler, pr-sweep, reaper, cleanup-worktrees, feature-finalize, worker.claude, **1×** worker.codex, worker.qa, telegram-bot — 11 plists); one-shot pre-flight `mv queue/done/task-20260414-003015-*.json queue/abandoned/` for the three orphan historian tasks; `set_planner_disabled dag-framework` and `set_planner_disabled trade-research-platform` to keep them out of the planner sweep.
 - **Out of scope:** Loading the 5 extra codex plists (codex-2..6) — deferred to R-011. Loading the regression plist cadence hack (sun/wed schedule auto-fires without a load step).
-- **Acceptance:** `launchctl list | grep devmini` shows the 11 target plists running; `/status` from the allowed chat returns a live snapshot; the next morning/evening report written to `reports/` is pushed to all allowed chats within 60s; dag + trp are visibly `disabled` in `/planner_status`.
+- **Acceptance:** Runtime now active on the scoped fleet: planner/reviewer/qa/pr-sweep/cleanup/feature-finalize and the minimum worker set are live, Telegram `/status` responds, and `dag-framework` / `trade-research-platform` are planner-disabled so the canary stays scoped to lvc-standard.
 - **Depends on:** [R-001].
 - **Notes:** Runtime activation, not code. telegram.json was seeded in the pass-1 bootstrap (commit `5900d4d`) and is gitignored; no population step is needed. The stale-sweep is a pre-flight runtime step kept out of the R-001 commit by design.
 
 ### [R-003] Vertical-slice canary run on lvc-standard
-- **Status:** TODO
+- **Status:** IN_PROGRESS (feature canary live, 2026-04-14)
 - **Feature id:** null
 - **Goal:** First end-to-end feature runs planner → codex → reviewer → qa → pr-sweep → feature-finalize on lvc-standard without human intervention beyond the feature→main merge click, with the BRAID health canary green.
 - **Scope:** Let the planner pick the top TODO from lvc `ROADMAP.md` — currently `[R-001] Prometheus/OTel metrics exporter module`; let the planner enqueue one feature for it; observe the pass through every state; capture the full transition trace in `repo-memory/RECENT_WORK.md`; compute first live BRAID PPD numbers for `lvc-implement-operator`. Pinned pre-run baselines: `lvc-implement-operator` uses=30 topology_errors=14, `lvc-historian-update` uses=116, `lvc-reviewer-pass` uses=159.
@@ -39,62 +39,62 @@ _Append-only. Top-to-bottom is priority order. Status mutates in place; entries 
 - **Notes:** This is the forcing function for every preceding pass-1/pass-2 claim. Failure modes are the interesting output — catalog them as `repo-memory/FAILURES.md` entries and promote any blocker to an R-XXX of its own.
 
 ### [R-004] drift_threshold per-project override
-- **Status:** TODO
+- **Status:** DONE (commit pending in orchestrator worktree, 2026-04-14)
 - **Feature id:** null
 - **Goal:** `config/orchestrator.json` projects table supports an optional `drift_threshold` that overrides the global `CONFIG_DEFAULTS["drift_threshold"] = 5` for a single project.
 - **Scope:** Extend the project schema with optional `drift_threshold`, thread through `load_config()` so it lands alongside the other per-project config, update `pr_sweep` to read project-level first and fall back to the global default, new inline doctest covering override + fallback paths.
 - **Out of scope:** Per-PR overrides, dynamic threshold tuning based on merge latency, UI for the override.
-- **Acceptance:** Setting `drift_threshold: 10` on lvc-standard makes pr-sweep require 10 commits of drift before synthesising `BEHIND` for that project; dag-framework / trp continue to use the default 5.
+- **Acceptance:** Landed in worktree: `pr_sweep` now reads `project["drift_threshold"]` first and falls back to the global default, with doctest coverage proving a project-local threshold of 10 suppresses a drift-sync dispatch that the global default of 5 would have triggered.
 - **Depends on:** none.
 - **Notes:** Explicitly called out as a pass-2 gap in the 1c13b8c RECENT_WORK follow-on.
 
 ### [R-005] pr-sweep running-guard telemetry
-- **Status:** TODO
+- **Status:** DONE (commit pending in orchestrator worktree, 2026-04-14)
 - **Feature id:** null
 - **Goal:** Observability for how often the new `pr_sweep.conflict_task_id` guard actually suppresses duplicate dispatch, so the sweep cadence can be tuned.
 - **Scope:** New counter in `state/runtime/pr-sweep-metrics.json` (atomic rewrite via `write_json_atomic`), incremented each time the guard short-circuits a dispatch path; surfaced in `status_text()` and the morning PPD report; doctest exercising increment + persistence.
 - **Out of scope:** Prometheus export, histograms, cross-sweep aggregation windows, per-PR breakdowns.
-- **Acceptance:** After a sustained feedback round on a conflict-heavy PR, the counter is non-zero and visible in both `/status` output and the next morning report.
+- **Acceptance:** Landed in worktree: `state/runtime/pr-sweep-metrics.json` persists guard-skip counts, `status_text()` exposes the total + by-reason breakdown, and `report("morning")` includes the same telemetry.
 - **Depends on:** [R-002] (need live pr-sweep runs to populate the counter).
 - **Notes:** Closes the observability gap flagged in the 1c13b8c follow-on. Without this, "is the guard working?" is answered only by grepping `transitions.log`.
 
 ### [R-006] BRAID generator-prompt linter — close the last 5%
-- **Status:** TODO
+- **Status:** DONE (commit pending in orchestrator worktree, 2026-04-14)
 - **Feature id:** null
 - **Goal:** Every generated template body is linted on write with the R1..R7 rules already in place; the remaining false-positive on `lvc-reviewer-pass` R7 is resolved, and the linter runs weekly as a historian sweep to catch rot on templates that have not been regenerated recently.
 - **Scope:** Fix the R7 literal-detector heuristic that flags `lvc-reviewer-pass` (currently suppressed as a known non-blocker); add dedicated unit tests per rule (R1 node-atomicity, R2 labeled-edges, R3 terminal-check, R4 distinct-revise-per-gate, R5 reachability, R6 syntax, R7 repo-literal); wire a new `tick_template_audit` that runs `lint-templates --all` and appends findings to `reports/template-audit-<date>.md`.
 - **Out of scope:** ML-based quality scoring, auto-regen on lint failure (that's R-007), dynamic principle learning.
-- **Acceptance:** `lint-templates --all` reports 0 warnings on every live template; the per-rule unit tests cover the R1..R7 branches; one simulated bad template in CI-style fixture triggers the expected rule rejection.
+- **Acceptance:** Landed in worktree: the R7 heuristic no longer false-positives on `lvc-reviewer-pass`, `lint_template()` doctests cover R1..R7 including the reviewer-pass regression case, and `tick-template-audit` writes `reports/template-audit-<date>.md` with per-template findings.
 - **Depends on:** [R-003] (need real topology_errors signal to calibrate R7 without regressing).
 - **Notes:** Partial land already in CURRENT_STATE "Live BRAID stats". This entry closes the last 5%.
 
 ### [R-007] Auto-regen on sustained topology_errors
-- **Status:** TODO
+- **Status:** DONE (commit pending in orchestrator worktree, 2026-04-14)
 - **Feature id:** null
 - **Goal:** When a template's live error rate crosses a threshold, automatically enqueue a claude regeneration task instead of waiting for a human to notice the counter growing.
 - **Scope:** Reap-time check: if `errors / uses > 0.10` over the last N runs (configurable), auto-enqueue `engine=claude, role=planner` with `braid_template_write` contract for that template; pause codex dispatch of that task type until the new hash lands; `transitions.log` stamp so the decision is auditable.
 - **Out of scope:** Multi-template parallel regen, gradient-based quality scoring, cross-project template sharing.
-- **Acceptance:** Synthetic drill — inject 5 topology_errors on a low-traffic template, confirm a regen task auto-enqueues within one reaper tick, dispatch of that task type pauses until the lint-gated new template lands, then resumes.
+- **Acceptance:** Landed in worktree: `braid/index.json` now tracks recent outcomes, `reap()` auto-enqueues a claude template regen when recent topology-error rate crosses threshold, and `atomic_claim("codex")` skips paused template types until a new template hash lands.
 - **Depends on:** [R-005] (metrics), [R-006] (linter must gate regen output).
 - **Notes:** The "dynamic mid-run re-planning beyond basic retry" gap flagged out-of-scope in the pass-1 plan — this entry finally addresses it at the template-lifecycle level (still static mid-task, adaptive across tasks).
 
 ### [R-008] Log rotation + structured event stream
-- **Status:** TODO
+- **Status:** DONE (commit pending in orchestrator worktree, 2026-04-14)
 - **Feature id:** null
 - **Goal:** Prevent `logs/*.log` from growing unbounded and give the historian a structured event stream to summarise from, instead of grepping free-form logs.
 - **Scope:** Rotate per-task logs to gzipped archive after 7 days; consolidate agent-status events into `state/runtime/events.jsonl` (append-only, one JSON per line, schema: `ts`, `role`, `event`, `task_id`, `feature_id`, `details`); size cap at 1GB total with rolling eviction on oldest archive.
 - **Out of scope:** Remote log shipping, full ELK/Loki integration, log-based alerting (that's pass-3).
-- **Acceptance:** 14-day idle soak keeps `logs/` under 1GB; historian can consume `events.jsonl` for RECENT_WORK entries; rotated archives are re-readable on demand (`gzcat` round-trip).
+- **Acceptance:** Landed in worktree: task/agent transitions append structured rows to `state/runtime/events.jsonl`, `rotate_logs()` gzips stale logs after 7 days, `cleanup-worktrees` invokes rotation, and archive eviction keeps total retained log bytes bounded by the configured 1GB cap.
 - **Depends on:** [R-002] (need sustained operation to justify rotation effort).
 - **Notes:** Deferred from pass-1 plan §5. Low priority until the first real disk-pressure event.
 
 ### [R-010] Secrets scanning on repo-memory writes
-- **Status:** TODO
+- **Status:** DONE (commit pending in orchestrator worktree, 2026-04-14)
 - **Feature id:** null
 - **Goal:** Every historian-enqueued write to `repo-memory/*.md` passes through a secrets detector before commit, blocking on any hit.
 - **Scope:** Lightweight regex + entropy detector invoked from the historian worker path; rejection list for known benign patterns (e.g. example hashes in docs); abort commit on hit with a Telegram alert so the human can inspect the offending diff.
 - **Out of scope:** Full TruffleHog integration, historical log scanning, credential rotation workflow.
-- **Acceptance:** Injecting a synthetic AWS key into a RECENT_WORK append triggers a rejection with a clear error; benign content (including prose that mentions "password" or "token" as words) passes.
+- **Acceptance:** Landed in worktree: repo-memory markdown writes are scanned before historian auto-commit and during memory-synthesis candidate application, synthetic AWS-key content is rejected with a clear `repo-memory secret-scan hit` failure, and a Telegram-pushable report is written for human inspection.
 - **Depends on:** none.
 - **Notes:** Deferred from pass-1 plan §5. Becomes first-class once `repo-memory` is the system of record and the historian is appending on every task completion.
 

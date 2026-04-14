@@ -19,6 +19,7 @@ from dataclasses import dataclass
 import datetime as dt
 import errno
 import fcntl
+import gzip
 import hashlib
 import json
 import os
@@ -40,10 +41,13 @@ RUNTIME_DIR = STATE_ROOT / "state" / "runtime"
 PLANNER_DISABLED_DIR = RUNTIME_DIR / "planner-disabled"
 CLAIMS_DIR = RUNTIME_DIR / "claims"
 LOCKS_DIR = RUNTIME_DIR / "locks"
+EVENTS_LOG = RUNTIME_DIR / "events.jsonl"
+PR_SWEEP_METRICS_PATH = RUNTIME_DIR / "pr-sweep-metrics.json"
 FEATURES_DIR = STATE_ROOT / "state" / "features"
 TRANSITIONS_LOG = RUNTIME_DIR / "transitions.log"
 REPORT_DIR = STATE_ROOT / "reports"
 LOGS_DIR = STATE_ROOT / "logs"
+LOG_ARCHIVE_DIR = LOGS_DIR / "archive"
 TELEGRAM_INBOX = STATE_ROOT / "telegram" / "inbox"
 TELEGRAM_OUTBOX = STATE_ROOT / "telegram" / "outbox"
 BRAID_DIR = STATE_ROOT / "braid"
@@ -72,6 +76,18 @@ VALID_ENGINES = ("claude", "codex", "qa")
 VALID_ROLES = ("planner", "implementer", "reviewer", "qa", "historian")
 CONFIG_DEFAULTS = {
     "drift_threshold": 5,
+    "topology_error_regen_threshold": 0.10,
+    "topology_error_regen_window": 20,
+    "topology_error_regen_min_samples": 5,
+}
+
+BRAID_RECENT_OUTCOMES_MAX = 50
+LOG_RETENTION_DAYS = 7
+LOG_SIZE_CAP_BYTES = 1024 * 1024 * 1024
+R7_ALLOWED_CAPS = {
+    "API", "BRAID", "CI", "CLI", "CPU", "CSS", "FIXME", "GH", "HTML", "HTTP",
+    "JSON", "JVM", "OK", "PNG", "PPD", "PR", "QA", "RSA", "SHA", "TODO",
+    "TS", "TTL", "UI", "URL", "UUID", "XML", "XXX", "YAML",
 }
 
 
@@ -133,6 +149,282 @@ def append_transition(task_id, from_state, to_state, reason=""):
     TRANSITIONS_LOG.parent.mkdir(parents=True, exist_ok=True)
     with TRANSITIONS_LOG.open("a") as f:
         f.write(f"{now_iso()}\t{task_id}\t{from_state}\t->\t{to_state}\t{reason}\n")
+
+
+def append_event(role, event, *, task_id=None, feature_id=None, details=None):
+    EVENTS_LOG.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "ts": now_iso(),
+        "role": role,
+        "event": event,
+        "task_id": task_id,
+        "feature_id": feature_id,
+        "details": details or {},
+    }
+    with EVENTS_LOG.open("a") as f:
+        f.write(json.dumps(payload, sort_keys=True) + "\n")
+
+
+def read_pr_sweep_metrics():
+    data = read_json(PR_SWEEP_METRICS_PATH, {}) or {}
+    data.setdefault("guard_skip_total", 0)
+    data.setdefault("guard_skip_by_reason", {})
+    data.setdefault("updated_at", None)
+    return data
+
+
+def record_pr_sweep_guard_skip(reason):
+    """Increment the persistent pr-sweep running-guard telemetry counter.
+
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     old = record_pr_sweep_guard_skip.__globals__["PR_SWEEP_METRICS_PATH"]
+    ...     record_pr_sweep_guard_skip.__globals__["PR_SWEEP_METRICS_PATH"] = pathlib.Path(tmp) / "pr-sweep-metrics.json"
+    ...     _ = record_pr_sweep_guard_skip("task_conflict")
+    ...     out = record_pr_sweep_guard_skip("task_conflict")
+    ...     record_pr_sweep_guard_skip.__globals__["PR_SWEEP_METRICS_PATH"] = old
+    >>> (out["guard_skip_total"], out["guard_skip_by_reason"]["task_conflict"])
+    (2, 2)
+    """
+    metrics = read_pr_sweep_metrics()
+    metrics["guard_skip_total"] = int(metrics.get("guard_skip_total", 0)) + 1
+    by_reason = dict(metrics.get("guard_skip_by_reason") or {})
+    by_reason[reason] = int(by_reason.get(reason, 0)) + 1
+    metrics["guard_skip_by_reason"] = by_reason
+    metrics["updated_at"] = now_iso()
+    write_json_atomic(PR_SWEEP_METRICS_PATH, metrics)
+    return metrics
+
+
+def _recent_template_stats(entry, window):
+    outcomes = list((entry or {}).get("recent_outcomes") or [])[-max(0, int(window)):]
+    samples = len(outcomes)
+    errors = sum(1 for outcome in outcomes if outcome == "topology_error")
+    rate = (errors / samples) if samples else 0.0
+    return samples, errors, rate
+
+
+def _template_owner_project(config, task_type):
+    if task_type.startswith("dag-"):
+        return "dag-framework"
+    if task_type.startswith("trp-"):
+        return "trade-research-platform"
+    if task_type.startswith("lvc-") or task_type in ("pr-address-feedback", "review-address-feedback", "memory-synthesis"):
+        return "lvc-standard"
+    projects = config.get("projects", [])
+    return projects[0]["name"] if projects else None
+
+
+def _template_regen_in_flight(task_type):
+    for state in ("queued", "claimed", "running"):
+        for path in queue_dir(state).glob("*.json"):
+            task = read_json(path, {})
+            if task.get("engine") != "claude":
+                continue
+            if task.get("braid_template") != task_type:
+                continue
+            if (task.get("engine_args") or {}).get("mode") == "template-gen":
+                return True
+    return False
+
+
+def tick_template_audit(today=None):
+    """Write a template-audit report under reports/ for all live templates.
+
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     templates = root / "templates"
+    ...     reports = root / "reports"
+    ...     templates.mkdir()
+    ...     _ = (templates / "good.mmd").write_text("flowchart TD;\\nStart[Start] -- \\"always\\" --> C1[Check: ok];\\nC1 -- \\"pass\\" --> End[End];\\n")
+    ...     old = {k: tick_template_audit.__globals__[k] for k in ("BRAID_TEMPLATES", "REPORT_DIR", "now_iso")}
+    ...     tick_template_audit.__globals__["BRAID_TEMPLATES"] = templates
+    ...     tick_template_audit.__globals__["REPORT_DIR"] = reports
+    ...     tick_template_audit.__globals__["now_iso"] = lambda: "2026-04-14T12:00:00"
+    ...     out = tick_template_audit(today="2026-04-14")
+    ...     body = pathlib.Path(out).read_text()
+    ...     for key, value in old.items():
+    ...         tick_template_audit.__globals__[key] = value
+    >>> ("template-audit-2026-04-14.md" in str(out), "good: OK" in body)
+    (True, True)
+    """
+    day = today or dt.date.today().isoformat()
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    out = REPORT_DIR / f"template-audit-{day}.md"
+    names = sorted(p.stem for p in BRAID_TEMPLATES.glob("*.mmd"))
+    lines = ["# Template Audit", "", f"Generated: {now_iso()}", ""]
+    failures = 0
+    warnings = 0
+    if not names:
+        lines.append("- (no templates found)")
+    for name in names:
+        body = braid_template_path(name).read_text()
+        errors = lint_template(body)
+        hard = [err for err in errors if err.severity == "error"]
+        warns = [err for err in errors if err.severity == "warning"]
+        failures += len(hard)
+        warnings += len(warns)
+        status = "FAIL" if hard else "OK"
+        lines.append(f"- {name}: {status}")
+        for err in hard + warns:
+            lines.append(f"  - {err.format()}")
+    lines += ["", f"- total hard failures: {failures}", f"- total warnings: {warnings}", ""]
+    out.write_text("\n".join(lines))
+    append_event("template-audit", "report_written", details={"path": str(out), "failures": failures, "warnings": warnings})
+    return out
+
+
+def tick_braid_auto_regen(config=None):
+    """Enqueue template regeneration when recent topology errors stay high.
+
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     idx_path = root / "index.json"
+    ...     queue_root = root / "queue"
+    ...     for state in STATES:
+    ...         (queue_root / state).mkdir(parents=True, exist_ok=True)
+    ...     _ = idx_path.write_text(json.dumps({
+    ...         "demo-template": {
+    ...             "hash": "sha256:old",
+    ...             "recent_outcomes": ["topology_error"] * 5,
+    ...             "uses": 0,
+    ...             "topology_errors": 5,
+    ...         }
+    ...     }))
+    ...     captured = []
+    ...     old = {k: tick_braid_auto_regen.__globals__[k] for k in ("BRAID_INDEX", "QUEUE_ROOT", "new_task", "enqueue_task", "now_iso")}
+    ...     tick_braid_auto_regen.__globals__["BRAID_INDEX"] = idx_path
+    ...     tick_braid_auto_regen.__globals__["QUEUE_ROOT"] = queue_root
+    ...     tick_braid_auto_regen.__globals__["new_task"] = lambda **kwargs: {"task_id": "task-regen", **kwargs}
+    ...     tick_braid_auto_regen.__globals__["enqueue_task"] = lambda task: captured.append(task["braid_template"])
+    ...     tick_braid_auto_regen.__globals__["now_iso"] = lambda: "2026-04-14T12:00:00"
+    ...     cfg = {"projects": [{"name": "lvc-standard", "path": str(root)}], "topology_error_regen_threshold": 0.10, "topology_error_regen_window": 5, "topology_error_regen_min_samples": 5}
+    ...     out = tick_braid_auto_regen(cfg)
+    ...     saved = json.loads(idx_path.read_text())["demo-template"]
+    ...     for key, value in old.items():
+    ...         tick_braid_auto_regen.__globals__[key] = value
+    >>> (out, captured, saved["dispatch_paused"], saved["auto_regen_task_id"])
+    (['demo-template'], ['demo-template'], True, 'task-regen')
+    """
+    config = config or load_config()
+    idx = load_braid_index()
+    changed = False
+    enqueued = []
+    threshold = float(config.get("topology_error_regen_threshold", CONFIG_DEFAULTS["topology_error_regen_threshold"]))
+    window = int(config.get("topology_error_regen_window", CONFIG_DEFAULTS["topology_error_regen_window"]))
+    min_samples = int(config.get("topology_error_regen_min_samples", CONFIG_DEFAULTS["topology_error_regen_min_samples"]))
+    for task_type, entry in sorted(idx.items()):
+        samples, errors, rate = _recent_template_stats(entry, window)
+        if samples < min_samples or rate <= threshold:
+            continue
+        if entry.get("dispatch_paused") or _template_regen_in_flight(task_type):
+            continue
+        project_name = _template_owner_project(config, task_type)
+        if not project_name:
+            continue
+        task = new_task(
+            role="planner",
+            engine="claude",
+            project=project_name,
+            summary=f"Generate BRAID template for {task_type}",
+            source=f"auto-regen:{task_type}",
+            braid_template=task_type,
+            engine_args={
+                "mode": "template-gen",
+                "auto_regen": True,
+                "topology_error_rate": rate,
+                "topology_error_samples": samples,
+                "topology_error_count": errors,
+            },
+        )
+        enqueue_task(task)
+        entry["dispatch_paused"] = True
+        entry["dispatch_paused_at"] = now_iso()
+        entry["dispatch_pause_reason"] = f"recent topology error rate {errors}/{samples} ({rate:.0%})"
+        entry["auto_regen_task_id"] = task["task_id"]
+        entry["auto_regen_requested_at"] = now_iso()
+        idx[task_type] = entry
+        changed = True
+        enqueued.append(task_type)
+        append_event("template-auto-regen", "enqueued", details={
+            "braid_template": task_type,
+            "task_id": task["task_id"],
+            "error_rate": rate,
+            "samples": samples,
+            "errors": errors,
+        })
+    if changed:
+        save_braid_index(idx)
+    return enqueued
+
+
+def rotate_logs(now=None):
+    """Rotate stale logs and evict oldest archives to keep logs/ bounded.
+
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     logs = root / "logs"
+    ...     logs.mkdir()
+    ...     old_log = logs / "task-old.log"
+    ...     _ = old_log.write_text("hello\\n")
+    ...     ts = time.time() - (LOG_RETENTION_DAYS + 1) * 86400
+    ...     os.utime(old_log, (ts, ts))
+    ...     old = {k: rotate_logs.__globals__[k] for k in ("LOGS_DIR", "LOG_ARCHIVE_DIR", "LOG_SIZE_CAP_BYTES")}
+    ...     rotate_logs.__globals__["LOGS_DIR"] = logs
+    ...     rotate_logs.__globals__["LOG_ARCHIVE_DIR"] = logs / "archive"
+    ...     rotate_logs.__globals__["LOG_SIZE_CAP_BYTES"] = 1024 * 1024
+    ...     out = rotate_logs(now=dt.datetime.now())
+    ...     archived = sorted((logs / "archive").glob("*.gz"))
+    ...     for key, value in old.items():
+    ...         rotate_logs.__globals__[key] = value
+    >>> (out[0] >= 1, len(archived) == 1, not old_log.exists())
+    (True, True, True)
+    """
+    now_dt = now if isinstance(now, dt.datetime) else dt.datetime.now()
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    LOG_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+    cutoff = now_dt - dt.timedelta(days=LOG_RETENTION_DAYS)
+    compressed = 0
+    evicted = 0
+
+    for path in sorted(LOGS_DIR.glob("*.log")):
+        try:
+            mtime = dt.datetime.fromtimestamp(path.stat().st_mtime)
+        except OSError:
+            continue
+        if mtime > cutoff:
+            continue
+        archive_path = LOG_ARCHIVE_DIR / f"{path.name}.gz"
+        with path.open("rb") as src, gzip.open(archive_path, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+        os.utime(archive_path, (path.stat().st_atime, path.stat().st_mtime))
+        path.unlink(missing_ok=True)
+        compressed += 1
+
+    def total_bytes():
+        total = 0
+        for candidate in LOGS_DIR.rglob("*"):
+            if candidate.is_file():
+                total += candidate.stat().st_size
+        return total
+
+    total = total_bytes()
+    archives = sorted(
+        (p for p in LOG_ARCHIVE_DIR.glob("*.gz") if p.is_file()),
+        key=lambda p: p.stat().st_mtime,
+    )
+    while total > LOG_SIZE_CAP_BYTES and archives:
+        victim = archives.pop(0)
+        try:
+            total -= victim.stat().st_size
+        except OSError:
+            pass
+        victim.unlink(missing_ok=True)
+        evicted += 1
+    return compressed, evicted, max(total, 0)
 
 
 def queue_dir(state):
@@ -200,6 +492,13 @@ def enqueue_task(task):
     path = task_path(task["task_id"], "queued")
     write_json_atomic(path, task)
     append_transition(task["task_id"], "new", "queued", task.get("source", ""))
+    append_event(
+        task.get("role", "unknown"),
+        "task_enqueued",
+        task_id=task.get("task_id"),
+        feature_id=task.get("feature_id"),
+        details={"project": task.get("project"), "source": task.get("source"), "braid_template": task.get("braid_template")},
+    )
     return path
 
 
@@ -225,6 +524,13 @@ def move_task(task_id, from_state, to_state, reason="", mutator=None):
     except FileNotFoundError:
         pass
     append_transition(task_id, from_state, to_state, reason)
+    append_event(
+        task.get("role", "unknown"),
+        "task_transition",
+        task_id=task.get("task_id"),
+        feature_id=task.get("feature_id"),
+        details={"from_state": from_state, "to_state": to_state, "reason": reason, "project": task.get("project")},
+    )
     return dst, task
 
 
@@ -290,6 +596,10 @@ def atomic_claim(slot_engine):
     queued = queue_dir("queued")
     candidates = sorted(queued.glob("*.json"), key=lambda p: p.stat().st_mtime)
     busy_features = in_flight_feature_ids() if slot_engine == "codex" else set()
+    paused_templates = {
+        name for name, entry in load_braid_index().items()
+        if entry.get("dispatch_paused")
+    } if slot_engine == "codex" else set()
     for src in candidates:
         try:
             task = read_json(src)
@@ -304,6 +614,8 @@ def atomic_claim(slot_engine):
         if slot_engine == "codex":
             fid = task.get("feature_id")
             if fid and fid in busy_features:
+                continue
+            if task.get("braid_template") in paused_templates:
                 continue
         deps = task.get("depends_on") or []
         if deps:
@@ -394,6 +706,7 @@ def reap():
                     ),
                 )
                 reaped += 1
+    tick_braid_auto_regen(load_config())
     return reaped
 
 
@@ -455,11 +768,64 @@ def _comment_is_actionable(comment):
     orchestrator. Everything else (casual human discussion, re-review requests,
     etc.) is ignored — pr-sweep only responds to unambiguous machine-or-marked
     requests.
+
+    >>> _comment_is_actionable({"author": {"login": "chatgpt-codex-connector"}, "body": "Codex Review: Didn't find any major issues. Bravo."})
+    False
+    >>> _comment_is_actionable({"author": {"login": "chatgpt-codex-connector"}, "body": "![P1 Badge] Must fix before merge"})
+    True
     """
-    author = (comment.get("author") or {}).get("login", "").lower()
+    author = ((comment.get("author") or {}).get("login", "") or "").lower()
+    body = comment.get("body", "") or ""
+    lower = body.lower()
     if author in AUTO_HANDLE_COMMENT_AUTHORS:
-        return True
-    return _pr_body_has_orchestrator_mention(comment.get("body", ""))
+        non_actionable_markers = (
+            "didn't find any major issues",
+            "did not find any major issues",
+            "codex review:",
+            "about codex in github",
+            "jmh smoke summary",
+        )
+        if any(marker in lower for marker in non_actionable_markers):
+            return False
+        actionable_markers = (
+            "![p0 badge]",
+            "![p1 badge]",
+            "![p2 badge]",
+            "![p3 badge]",
+            "must fix",
+            "needs fix",
+            "request changes",
+            "security finding",
+            "code scanning alert",
+        )
+        if any(marker in lower for marker in actionable_markers):
+            return True
+    return _pr_body_has_orchestrator_mention(body)
+
+
+def _extract_failed_checks(pr_info):
+    """Return failed or errored check-rollup entries worth a self-heal round.
+
+    >>> payload = {"statusCheckRollup": [
+    ...     {"name": "unresolved-review-threads", "conclusion": "FAILURE", "detailsUrl": "https://example/1"},
+    ...     {"name": "lint", "conclusion": "SUCCESS"},
+    ...     {"workflowName": "CI", "status": "COMPLETED", "conclusion": "TIMED_OUT", "url": "https://example/2"},
+    ... ]}
+    >>> [c["name"] for c in _extract_failed_checks(payload)]
+    ['unresolved-review-threads', 'CI']
+    """
+    out = []
+    for item in pr_info.get("statusCheckRollup", []) or []:
+        conclusion = str(item.get("conclusion") or item.get("state") or item.get("status") or "").upper()
+        if conclusion in ("SUCCESS", "NEUTRAL", "SKIPPED", "PENDING", "IN_PROGRESS", "EXPECTED", ""):
+            continue
+        name = item.get("name") or item.get("workflowName") or item.get("context") or item.get("__typename") or "check"
+        out.append({
+            "name": str(name),
+            "conclusion": conclusion,
+            "details_url": item.get("detailsUrl") or item.get("url") or "",
+        })
+    return out
 
 
 def _unresolved_bot_review_threads(repo_path, pr_number, pr_url=None):
@@ -728,8 +1094,10 @@ def pr_sweep(dry_run=False):
     >>> with tempfile.TemporaryDirectory() as tmp:
     ...     root = pathlib.Path(tmp)
     ...     queue_root = root / "queue"
+    ...     features_dir = root / "features"
     ...     for state in STATES:
     ...         (queue_root / state).mkdir(parents=True, exist_ok=True)
+    ...     features_dir.mkdir(parents=True, exist_ok=True)
     ...     task = {
     ...         "task_id": "task-behind",
     ...         "project": "demo",
@@ -743,7 +1111,7 @@ def pr_sweep(dry_run=False):
     ...     task_path = queue_root / "done" / "task-behind.json"
     ...     _ = task_path.write_text(json.dumps(task))
     ...     calls = []
-    ...     original = {k: pr_sweep.__globals__[k] for k in ("QUEUE_ROOT", "load_config", "get_project", "_extract_actionable_comments", "_enqueue_pr_feedback", "_write_pr_alert", "now_iso", "subprocess")}
+    ...     original = {k: pr_sweep.__globals__[k] for k in ("QUEUE_ROOT", "FEATURES_DIR", "load_config", "get_project", "_extract_actionable_comments", "_enqueue_pr_feedback", "_write_pr_alert", "_unresolved_bot_review_threads", "now_iso", "subprocess")}
     ...     class FakeSubprocess:
     ...         TimeoutExpired = subprocess.TimeoutExpired
     ...         def run(self, cmd, **kwargs):
@@ -756,6 +1124,7 @@ def pr_sweep(dry_run=False):
     ...                 return types.SimpleNamespace(returncode=0, stdout="0\\n", stderr="")
     ...             raise AssertionError(cmd)
     ...     pr_sweep.__globals__["QUEUE_ROOT"] = queue_root
+    ...     pr_sweep.__globals__["FEATURES_DIR"] = features_dir
     ...     pr_sweep.__globals__["load_config"] = lambda: {"projects": [{"name": "demo", "path": str(root)}], "drift_threshold": 5}
     ...     pr_sweep.__globals__["get_project"] = lambda config, name: config["projects"][0]
     ...     pr_sweep.__globals__["_extract_actionable_comments"] = lambda info, handled: []
@@ -775,8 +1144,10 @@ def pr_sweep(dry_run=False):
     >>> with tempfile.TemporaryDirectory() as tmp:
     ...     root = pathlib.Path(tmp)
     ...     queue_root = root / "queue"
+    ...     features_dir = root / "features"
     ...     for state in STATES:
     ...         (queue_root / state).mkdir(parents=True, exist_ok=True)
+    ...     features_dir.mkdir(parents=True, exist_ok=True)
     ...     wt = root / "wt"
     ...     wt.mkdir()
     ...     task = {
@@ -791,7 +1162,7 @@ def pr_sweep(dry_run=False):
     ...     task_path = queue_root / "done" / "task-drift.json"
     ...     _ = task_path.write_text(json.dumps(task))
     ...     calls = []
-    ...     original = {k: pr_sweep.__globals__[k] for k in ("QUEUE_ROOT", "load_config", "get_project", "_extract_actionable_comments", "_enqueue_pr_feedback", "_write_pr_alert", "now_iso", "subprocess")}
+    ...     original = {k: pr_sweep.__globals__[k] for k in ("QUEUE_ROOT", "FEATURES_DIR", "load_config", "get_project", "_extract_actionable_comments", "_enqueue_pr_feedback", "_write_pr_alert", "_unresolved_bot_review_threads", "now_iso", "subprocess")}
     ...     class FakeSubprocess:
     ...         TimeoutExpired = subprocess.TimeoutExpired
     ...         def run(self, cmd, **kwargs):
@@ -804,11 +1175,13 @@ def pr_sweep(dry_run=False):
     ...                 return types.SimpleNamespace(returncode=0, stdout="7\\n", stderr="")
     ...             raise AssertionError(cmd)
     ...     pr_sweep.__globals__["QUEUE_ROOT"] = queue_root
+    ...     pr_sweep.__globals__["FEATURES_DIR"] = features_dir
     ...     pr_sweep.__globals__["load_config"] = lambda: {"projects": [{"name": "demo", "path": str(root)}], "drift_threshold": 5}
     ...     pr_sweep.__globals__["get_project"] = lambda config, name: config["projects"][0]
     ...     pr_sweep.__globals__["_extract_actionable_comments"] = lambda info, handled: []
     ...     pr_sweep.__globals__["_enqueue_pr_feedback"] = lambda *args, **kwargs: calls.append(kwargs) or "task-drift-sync"
     ...     pr_sweep.__globals__["_write_pr_alert"] = lambda *args, **kwargs: None
+    ...     pr_sweep.__globals__["_unresolved_bot_review_threads"] = lambda *args, **kwargs: []
     ...     pr_sweep.__globals__["now_iso"] = lambda: "2026-04-14T12:00:00"
     ...     pr_sweep.__globals__["subprocess"] = FakeSubprocess()
     ...     _ = pr_sweep()
@@ -823,8 +1196,121 @@ def pr_sweep(dry_run=False):
     >>> with tempfile.TemporaryDirectory() as tmp:
     ...     root = pathlib.Path(tmp)
     ...     queue_root = root / "queue"
+    ...     features_dir = root / "features"
     ...     for state in STATES:
     ...         (queue_root / state).mkdir(parents=True, exist_ok=True)
+    ...     features_dir.mkdir(parents=True, exist_ok=True)
+    ...     wt = root / "wt"
+    ...     wt.mkdir()
+    ...     task = {
+    ...         "task_id": "task-project-threshold",
+    ...         "project": "demo",
+    ...         "pr_number": 10,
+    ...         "summary": "demo",
+    ...         "feature_id": "f1",
+    ...         "worktree": str(wt),
+    ...         "pr_sweep": {"feedback_rounds": 0},
+    ...     }
+    ...     task_path = queue_root / "done" / "task-project-threshold.json"
+    ...     _ = task_path.write_text(json.dumps(task))
+    ...     calls = []
+    ...     original = {k: pr_sweep.__globals__[k] for k in ("QUEUE_ROOT", "FEATURES_DIR", "load_config", "get_project", "_extract_actionable_comments", "_enqueue_pr_feedback", "_write_pr_alert", "_unresolved_bot_review_threads", "now_iso", "subprocess")}
+    ...     class FakeSubprocess:
+    ...         TimeoutExpired = subprocess.TimeoutExpired
+    ...         def run(self, cmd, **kwargs):
+    ...             if cmd[:3] == ["gh", "pr", "view"]:
+    ...                 payload = {"state": "OPEN", "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN", "reviewDecision": "APPROVED", "baseRefName": "feature/demo", "url": "https://example/pr/10", "comments": []}
+    ...                 return types.SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+    ...             if cmd[:4] == ["git", "-C", str(wt), "fetch"]:
+    ...                 return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    ...             if cmd[:5] == ["git", "-C", str(wt), "rev-list", "--count"]:
+    ...                 return types.SimpleNamespace(returncode=0, stdout="7\\n", stderr="")
+    ...             if cmd[:3] == ["gh", "pr", "merge"]:
+    ...                 return types.SimpleNamespace(returncode=0, stdout="merged", stderr="")
+    ...             raise AssertionError(cmd)
+    ...     pr_sweep.__globals__["QUEUE_ROOT"] = queue_root
+    ...     pr_sweep.__globals__["FEATURES_DIR"] = features_dir
+    ...     pr_sweep.__globals__["load_config"] = lambda: {"projects": [{"name": "demo", "path": str(root), "drift_threshold": 10}], "drift_threshold": 5}
+    ...     pr_sweep.__globals__["get_project"] = lambda config, name: config["projects"][0]
+    ...     pr_sweep.__globals__["_extract_actionable_comments"] = lambda info, handled: []
+    ...     pr_sweep.__globals__["_enqueue_pr_feedback"] = lambda *args, **kwargs: calls.append(kwargs) or "task-drift-sync"
+    ...     pr_sweep.__globals__["_write_pr_alert"] = lambda *args, **kwargs: None
+    ...     pr_sweep.__globals__["_unresolved_bot_review_threads"] = lambda *args, **kwargs: []
+    ...     pr_sweep.__globals__["_unresolved_bot_review_threads"] = lambda *args, **kwargs: []
+    ...     pr_sweep.__globals__["now_iso"] = lambda: "2026-04-14T12:00:00"
+    ...     pr_sweep.__globals__["subprocess"] = FakeSubprocess()
+    ...     import contextlib, io
+    ...     with contextlib.redirect_stdout(io.StringIO()):
+    ...         result = pr_sweep()
+    ...     saved = json.loads(task_path.read_text())
+    ...     observed = (result, calls, saved["pr_sweep"].get("last_merge_state"), saved.get("auto_merged_at") is not None)
+    ...     for key, value in original.items():
+    ...         pr_sweep.__globals__[key] = value
+    >>> observed
+    ((1, 1, 0, 0, 0), [], None, True)
+
+    >>> import json, pathlib, tempfile, types
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     queue_root = root / "queue"
+    ...     features_dir = root / "features"
+    ...     for state in STATES:
+    ...         (queue_root / state).mkdir(parents=True, exist_ok=True)
+    ...     features_dir.mkdir(parents=True, exist_ok=True)
+    ...     wt = root / "wt"
+    ...     wt.mkdir()
+    ...     task = {
+    ...         "task_id": "task-clean-no-approval",
+    ...         "project": "demo",
+    ...         "pr_number": 11,
+    ...         "summary": "demo",
+    ...         "feature_id": "f1",
+    ...         "worktree": str(wt),
+    ...         "pr_sweep": {"feedback_rounds": 0},
+    ...     }
+    ...     task_path = queue_root / "done" / "task-clean-no-approval.json"
+    ...     _ = task_path.write_text(json.dumps(task))
+    ...     original = {k: pr_sweep.__globals__[k] for k in ("QUEUE_ROOT", "FEATURES_DIR", "load_config", "get_project", "_extract_actionable_comments", "_write_pr_alert", "_unresolved_bot_review_threads", "now_iso", "subprocess")}
+    ...     class FakeSubprocess:
+    ...         TimeoutExpired = subprocess.TimeoutExpired
+    ...         def run(self, cmd, **kwargs):
+    ...             if cmd[:3] == ["gh", "pr", "view"]:
+    ...                 payload = {"state": "OPEN", "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN", "reviewDecision": "", "baseRefName": "feature/demo", "url": "https://example/pr/11", "comments": []}
+    ...                 return types.SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+    ...             if cmd[:4] == ["git", "-C", str(wt), "fetch"]:
+    ...                 return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    ...             if cmd[:5] == ["git", "-C", str(wt), "rev-list", "--count"]:
+    ...                 return types.SimpleNamespace(returncode=0, stdout="0\\n", stderr="")
+    ...             if cmd[:3] == ["gh", "pr", "merge"]:
+    ...                 return types.SimpleNamespace(returncode=0, stdout="merged", stderr="")
+    ...             raise AssertionError(cmd)
+    ...     pr_sweep.__globals__["QUEUE_ROOT"] = queue_root
+    ...     pr_sweep.__globals__["FEATURES_DIR"] = features_dir
+    ...     pr_sweep.__globals__["load_config"] = lambda: {"projects": [{"name": "demo", "path": str(root)}], "drift_threshold": 5}
+    ...     pr_sweep.__globals__["get_project"] = lambda config, name: config["projects"][0]
+    ...     pr_sweep.__globals__["_extract_actionable_comments"] = lambda info, handled: []
+    ...     pr_sweep.__globals__["_write_pr_alert"] = lambda *args, **kwargs: None
+    ...     pr_sweep.__globals__["_unresolved_bot_review_threads"] = lambda *args, **kwargs: []
+    ...     pr_sweep.__globals__["now_iso"] = lambda: "2026-04-14T12:00:00"
+    ...     pr_sweep.__globals__["subprocess"] = FakeSubprocess()
+    ...     import contextlib, io
+    ...     with contextlib.redirect_stdout(io.StringIO()):
+    ...         result = pr_sweep()
+    ...     saved = json.loads(task_path.read_text())
+    ...     observed = (result, saved["pr_sweep"].get("auto_merged"), saved.get("auto_merged_at") is not None)
+    ...     for key, value in original.items():
+    ...         pr_sweep.__globals__[key] = value
+    >>> observed
+    ((1, 1, 0, 0, 0), True, True)
+
+    >>> import json, pathlib, tempfile, types
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     queue_root = root / "queue"
+    ...     features_dir = root / "features"
+    ...     for state in STATES:
+    ...         (queue_root / state).mkdir(parents=True, exist_ok=True)
+    ...     features_dir.mkdir(parents=True, exist_ok=True)
     ...     wt = root / "wt"
     ...     wt.mkdir()
     ...     task = {
@@ -840,13 +1326,14 @@ def pr_sweep(dry_run=False):
     ...     _ = task_path.write_text(json.dumps(task))
     ...     _ = (queue_root / "running" / "task-existing.json").write_text("{}")
     ...     calls = []
-    ...     original = {k: pr_sweep.__globals__[k] for k in ("QUEUE_ROOT", "load_config", "get_project", "_extract_actionable_comments", "_enqueue_pr_feedback", "_write_pr_alert", "now_iso", "subprocess")}
+    ...     original = {k: pr_sweep.__globals__[k] for k in ("QUEUE_ROOT", "FEATURES_DIR", "load_config", "get_project", "_extract_actionable_comments", "_enqueue_pr_feedback", "_write_pr_alert", "now_iso", "subprocess")}
     ...     class FakeSubprocess:
     ...         TimeoutExpired = subprocess.TimeoutExpired
     ...         def run(self, cmd, **kwargs):
     ...             payload = {"state": "OPEN", "mergeable": "CONFLICTING", "mergeStateStatus": "DIRTY", "reviewDecision": "", "baseRefName": "feature/demo", "url": "https://example/pr/9", "comments": []}
     ...             return types.SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
     ...     pr_sweep.__globals__["QUEUE_ROOT"] = queue_root
+    ...     pr_sweep.__globals__["FEATURES_DIR"] = features_dir
     ...     pr_sweep.__globals__["load_config"] = lambda: {"projects": [{"name": "demo", "path": str(root)}], "drift_threshold": 5}
     ...     pr_sweep.__globals__["get_project"] = lambda config, name: config["projects"][0]
     ...     pr_sweep.__globals__["_extract_actionable_comments"] = lambda info, handled: []
@@ -864,6 +1351,352 @@ def pr_sweep(dry_run=False):
     ...         pr_sweep.__globals__[key] = value
     >>> observed
     (0, 1, 1, 'task-retry')
+
+    >>> import json, pathlib, tempfile, types
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     queue_root = root / "queue"
+    ...     features_dir = root / "features"
+    ...     for state in STATES:
+    ...         (queue_root / state).mkdir(parents=True, exist_ok=True)
+    ...     features_dir.mkdir(parents=True, exist_ok=True)
+    ...     feature_path = features_dir / "feature-1.json"
+    ...     _ = feature_path.write_text(json.dumps({
+    ...         "feature_id": "feature-1",
+    ...         "project": "demo",
+    ...         "status": "finalizing",
+    ...         "final_pr_number": 15,
+    ...         "final_pr_sweep": {"feedback_rounds": 0},
+    ...     }))
+    ...     calls = []
+    ...     original = {k: pr_sweep.__globals__[k] for k in ("QUEUE_ROOT", "FEATURES_DIR", "load_config", "get_project", "_extract_actionable_comments", "_enqueue_feature_pr_feedback", "_write_pr_alert", "_unresolved_bot_review_threads", "now_iso", "subprocess")}
+    ...     class FakeSubprocess:
+    ...         TimeoutExpired = subprocess.TimeoutExpired
+    ...         def run(self, cmd, **kwargs):
+    ...             if cmd[:3] == ["gh", "pr", "view"]:
+    ...                 payload = {"state": "OPEN", "mergeable": "MERGEABLE", "mergeStateStatus": "UNSTABLE", "reviewDecision": "", "baseRefName": "main", "url": "https://example/pr/15", "comments": []}
+    ...                 return types.SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+    ...             raise AssertionError(cmd)
+    ...     pr_sweep.__globals__["QUEUE_ROOT"] = queue_root
+    ...     pr_sweep.__globals__["FEATURES_DIR"] = features_dir
+    ...     pr_sweep.__globals__["load_config"] = lambda: {"projects": [{"name": "demo", "path": str(root)}], "drift_threshold": 5}
+    ...     pr_sweep.__globals__["get_project"] = lambda config, name: config["projects"][0]
+    ...     pr_sweep.__globals__["_extract_actionable_comments"] = lambda info, handled: []
+    ...     pr_sweep.__globals__["_enqueue_feature_pr_feedback"] = lambda *args, **kwargs: calls.append(kwargs) or "task-feature-fb"
+    ...     pr_sweep.__globals__["_write_pr_alert"] = lambda *args, **kwargs: None
+    ...     pr_sweep.__globals__["_unresolved_bot_review_threads"] = lambda *args, **kwargs: [{"id": "91", "author": "chatgpt-codex-connector", "body": "fix it", "created_at": "2026-04-14T21:00:00Z", "thread_id": "thread-1"}]
+    ...     pr_sweep.__globals__["now_iso"] = lambda: "2026-04-14T21:20:00"
+    ...     pr_sweep.__globals__["subprocess"] = FakeSubprocess()
+    ...     result = pr_sweep()
+    ...     saved = json.loads(feature_path.read_text())
+    ...     observed = (result, len(calls), saved["final_pr_sweep"]["last_feedback_reason"], saved["final_pr_sweep"]["feedback_task_id"])
+    ...     for key, value in original.items():
+    ...         pr_sweep.__globals__[key] = value
+    >>> observed
+    ((1, 0, 1, 0, 0), 1, 'unresolved_bot_review_threads', 'task-feature-fb')
+
+    >>> import json, pathlib, tempfile, types
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     queue_root = root / "queue"
+    ...     features_dir = root / "features"
+    ...     for state in STATES:
+    ...         (queue_root / state).mkdir(parents=True, exist_ok=True)
+    ...     features_dir.mkdir(parents=True, exist_ok=True)
+    ...     feature_path = features_dir / "feature-2.json"
+    ...     _ = feature_path.write_text(json.dumps({
+    ...         "feature_id": "feature-2",
+    ...         "project": "demo",
+    ...         "status": "finalizing",
+    ...         "final_pr_number": 16,
+    ...         "final_pr_sweep": {"feedback_rounds": 0},
+    ...     }))
+    ...     calls = []
+    ...     original = {k: pr_sweep.__globals__[k] for k in ("QUEUE_ROOT", "FEATURES_DIR", "load_config", "get_project", "_extract_actionable_comments", "_enqueue_feature_pr_feedback", "_write_pr_alert", "_unresolved_bot_review_threads", "now_iso", "subprocess")}
+    ...     class FakeSubprocess:
+    ...         TimeoutExpired = subprocess.TimeoutExpired
+    ...         def run(self, cmd, **kwargs):
+    ...             if cmd[:3] == ["gh", "pr", "view"]:
+    ...                 payload = {"state": "OPEN", "mergeable": "CONFLICTING", "mergeStateStatus": "DIRTY", "reviewDecision": "", "baseRefName": "main", "url": "https://example/pr/16", "comments": []}
+    ...                 return types.SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+    ...             raise AssertionError(cmd)
+    ...     pr_sweep.__globals__["QUEUE_ROOT"] = queue_root
+    ...     pr_sweep.__globals__["FEATURES_DIR"] = features_dir
+    ...     pr_sweep.__globals__["load_config"] = lambda: {"projects": [{"name": "demo", "path": str(root)}], "drift_threshold": 5}
+    ...     pr_sweep.__globals__["get_project"] = lambda config, name: config["projects"][0]
+    ...     pr_sweep.__globals__["_extract_actionable_comments"] = lambda info, handled: []
+    ...     pr_sweep.__globals__["_enqueue_feature_pr_feedback"] = lambda *args, **kwargs: calls.append(kwargs) or "task-feature-conflict"
+    ...     pr_sweep.__globals__["_write_pr_alert"] = lambda *args, **kwargs: None
+    ...     pr_sweep.__globals__["_unresolved_bot_review_threads"] = lambda *args, **kwargs: []
+    ...     pr_sweep.__globals__["now_iso"] = lambda: "2026-04-14T21:30:00"
+    ...     pr_sweep.__globals__["subprocess"] = FakeSubprocess()
+    ...     result = pr_sweep()
+    ...     saved = json.loads(feature_path.read_text())
+    ...     observed = (result, len(calls), saved["final_pr_sweep"]["last_feedback_reason"], saved["final_pr_sweep"]["feedback_task_id"])
+    ...     for key, value in original.items():
+    ...         pr_sweep.__globals__[key] = value
+    >>> observed
+    ((1, 0, 1, 0, 0), 1, 'conflict', 'task-feature-conflict')
+
+    >>> import json, pathlib, tempfile, types
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     queue_root = root / "queue"
+    ...     features_dir = root / "features"
+    ...     for state in STATES:
+    ...         (queue_root / state).mkdir(parents=True, exist_ok=True)
+    ...     features_dir.mkdir(parents=True, exist_ok=True)
+    ...     wt = root / "wt"
+    ...     wt.mkdir()
+    ...     task = {
+    ...         "task_id": "task-checks",
+    ...         "project": "demo",
+    ...         "pr_number": 17,
+    ...         "summary": "demo",
+    ...         "feature_id": "f1",
+    ...         "worktree": str(wt),
+    ...         "pr_sweep": {"feedback_rounds": 0},
+    ...     }
+    ...     task_path = queue_root / "done" / "task-checks.json"
+    ...     _ = task_path.write_text(json.dumps(task))
+    ...     calls = []
+    ...     original = {k: pr_sweep.__globals__[k] for k in ("QUEUE_ROOT", "FEATURES_DIR", "load_config", "get_project", "_extract_actionable_comments", "_extract_failed_checks", "_enqueue_pr_feedback", "_write_pr_alert", "_unresolved_bot_review_threads", "now_iso", "subprocess")}
+    ...     class FakeSubprocess:
+    ...         TimeoutExpired = subprocess.TimeoutExpired
+    ...         def run(self, cmd, **kwargs):
+    ...             if cmd[:3] == ["gh", "pr", "view"]:
+    ...                 payload = {"state": "OPEN", "mergeable": "MERGEABLE", "mergeStateStatus": "UNSTABLE", "reviewDecision": "", "baseRefName": "feature/demo", "url": "https://example/pr/17", "comments": [], "statusCheckRollup": [{"name": "unresolved-review-threads", "conclusion": "FAILURE"}]}
+    ...                 return types.SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+    ...             if cmd[:4] == ["git", "-C", str(wt), "fetch"]:
+    ...                 return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    ...             if cmd[:5] == ["git", "-C", str(wt), "rev-list", "--count"]:
+    ...                 return types.SimpleNamespace(returncode=0, stdout="0\\n", stderr="")
+    ...             raise AssertionError(cmd)
+    ...     pr_sweep.__globals__["QUEUE_ROOT"] = queue_root
+    ...     pr_sweep.__globals__["FEATURES_DIR"] = features_dir
+    ...     pr_sweep.__globals__["load_config"] = lambda: {"projects": [{"name": "demo", "path": str(root)}], "drift_threshold": 5}
+    ...     pr_sweep.__globals__["get_project"] = lambda config, name: config["projects"][0]
+    ...     pr_sweep.__globals__["_extract_actionable_comments"] = lambda info, handled: []
+    ...     pr_sweep.__globals__["_extract_failed_checks"] = lambda info: [{"name": "unresolved-review-threads", "conclusion": "FAILURE", "details_url": "https://example/check"}]
+    ...     pr_sweep.__globals__["_enqueue_pr_feedback"] = lambda *args, **kwargs: calls.append(kwargs) or "task-check-fix"
+    ...     pr_sweep.__globals__["_write_pr_alert"] = lambda *args, **kwargs: None
+    ...     pr_sweep.__globals__["_unresolved_bot_review_threads"] = lambda *args, **kwargs: []
+    ...     pr_sweep.__globals__["now_iso"] = lambda: "2026-04-14T22:00:00"
+    ...     pr_sweep.__globals__["subprocess"] = FakeSubprocess()
+    ...     result = pr_sweep()
+    ...     saved = json.loads(task_path.read_text())
+    ...     observed = (result, len(calls), saved["pr_sweep"]["last_feedback_reason"], saved["pr_sweep"]["feedback_task_id"], saved["pr_sweep"]["failing_checks"])
+    ...     for key, value in original.items():
+    ...         pr_sweep.__globals__[key] = value
+    >>> observed
+    ((1, 0, 1, 0, 0), 1, 'checks', 'task-check-fix', ['unresolved-review-threads'])
+
+    >>> import json, pathlib, tempfile, types
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     queue_root = root / "queue"
+    ...     features_dir = root / "features"
+    ...     for state in STATES:
+    ...         (queue_root / state).mkdir(parents=True, exist_ok=True)
+    ...     features_dir.mkdir(parents=True, exist_ok=True)
+    ...     wt = root / "wt"
+    ...     wt.mkdir()
+    ...     _ = (queue_root / "running" / "task-fb.json").write_text(json.dumps({"task_id": "task-fb"}))
+    ...     task = {
+    ...         "task_id": "task-comments-guard",
+    ...         "project": "demo",
+    ...         "pr_number": 19,
+    ...         "summary": "demo",
+    ...         "feature_id": "f1",
+    ...         "worktree": str(wt),
+    ...         "pr_sweep": {"feedback_rounds": 1, "feedback_task_id": "task-fb"},
+    ...     }
+    ...     task_path = queue_root / "done" / "task-comments-guard.json"
+    ...     _ = task_path.write_text(json.dumps(task))
+    ...     calls = []
+    ...     original = {k: pr_sweep.__globals__[k] for k in ("QUEUE_ROOT", "FEATURES_DIR", "load_config", "get_project", "_extract_actionable_comments", "_extract_failed_checks", "_enqueue_pr_feedback", "_write_pr_alert", "_unresolved_bot_review_threads", "record_pr_sweep_guard_skip", "now_iso", "subprocess")}
+    ...     guard_reasons = []
+    ...     class FakeSubprocess:
+    ...         TimeoutExpired = subprocess.TimeoutExpired
+    ...         def run(self, cmd, **kwargs):
+    ...             if cmd[:3] == ["gh", "pr", "view"]:
+    ...                 payload = {"state": "OPEN", "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN", "reviewDecision": "", "baseRefName": "feature/demo", "url": "https://example/pr/19", "comments": []}
+    ...                 return types.SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+    ...             if cmd[:4] == ["git", "-C", str(wt), "fetch"]:
+    ...                 return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    ...             if cmd[:5] == ["git", "-C", str(wt), "rev-list", "--count"]:
+    ...                 return types.SimpleNamespace(returncode=0, stdout="0\\n", stderr="")
+    ...             raise AssertionError(cmd)
+    ...     pr_sweep.__globals__["QUEUE_ROOT"] = queue_root
+    ...     pr_sweep.__globals__["FEATURES_DIR"] = features_dir
+    ...     pr_sweep.__globals__["load_config"] = lambda: {"projects": [{"name": "demo", "path": str(root)}], "drift_threshold": 5}
+    ...     pr_sweep.__globals__["get_project"] = lambda config, name: config["projects"][0]
+    ...     pr_sweep.__globals__["_extract_actionable_comments"] = lambda info, handled: [{"id": "c1", "author": "chatgpt-codex-connector", "body": "![P1 Badge] must fix"}]
+    ...     pr_sweep.__globals__["_extract_failed_checks"] = lambda info: []
+    ...     pr_sweep.__globals__["_enqueue_pr_feedback"] = lambda *args, **kwargs: calls.append(kwargs) or "task-dup"
+    ...     pr_sweep.__globals__["_write_pr_alert"] = lambda *args, **kwargs: None
+    ...     pr_sweep.__globals__["_unresolved_bot_review_threads"] = lambda *args, **kwargs: []
+    ...     pr_sweep.__globals__["record_pr_sweep_guard_skip"] = lambda reason: guard_reasons.append(reason) or {}
+    ...     pr_sweep.__globals__["now_iso"] = lambda: "2026-04-14T22:30:00"
+    ...     pr_sweep.__globals__["subprocess"] = FakeSubprocess()
+    ...     result = pr_sweep()
+    ...     saved = json.loads(task_path.read_text())
+    ...     observed = (result, calls, guard_reasons, saved["pr_sweep"]["feedback_task_id"], saved["pr_sweep"]["last_merge_state"])
+    ...     for key, value in original.items():
+    ...         pr_sweep.__globals__[key] = value
+    >>> observed
+    ((1, 0, 0, 0, 0), [], ['task_feedback'], 'task-fb', 'CLEAN')
+
+    >>> import json, pathlib, tempfile, types
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     queue_root = root / "queue"
+    ...     features_dir = root / "features"
+    ...     for state in STATES:
+    ...         (queue_root / state).mkdir(parents=True, exist_ok=True)
+    ...     features_dir.mkdir(parents=True, exist_ok=True)
+    ...     wt = root / "wt"
+    ...     wt.mkdir()
+    ...     _ = (queue_root / "claimed" / "task-fb.json").write_text(json.dumps({"task_id": "task-fb"}))
+    ...     task = {
+    ...         "task_id": "task-threads-guard",
+    ...         "project": "demo",
+    ...         "pr_number": 20,
+    ...         "summary": "demo",
+    ...         "feature_id": "f1",
+    ...         "worktree": str(wt),
+    ...         "pr_sweep": {"feedback_rounds": 1, "feedback_task_id": "task-fb", "handled_comment_ids": []},
+    ...     }
+    ...     task_path = queue_root / "done" / "task-threads-guard.json"
+    ...     _ = task_path.write_text(json.dumps(task))
+    ...     calls = []
+    ...     original = {k: pr_sweep.__globals__[k] for k in ("QUEUE_ROOT", "FEATURES_DIR", "load_config", "get_project", "_extract_actionable_comments", "_extract_failed_checks", "_enqueue_pr_feedback", "_write_pr_alert", "_unresolved_bot_review_threads", "record_pr_sweep_guard_skip", "now_iso", "subprocess")}
+    ...     guard_reasons = []
+    ...     class FakeSubprocess:
+    ...         TimeoutExpired = subprocess.TimeoutExpired
+    ...         def run(self, cmd, **kwargs):
+    ...             if cmd[:3] == ["gh", "pr", "view"]:
+    ...                 payload = {"state": "OPEN", "mergeable": "MERGEABLE", "mergeStateStatus": "UNSTABLE", "reviewDecision": "", "baseRefName": "feature/demo", "url": "https://example/pr/20", "comments": []}
+    ...                 return types.SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+    ...             if cmd[:4] == ["git", "-C", str(wt), "fetch"]:
+    ...                 return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    ...             if cmd[:5] == ["git", "-C", str(wt), "rev-list", "--count"]:
+    ...                 return types.SimpleNamespace(returncode=0, stdout="0\\n", stderr="")
+    ...             raise AssertionError(cmd)
+    ...     pr_sweep.__globals__["QUEUE_ROOT"] = queue_root
+    ...     pr_sweep.__globals__["FEATURES_DIR"] = features_dir
+    ...     pr_sweep.__globals__["load_config"] = lambda: {"projects": [{"name": "demo", "path": str(root)}], "drift_threshold": 5}
+    ...     pr_sweep.__globals__["get_project"] = lambda config, name: config["projects"][0]
+    ...     pr_sweep.__globals__["_extract_actionable_comments"] = lambda info, handled: []
+    ...     pr_sweep.__globals__["_extract_failed_checks"] = lambda info: []
+    ...     pr_sweep.__globals__["_enqueue_pr_feedback"] = lambda *args, **kwargs: calls.append(kwargs) or "task-dup"
+    ...     pr_sweep.__globals__["_write_pr_alert"] = lambda *args, **kwargs: None
+    ...     pr_sweep.__globals__["_unresolved_bot_review_threads"] = lambda *args, **kwargs: [{"id": "c2", "author": "chatgpt-codex-connector", "body": "![P1 Badge] must fix", "thread_id": "t1"}]
+    ...     pr_sweep.__globals__["record_pr_sweep_guard_skip"] = lambda reason: guard_reasons.append(reason) or {}
+    ...     pr_sweep.__globals__["now_iso"] = lambda: "2026-04-14T22:31:00"
+    ...     pr_sweep.__globals__["subprocess"] = FakeSubprocess()
+    ...     result = pr_sweep()
+    ...     saved = json.loads(task_path.read_text())
+    ...     observed = (result, calls, guard_reasons, saved["pr_sweep"]["feedback_task_id"], saved["pr_sweep"]["unresolved_bot_threads"])
+    ...     for key, value in original.items():
+    ...         pr_sweep.__globals__[key] = value
+    >>> observed
+    ((1, 0, 0, 0, 0), [], ['task_unresolved_bot_review_threads'], 'task-fb', 1)
+
+    >>> import json, pathlib, tempfile, types
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     queue_root = root / "queue"
+    ...     features_dir = root / "features"
+    ...     for state in STATES:
+    ...         (queue_root / state).mkdir(parents=True, exist_ok=True)
+    ...     features_dir.mkdir(parents=True, exist_ok=True)
+    ...     feature_path = features_dir / "feature-3.json"
+    ...     _ = feature_path.write_text(json.dumps({
+    ...         "feature_id": "feature-3",
+    ...         "project": "demo",
+    ...         "status": "finalizing",
+    ...         "final_pr_number": 18,
+    ...         "final_pr_sweep": {"feedback_rounds": 0},
+    ...     }))
+    ...     calls = []
+    ...     original = {k: pr_sweep.__globals__[k] for k in ("QUEUE_ROOT", "FEATURES_DIR", "load_config", "get_project", "_extract_actionable_comments", "_extract_failed_checks", "_enqueue_feature_pr_feedback", "_write_pr_alert", "_unresolved_bot_review_threads", "now_iso", "subprocess")}
+    ...     class FakeSubprocess:
+    ...         TimeoutExpired = subprocess.TimeoutExpired
+    ...         def run(self, cmd, **kwargs):
+    ...             if cmd[:3] == ["gh", "pr", "view"]:
+    ...                 payload = {"state": "OPEN", "mergeable": "MERGEABLE", "mergeStateStatus": "UNSTABLE", "reviewDecision": "", "baseRefName": "main", "url": "https://example/pr/18", "comments": [], "statusCheckRollup": [{"workflowName": "unresolved-bot-review", "conclusion": "FAILURE"}]}
+    ...                 return types.SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+    ...             raise AssertionError(cmd)
+    ...     pr_sweep.__globals__["QUEUE_ROOT"] = queue_root
+    ...     pr_sweep.__globals__["FEATURES_DIR"] = features_dir
+    ...     pr_sweep.__globals__["load_config"] = lambda: {"projects": [{"name": "demo", "path": str(root)}], "drift_threshold": 5}
+    ...     pr_sweep.__globals__["get_project"] = lambda config, name: config["projects"][0]
+    ...     pr_sweep.__globals__["_extract_actionable_comments"] = lambda info, handled: []
+    ...     pr_sweep.__globals__["_extract_failed_checks"] = lambda info: [{"name": "unresolved-bot-review", "conclusion": "FAILURE", "details_url": "https://example/check"}]
+    ...     pr_sweep.__globals__["_enqueue_feature_pr_feedback"] = lambda *args, **kwargs: calls.append(kwargs) or "task-feature-check-fix"
+    ...     pr_sweep.__globals__["_write_pr_alert"] = lambda *args, **kwargs: None
+    ...     pr_sweep.__globals__["_unresolved_bot_review_threads"] = lambda *args, **kwargs: []
+    ...     pr_sweep.__globals__["now_iso"] = lambda: "2026-04-14T22:05:00"
+    ...     pr_sweep.__globals__["subprocess"] = FakeSubprocess()
+    ...     result = pr_sweep()
+    ...     saved = json.loads(feature_path.read_text())
+    ...     observed = (result, len(calls), saved["final_pr_sweep"]["last_feedback_reason"], saved["final_pr_sweep"]["feedback_task_id"], saved["final_pr_sweep"]["failing_checks"])
+    ...     for key, value in original.items():
+    ...         pr_sweep.__globals__[key] = value
+    >>> observed
+    ((1, 0, 1, 0, 0), 1, 'checks', 'task-feature-check-fix', ['unresolved-bot-review'])
+
+    >>> import json, pathlib, tempfile, types
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     queue_root = root / "queue"
+    ...     features_dir = root / "features"
+    ...     for state in STATES:
+    ...         (queue_root / state).mkdir(parents=True, exist_ok=True)
+    ...     features_dir.mkdir(parents=True, exist_ok=True)
+    ...     _ = (queue_root / "running" / "task-child-repair.json").write_text(json.dumps({
+    ...         "task_id": "task-child-repair",
+    ...         "feature_id": "feature-4",
+    ...         "project": "demo",
+    ...     }))
+    ...     feature_path = features_dir / "feature-4.json"
+    ...     _ = feature_path.write_text(json.dumps({
+    ...         "feature_id": "feature-4",
+    ...         "project": "demo",
+    ...         "status": "finalizing",
+    ...         "final_pr_number": 21,
+    ...         "final_pr_sweep": {"feedback_rounds": 0},
+    ...     }))
+    ...     calls = []
+    ...     original = {k: pr_sweep.__globals__[k] for k in ("QUEUE_ROOT", "FEATURES_DIR", "load_config", "get_project", "_extract_actionable_comments", "_extract_failed_checks", "_enqueue_feature_pr_feedback", "_write_pr_alert", "_unresolved_bot_review_threads", "record_pr_sweep_guard_skip", "now_iso", "subprocess")}
+    ...     guard_reasons = []
+    ...     class FakeSubprocess:
+    ...         TimeoutExpired = subprocess.TimeoutExpired
+    ...         def run(self, cmd, **kwargs):
+    ...             if cmd[:3] == ["gh", "pr", "view"]:
+    ...                 payload = {"state": "OPEN", "mergeable": "MERGEABLE", "mergeStateStatus": "UNSTABLE", "reviewDecision": "", "baseRefName": "main", "url": "https://example/pr/21", "comments": [], "statusCheckRollup": [{"workflowName": "unresolved-bot-review", "conclusion": "FAILURE"}]}
+    ...                 return types.SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+    ...             raise AssertionError(cmd)
+    ...     pr_sweep.__globals__["QUEUE_ROOT"] = queue_root
+    ...     pr_sweep.__globals__["FEATURES_DIR"] = features_dir
+    ...     pr_sweep.__globals__["load_config"] = lambda: {"projects": [{"name": "demo", "path": str(root)}], "drift_threshold": 5}
+    ...     pr_sweep.__globals__["get_project"] = lambda config, name: config["projects"][0]
+    ...     pr_sweep.__globals__["_extract_actionable_comments"] = lambda info, handled: []
+    ...     pr_sweep.__globals__["_extract_failed_checks"] = lambda info: [{"name": "unresolved-bot-review", "conclusion": "FAILURE", "details_url": "https://example/check"}]
+    ...     pr_sweep.__globals__["_enqueue_feature_pr_feedback"] = lambda *args, **kwargs: calls.append(kwargs) or "task-feature-check-fix"
+    ...     pr_sweep.__globals__["_write_pr_alert"] = lambda *args, **kwargs: None
+    ...     pr_sweep.__globals__["_unresolved_bot_review_threads"] = lambda *args, **kwargs: []
+    ...     pr_sweep.__globals__["record_pr_sweep_guard_skip"] = lambda reason: guard_reasons.append(reason) or {}
+    ...     pr_sweep.__globals__["now_iso"] = lambda: "2026-04-14T22:40:00"
+    ...     pr_sweep.__globals__["subprocess"] = FakeSubprocess()
+    ...     result = pr_sweep()
+    ...     saved = json.loads(feature_path.read_text())
+    ...     observed = (result, calls, guard_reasons, saved["final_pr_sweep"]["failing_checks"], saved["final_pr_sweep"]["last_merge_state"])
+    ...     for key, value in original.items():
+    ...         pr_sweep.__globals__[key] = value
+    >>> observed
+    ((1, 0, 0, 0, 0), [], ['feature_branch_repair'], ['unresolved-bot-review'], 'UNSTABLE')
     """
     if shutil.which("gh") is None:
         print("pr-sweep: gh CLI not installed, nothing to do", file=sys.stderr)
@@ -895,7 +1728,7 @@ def pr_sweep(dry_run=False):
         proc = subprocess.run(
             ["gh", "pr", "view", str(pr_number),
              "--json", "state,mergeable,mergeStateStatus,reviewDecision,"
-             "headRefOid,baseRefName,url,author,comments"],
+             "headRefOid,baseRefName,url,author,comments,statusCheckRollup"],
             cwd=repo_path,
             capture_output=True, text=True, timeout=30,
         )
@@ -921,12 +1754,18 @@ def pr_sweep(dry_run=False):
         pr_url = info.get("url")
 
         actionable = _extract_actionable_comments(info, handled_ids)
+        failed_checks = _extract_failed_checks(info)
         mergeable = info.get("mergeable", "UNKNOWN")
         review_decision = info.get("reviewDecision", "")
         merge_state = info.get("mergeStateStatus", "")
         dispatch_reason = "conflict"
 
-        drift_threshold = int(config.get("drift_threshold", CONFIG_DEFAULTS["drift_threshold"]))
+        drift_threshold = int(
+            project.get(
+                "drift_threshold",
+                config.get("drift_threshold", CONFIG_DEFAULTS["drift_threshold"]),
+            )
+        )
         if mergeable == "MERGEABLE":
             drift_count = _git_drift_ahead_count(
                 task.get("worktree"), base_ref,
@@ -971,6 +1810,7 @@ def pr_sweep(dry_run=False):
                 continue
             guard_task_id = sweep.get("conflict_task_id")
             if guard_task_id and _task_exists_in_queue(guard_task_id):
+                record_pr_sweep_guard_skip("task_conflict")
                 task = update_task_in_place(task_file, stamp_sweep({
                     "last_mergeable": mergeable,
                     "last_merge_state": merge_state,
@@ -980,7 +1820,7 @@ def pr_sweep(dry_run=False):
                 print(f"DRY-RUN pr-sweep {task.get('task_id')}: would enqueue rebase feedback")
                 continue
             conflict_task_id = _enqueue_pr_feedback(task, project_name, pr_number, base_ref,
-                                                    conflicts=True, comments=actionable)
+                                                    conflicts=True, comments=actionable, check_failures=[])
             task = update_task_in_place(task_file, stamp_sweep({
                 "last_mergeable": mergeable,
                 "last_merge_state": merge_state,
@@ -1005,16 +1845,25 @@ def pr_sweep(dry_run=False):
                     stamp_sweep({"last_mergeable": mergeable, "escalated_comments": True}))
                 alerted += 1
                 continue
+            guard_task_id = sweep.get("feedback_task_id")
+            if guard_task_id and _task_exists_in_queue(guard_task_id):
+                record_pr_sweep_guard_skip("task_feedback")
+                task = update_task_in_place(task_file, stamp_sweep({
+                    "last_mergeable": mergeable,
+                    "last_merge_state": merge_state,
+                }))
+                continue
             if dry_run:
                 print(f"DRY-RUN pr-sweep {task.get('task_id')}: would enqueue "
                       f"feedback for {len(actionable)} comment(s)")
                 continue
-            _enqueue_pr_feedback(task, project_name, pr_number, base_ref,
-                                 conflicts=False, comments=actionable)
+            feedback_task_id = _enqueue_pr_feedback(task, project_name, pr_number, base_ref,
+                                                    conflicts=False, comments=actionable, check_failures=[])
             task = update_task_in_place(task_file, stamp_sweep({
                 "last_mergeable": mergeable,
                 "feedback_rounds": rounds + 1,
                 "last_feedback_reason": "comments",
+                "feedback_task_id": feedback_task_id,
                 "handled_comment_ids": handled_ids + [c["id"] for c in actionable],
             }))
             fb_enqueued += 1
@@ -1066,18 +1915,28 @@ def pr_sweep(dry_run=False):
                     }))
                     alerted += 1
                     continue
+                guard_task_id = sweep.get("feedback_task_id")
+                if guard_task_id and _task_exists_in_queue(guard_task_id):
+                    record_pr_sweep_guard_skip("task_unresolved_bot_review_threads")
+                    task = update_task_in_place(task_file, stamp_sweep({
+                        "last_mergeable": mergeable,
+                        "last_merge_state": merge_state,
+                        "unresolved_bot_threads": count,
+                    }))
+                    continue
                 if dry_run:
                     print(f"DRY-RUN pr-sweep {task.get('task_id')}: would enqueue "
                           f"feedback for {len(new_thread_comments)} bot review thread(s)")
                     continue
-                _enqueue_pr_feedback(
+                feedback_task_id = _enqueue_pr_feedback(
                     task, project_name, pr_number, base_ref,
-                    conflicts=False, comments=new_thread_comments,
+                    conflicts=False, comments=new_thread_comments, check_failures=[],
                 )
                 task = update_task_in_place(task_file, stamp_sweep({
                     "last_mergeable": mergeable,
                     "feedback_rounds": rounds + 1,
                     "last_feedback_reason": "unresolved_bot_review_threads",
+                    "feedback_task_id": feedback_task_id,
                     "handled_comment_ids": handled_ids + [c["id"] for c in new_thread_comments],
                     "unresolved_bot_threads": count,
                 }))
@@ -1094,12 +1953,54 @@ def pr_sweep(dry_run=False):
             skipped += 1
             continue
 
-        # Case 3: waiting on review. Don't merge, don't alert — just stamp.
+        # Case 3: waiting on review / checks. Don't merge, don't alert — just stamp.
         if review_decision == "CHANGES_REQUESTED":
             task = update_task_in_place(task_file, stamp_sweep({
                 "last_mergeable": mergeable,
+                "last_merge_state": merge_state,
                 "last_review_decision": review_decision,
             }))
+            continue
+        if merge_state in ("BLOCKED", "UNSTABLE") and failed_checks:
+            if rounds >= PR_SWEEP_MAX_FEEDBACK_ROUNDS:
+                _write_pr_alert(
+                    project_name, task.get("task_id"), pr_number,
+                    f"exhausted {rounds} pr-feedback rounds, failed checks still blocking",
+                    pr_url,
+                )
+                task = update_task_in_place(task_file, stamp_sweep({
+                    "last_mergeable": mergeable,
+                    "last_merge_state": merge_state,
+                    "escalated_checks": True,
+                    "failing_checks": [c["name"] for c in failed_checks],
+                }))
+                alerted += 1
+                continue
+            guard_task_id = sweep.get("feedback_task_id")
+            if guard_task_id and _task_exists_in_queue(guard_task_id):
+                record_pr_sweep_guard_skip("task_check_failure")
+                task = update_task_in_place(task_file, stamp_sweep({
+                    "last_mergeable": mergeable,
+                    "last_merge_state": merge_state,
+                    "failing_checks": [c["name"] for c in failed_checks],
+                }))
+                continue
+            if dry_run:
+                print(f"DRY-RUN pr-sweep {task.get('task_id')}: would enqueue feedback for failed checks")
+                continue
+            feedback_task_id = _enqueue_pr_feedback(
+                task, project_name, pr_number, base_ref,
+                conflicts=False, comments=[], check_failures=failed_checks,
+            )
+            task = update_task_in_place(task_file, stamp_sweep({
+                "last_mergeable": mergeable,
+                "last_merge_state": merge_state,
+                "feedback_rounds": rounds + 1,
+                "last_feedback_reason": "checks",
+                "feedback_task_id": feedback_task_id,
+                "failing_checks": [c["name"] for c in failed_checks],
+            }))
+            fb_enqueued += 1
             continue
         if merge_state in ("BLOCKED", "UNSTABLE"):
             task = update_task_in_place(task_file, stamp_sweep({
@@ -1149,6 +2050,232 @@ def pr_sweep(dry_run=False):
             "last_merge_state": merge_state,
         }))
 
+    for feature in list_features(status="finalizing"):
+        pr_number = feature.get("final_pr_number")
+        if not pr_number:
+            continue
+
+        checked += 1
+        project_name = feature.get("project")
+        feature_id = feature.get("feature_id")
+        try:
+            project = get_project(config, project_name)
+        except KeyError:
+            skipped += 1
+            continue
+
+        repo_path = project["path"]
+        proc = subprocess.run(
+            ["gh", "pr", "view", str(pr_number),
+             "--json", "state,mergeable,mergeStateStatus,reviewDecision,"
+             "baseRefName,url,author,comments,statusCheckRollup"],
+            cwd=repo_path,
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode != 0:
+            err = (proc.stderr or "").strip()[:200]
+            print(f"pr-sweep feature {feature_id}: gh pr view failed: {err}")
+            skipped += 1
+            continue
+        try:
+            info = json.loads(proc.stdout or "{}")
+        except json.JSONDecodeError:
+            skipped += 1
+            continue
+
+        state = info.get("state", "")
+        if state in ("MERGED", "CLOSED"):
+            continue
+
+        sweep = dict(feature.get("final_pr_sweep") or {})
+        handled_ids = sweep.get("handled_comment_ids", [])
+        rounds = sweep.get("feedback_rounds", 0)
+        pr_url = info.get("url")
+        actionable = _extract_actionable_comments(info, handled_ids)
+        failed_checks = _extract_failed_checks(info)
+        unresolved_bot_threads = _unresolved_bot_review_threads(
+            repo_path, pr_number, pr_url,
+        )
+
+        def stamp_feature_sweep(updates):
+            def mut(f):
+                s = dict(f.get("final_pr_sweep") or {})
+                s.update(updates)
+                s["last_checked_at"] = now_iso()
+                f["final_pr_sweep"] = s
+            return mut
+
+        new_thread_comments = [
+            c for c in unresolved_bot_threads
+            if c.get("id") and c["id"] not in set(handled_ids)
+        ]
+        mergeable = info.get("mergeable", "UNKNOWN")
+        merge_state = info.get("mergeStateStatus", "")
+        branch_repair_in_flight = _feature_has_in_flight_branch_repair(
+            feature_id,
+            exclude_task_ids={sweep.get("feedback_task_id")},
+        )
+        conflict_feedback = mergeable == "CONFLICTING" or merge_state in ("DIRTY", "BEHIND")
+        if conflict_feedback:
+            if rounds >= PR_SWEEP_MAX_FEEDBACK_ROUNDS:
+                _write_pr_alert(
+                    project_name, feature_id, pr_number,
+                    f"exhausted {rounds} feature-pr feedback rounds, still {merge_state or mergeable}",
+                    pr_url,
+                )
+                update_feature(feature_id, stamp_feature_sweep({
+                    "escalated_conflict": True,
+                    "last_mergeable": mergeable,
+                    "last_merge_state": merge_state,
+                }))
+                alerted += 1
+                continue
+            guard_task_id = sweep.get("feedback_task_id")
+            if guard_task_id and _task_exists_in_queue(guard_task_id):
+                record_pr_sweep_guard_skip("feature_conflict")
+                update_feature(feature_id, stamp_feature_sweep({
+                    "last_mergeable": mergeable,
+                    "last_merge_state": merge_state,
+                }))
+                continue
+            if branch_repair_in_flight:
+                record_pr_sweep_guard_skip("feature_branch_repair")
+                update_feature(feature_id, stamp_feature_sweep({
+                    "last_mergeable": mergeable,
+                    "last_merge_state": merge_state,
+                    "unresolved_bot_threads": len(unresolved_bot_threads),
+                }))
+                continue
+            if dry_run:
+                print(f"DRY-RUN pr-sweep feature {feature_id}: would enqueue conflict feedback")
+                continue
+            feedback_task_id = _enqueue_feature_pr_feedback(
+                feature, project_name, pr_number,
+                comments=actionable + new_thread_comments,
+                check_failures=[],
+                conflicts=True,
+            )
+            update_feature(feature_id, stamp_feature_sweep({
+                "feedback_rounds": rounds + 1,
+                "last_feedback_reason": "conflict",
+                "feedback_task_id": feedback_task_id,
+                "feedback_task_dispatched_at": now_iso(),
+                "handled_comment_ids": handled_ids + [c["id"] for c in actionable + new_thread_comments if c.get("id")],
+                "unresolved_bot_threads": len(unresolved_bot_threads),
+                "last_mergeable": mergeable,
+                "last_merge_state": merge_state,
+            }))
+            fb_enqueued += 1
+            continue
+        feedback_comments = actionable + new_thread_comments
+        if feedback_comments:
+            if rounds >= PR_SWEEP_MAX_FEEDBACK_ROUNDS:
+                _write_pr_alert(
+                    project_name, feature_id, pr_number,
+                    f"exhausted {rounds} feature-pr feedback rounds, "
+                    f"{len(feedback_comments)} comment(s) still unresolved",
+                    pr_url,
+                )
+                update_feature(feature_id, stamp_feature_sweep({
+                    "escalated_comments": True,
+                    "last_mergeable": info.get("mergeable", "UNKNOWN"),
+                    "last_merge_state": info.get("mergeStateStatus", ""),
+                }))
+                alerted += 1
+                continue
+            guard_task_id = sweep.get("feedback_task_id")
+            if guard_task_id and _task_exists_in_queue(guard_task_id):
+                record_pr_sweep_guard_skip("feature_feedback")
+                update_feature(feature_id, stamp_feature_sweep({
+                    "last_mergeable": info.get("mergeable", "UNKNOWN"),
+                    "last_merge_state": info.get("mergeStateStatus", ""),
+                }))
+                continue
+            if branch_repair_in_flight:
+                record_pr_sweep_guard_skip("feature_branch_repair")
+                update_feature(feature_id, stamp_feature_sweep({
+                    "last_mergeable": info.get("mergeable", "UNKNOWN"),
+                    "last_merge_state": info.get("mergeStateStatus", ""),
+                    "unresolved_bot_threads": len(unresolved_bot_threads),
+                }))
+                continue
+            if dry_run:
+                print(f"DRY-RUN pr-sweep feature {feature_id}: would enqueue feedback for {len(feedback_comments)} comment(s)")
+                continue
+            feedback_task_id = _enqueue_feature_pr_feedback(
+                feature, project_name, pr_number, comments=feedback_comments, check_failures=[], conflicts=False,
+            )
+            last_reason = "unresolved_bot_review_threads" if new_thread_comments else "comments"
+            update_feature(feature_id, stamp_feature_sweep({
+                "feedback_rounds": rounds + 1,
+                "last_feedback_reason": last_reason,
+                "feedback_task_id": feedback_task_id,
+                "feedback_task_dispatched_at": now_iso(),
+                "handled_comment_ids": handled_ids + [c["id"] for c in feedback_comments if c.get("id")],
+                "unresolved_bot_threads": len(unresolved_bot_threads),
+                "last_mergeable": info.get("mergeable", "UNKNOWN"),
+                "last_merge_state": info.get("mergeStateStatus", ""),
+            }))
+            fb_enqueued += 1
+            continue
+        if merge_state in ("BLOCKED", "UNSTABLE") and failed_checks:
+            if rounds >= PR_SWEEP_MAX_FEEDBACK_ROUNDS:
+                _write_pr_alert(
+                    project_name, feature_id, pr_number,
+                    f"exhausted {rounds} feature-pr feedback rounds, failed checks still blocking",
+                    pr_url,
+                )
+                update_feature(feature_id, stamp_feature_sweep({
+                    "escalated_checks": True,
+                    "last_mergeable": info.get("mergeable", "UNKNOWN"),
+                    "last_merge_state": info.get("mergeStateStatus", ""),
+                    "failing_checks": [c["name"] for c in failed_checks],
+                }))
+                alerted += 1
+                continue
+            guard_task_id = sweep.get("feedback_task_id")
+            if guard_task_id and _task_exists_in_queue(guard_task_id):
+                record_pr_sweep_guard_skip("feature_check_failure")
+                update_feature(feature_id, stamp_feature_sweep({
+                    "last_mergeable": info.get("mergeable", "UNKNOWN"),
+                    "last_merge_state": info.get("mergeStateStatus", ""),
+                    "failing_checks": [c["name"] for c in failed_checks],
+                }))
+                continue
+            if branch_repair_in_flight:
+                record_pr_sweep_guard_skip("feature_branch_repair")
+                update_feature(feature_id, stamp_feature_sweep({
+                    "last_mergeable": info.get("mergeable", "UNKNOWN"),
+                    "last_merge_state": info.get("mergeStateStatus", ""),
+                    "failing_checks": [c["name"] for c in failed_checks],
+                }))
+                continue
+            if dry_run:
+                print(f"DRY-RUN pr-sweep feature {feature_id}: would enqueue feedback for failed checks")
+                continue
+            feedback_task_id = _enqueue_feature_pr_feedback(
+                feature, project_name, pr_number, comments=[], check_failures=failed_checks, conflicts=False,
+            )
+            update_feature(feature_id, stamp_feature_sweep({
+                "feedback_rounds": rounds + 1,
+                "last_feedback_reason": "checks",
+                "feedback_task_id": feedback_task_id,
+                "feedback_task_dispatched_at": now_iso(),
+                "failing_checks": [c["name"] for c in failed_checks],
+                "last_mergeable": info.get("mergeable", "UNKNOWN"),
+                "last_merge_state": info.get("mergeStateStatus", ""),
+            }))
+            fb_enqueued += 1
+            continue
+
+        update_feature(feature_id, stamp_feature_sweep({
+            "last_mergeable": info.get("mergeable", "UNKNOWN"),
+            "last_merge_state": info.get("mergeStateStatus", ""),
+            "last_review_decision": info.get("reviewDecision", ""),
+            "unresolved_bot_threads": len(unresolved_bot_threads),
+            "failing_checks": [c["name"] for c in failed_checks],
+        }))
+
     return (checked, merged, fb_enqueued, alerted, skipped)
 
 
@@ -1162,6 +2289,40 @@ def update_task_in_place(task_file, mutator):
 
 def _task_exists_in_queue(task_id, states=("queued", "claimed", "running")):
     return any(task_path(task_id, state).exists() for state in states)
+
+
+def _feature_has_in_flight_branch_repair(feature_id, *, exclude_task_ids=()):
+    """Whether another queued/claimed/running task is already advancing a feature branch.
+
+    >>> import json, pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     queue_root = root / "queue"
+    ...     for state in STATES:
+    ...         (queue_root / state).mkdir(parents=True, exist_ok=True)
+    ...     old = _feature_has_in_flight_branch_repair.__globals__["QUEUE_ROOT"]
+    ...     _feature_has_in_flight_branch_repair.__globals__["QUEUE_ROOT"] = queue_root
+    ...     _ = (queue_root / "running" / "task-1.json").write_text(json.dumps({"task_id": "task-1", "feature_id": "f1"}))
+    ...     _ = (queue_root / "done" / "task-2.json").write_text(json.dumps({"task_id": "task-2", "feature_id": "f1"}))
+    ...     out = (
+    ...         _feature_has_in_flight_branch_repair("f1"),
+    ...         _feature_has_in_flight_branch_repair("f1", exclude_task_ids={"task-1"}),
+    ...         _feature_has_in_flight_branch_repair("missing"),
+    ...     )
+    ...     _feature_has_in_flight_branch_repair.__globals__["QUEUE_ROOT"] = old
+    >>> out
+    (True, False, False)
+    """
+    exclude = set(exclude_task_ids or ())
+    for state in ("queued", "claimed", "running"):
+        for path in queue_dir(state).glob("*.json"):
+            task = read_json(path, {})
+            if task.get("feature_id") != feature_id:
+                continue
+            if task.get("task_id") in exclude:
+                continue
+            return True
+    return False
 
 
 def _run_git_capture(worktree, args, *, timeout=15, warn_prefix="git"):
@@ -1244,7 +2405,7 @@ def _build_conflict_preview(worktree, base_branch):
     return _trim_conflict_preview(preview)
 
 
-def _enqueue_pr_feedback(target, project_name, pr_number, base_branch, *, conflicts, comments):
+def _enqueue_pr_feedback(target, project_name, pr_number, base_branch, *, conflicts, comments, check_failures):
     """Create a codex pr-feedback task bound to target's feature_id.
 
     >>> captured = {}
@@ -1253,7 +2414,7 @@ def _enqueue_pr_feedback(target, project_name, pr_number, base_branch, *, confli
     >>> _enqueue_pr_feedback.__globals__["enqueue_task"] = lambda task: captured.setdefault("enqueued", task["task_id"])
     >>> _enqueue_pr_feedback.__globals__["_build_conflict_preview"] = lambda worktree, base: {"our_commits": "a", "their_commits": "b", "likely_conflict_files": ["conflict.py"]}
     >>> target = {"task_id": "task-target", "feature_id": "f1", "worktree": "/tmp/demo"}
-    >>> _enqueue_pr_feedback(target, "demo", 42, "feature/demo", conflicts=True, comments=[])
+    >>> _enqueue_pr_feedback(target, "demo", 42, "feature/demo", conflicts=True, comments=[], check_failures=[])
     'task-preview'
     >>> captured["task"]["engine_args"]["conflict_preview"]["likely_conflict_files"]
     ['conflict.py']
@@ -1283,6 +2444,40 @@ def _enqueue_pr_feedback(target, project_name, pr_number, base_branch, *, confli
             "conflicts": conflicts,
             "conflict_preview": conflict_preview,
             "comments": comments,
+            "check_failures": check_failures,
+        },
+    )
+    enqueue_task(task)
+    return task["task_id"]
+
+
+def _enqueue_feature_pr_feedback(feature, project_name, pr_number, *, comments, check_failures, conflicts):
+    """Create a codex feature-feedback task bound to an existing feature_id.
+
+    The child task branches from `feature/<id>`, runs the `pr-address-feedback`
+    graph with the feature PR's review context, then goes through the normal
+    reviewer/qa/task-pr flow back into the same feature branch.
+    """
+    feature_id = feature.get("feature_id")
+    summary = (
+        f"Address feature PR #{pr_number} feedback for {feature_id}"
+    )[:240]
+    thread_ids = sorted({c.get("thread_id") for c in (comments or []) if c.get("thread_id")})
+    task = new_task(
+        role="implementer",
+        engine="codex",
+        project=project_name,
+        summary=summary,
+        source=f"feature-pr-sweep:{feature_id}",
+        braid_template="pr-address-feedback",
+        feature_id=feature_id,
+        engine_args={
+            "mode": "feature-pr-feedback",
+            "feature_pr_number": pr_number,
+            "comments": comments,
+            "check_failures": check_failures,
+            "conflicts": conflicts,
+            "feature_review_thread_ids": thread_ids,
         },
     )
     enqueue_task(task)
@@ -1559,6 +2754,7 @@ def cleanup_worktrees(dry_run=False):
 
     Returns (checked, cleaned, skipped).
     """
+    rotate_logs()
     if shutil.which("gh") is None:
         print("cleanup: gh CLI not installed, nothing to do", file=sys.stderr)
         return (0, 0, 0)
@@ -1630,6 +2826,16 @@ def cleanup_worktrees(dry_run=False):
         task["pr_final_state"] = state
         task["pr_merged_at"] = info.get("mergedAt")
         task["pr_closed_at"] = info.get("closedAt")
+        if state == "MERGED":
+            eargs = task.get("engine_args") or {}
+            if eargs.get("mode") == "feature-pr-feedback":
+                thread_ids = eargs.get("feature_review_thread_ids") or []
+                if thread_ids:
+                    resolved_count, failed_count = _resolve_review_threads(
+                        repo_path, thread_ids,
+                    )
+                    task["resolved_thread_count"] = resolved_count
+                    task["resolve_thread_failures"] = failed_count
         write_json_atomic(task_file, task)
         append_transition(task.get("task_id", "?"), "done", "done",
                           reason=f"cleanup: {state}")
@@ -1868,6 +3074,9 @@ def lint_template(body: str) -> list[LintError]:
     True
     >>> any(e.rule == "R7" for e in lint_template("flowchart TD;\\nStart[Start] -- \\"always\\" --> A[Read: Apache Kafka Streams];\\nA -- \\"done\\" --> End[End];\\n"))
     True
+    >>> reviewer_body = braid_template_path("lvc-reviewer-pass").read_text()
+    >>> any(e.rule == "R7" for e in lint_template(reviewer_body))
+    False
     """
     errors = []
     stripped = [line.strip() for line in body.splitlines() if line.strip()]
@@ -1894,7 +3103,10 @@ def lint_template(body: str) -> list[LintError]:
             errors.append(
                 LintError("R1", severity, f"{node_id} label has {len(tokens)} tokens", meta["line"])
             )
-        words = re.findall(r"\b[A-Z][A-Za-z0-9_/.-]*\b", label)
+        words = [
+            word for word in re.findall(r"\b[A-Z][A-Za-z0-9_/.-]*\b", label)
+            if not word.isupper() and word not in R7_ALLOWED_CAPS
+        ]
         if "<" not in label and len(words) >= 3:
             errors.append(
                 LintError("R7", "warning", f"{node_id} label may leak repo literals", meta["line"])
@@ -1960,14 +3172,22 @@ def braid_template_write(task_type, body, generator_model):
     os.rename(tmp, p)
     idx = load_braid_index()
     entry = idx.get(task_type, {})
+    old_hash = entry.get("hash")
+    new_hash = "sha256:" + hashlib.sha256(body.encode()).hexdigest()
     entry.update(
         path=str(p.relative_to(STATE_ROOT)),
-        hash="sha256:" + hashlib.sha256(body.encode()).hexdigest(),
+        hash=new_hash,
         generator_model=generator_model,
         created_at=now_iso(),
         uses=entry.get("uses", 0),
         topology_errors=entry.get("topology_errors", 0),
+        recent_outcomes=list(entry.get("recent_outcomes") or []),
     )
+    if entry.get("dispatch_paused") and old_hash != new_hash:
+        entry.pop("dispatch_paused", None)
+        entry.pop("dispatch_paused_at", None)
+        entry.pop("dispatch_pause_reason", None)
+        entry["auto_regen_resolved_at"] = now_iso()
     idx[task_type] = entry
     save_braid_index(idx)
 
@@ -1979,6 +3199,9 @@ def braid_template_record_use(task_type, topology_error=False):
         entry["topology_errors"] = entry.get("topology_errors", 0) + 1
     else:
         entry["uses"] = entry.get("uses", 0) + 1
+    recent = list(entry.get("recent_outcomes") or [])
+    recent.append("topology_error" if topology_error else "ok")
+    entry["recent_outcomes"] = recent[-BRAID_RECENT_OUTCOMES_MAX:]
     idx[task_type] = entry
     save_braid_index(idx)
 
@@ -2363,6 +3586,7 @@ def write_agent_status(role, status, detail=""):
         AGENT_STATE_DIR / f"{role}.json",
         {"role": role, "status": status, "detail": detail, "updated_at": now_iso()},
     )
+    append_event(role, "agent_status", details={"status": status, "detail": detail})
 
 
 def agent_statuses():
@@ -2454,6 +3678,114 @@ def queue_sample(state, limit=10):
             f"{t.get('project')}: {t.get('summary','')[:60]}"
         )
     return items
+
+
+def find_task(task_id, states=STATES):
+    """Return (state, task) for a task id, else None.
+
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     old = find_task.__globals__["QUEUE_ROOT"]
+    ...     find_task.__globals__["QUEUE_ROOT"] = root / "queue"
+    ...     write_json_atomic(find_task.__globals__["QUEUE_ROOT"] / "running" / "task-1.json", {"task_id": "task-1", "summary": "demo"})
+    ...     out1 = find_task("task-1")
+    ...     out2 = find_task("missing")
+    ...     find_task.__globals__["QUEUE_ROOT"] = old
+    >>> out1[0], out1[1]["summary"], out2 is None
+    ('running', 'demo', True)
+    """
+    for state in states:
+        path = task_path(task_id, state)
+        if path.exists():
+            return state, read_json(path, {})
+    return None
+
+
+def running_tasks_text():
+    """Return a concise list of running tasks.
+
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     old = running_tasks_text.__globals__["QUEUE_ROOT"]
+    ...     running_tasks_text.__globals__["QUEUE_ROOT"] = root / "queue"
+    ...     out1 = running_tasks_text()
+    ...     write_json_atomic(running_tasks_text.__globals__["QUEUE_ROOT"] / "running" / "task-1.json", {"task_id": "task-1", "engine": "codex", "role": "implementer", "project": "demo", "summary": "Fix CI"})
+    ...     out2 = running_tasks_text()
+    ...     running_tasks_text.__globals__["QUEUE_ROOT"] = old
+    >>> out1, "task-1" in out2 and "Fix CI" in out2
+    ('no running tasks', True)
+    """
+    items = queue_sample("running", limit=50)
+    if not items:
+        return "no running tasks"
+    return "\n".join(["Running tasks:"] + items)
+
+
+def task_text(task_id, log_tail_lines=20):
+    """Return a task detail block for telegram/CLI inspection.
+
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     queue_root = root / "queue"
+    ...     logs_dir = root / "logs"
+    ...     old = {k: task_text.__globals__[k] for k in ("QUEUE_ROOT", "LOGS_DIR")}
+    ...     task_text.__globals__["QUEUE_ROOT"] = queue_root
+    ...     task_text.__globals__["LOGS_DIR"] = logs_dir
+    ...     write_json_atomic(queue_root / "running" / "task-1.json", {"task_id": "task-1", "engine": "codex", "role": "implementer", "project": "demo", "summary": "Fix CI", "source": "telegram", "feature_id": "feature-1"})
+    ...     logs_dir.mkdir(parents=True, exist_ok=True)
+    ...     _ = (logs_dir / "task-1.log").write_text("line1\\nline2\\n")
+    ...     out1 = task_text("task-1", log_tail_lines=1)
+    ...     out2 = task_text("missing")
+    ...     for key, value in old.items():
+    ...         task_text.__globals__[key] = value
+    >>> ("task-1" in out1 and "state: running" in out1 and "line2" in out1, out2)
+    (True, 'task not found: missing')
+    """
+    found = find_task(task_id)
+    if not found:
+        return f"task not found: {task_id}"
+    state, task = found
+    lines = [
+        task.get("task_id", task_id),
+        f"state: {state}",
+        f"engine: {task.get('engine', '-')}",
+        f"role: {task.get('role', '-')}",
+        f"project: {task.get('project', '-')}",
+        f"source: {task.get('source', '-')}",
+        f"summary: {task.get('summary', '')}",
+    ]
+    optional_fields = (
+        "feature_id",
+        "parent_task_id",
+        "pr_number",
+        "base_branch",
+        "worktree",
+        "feedback_task_id",
+        "conflict_task_id",
+    )
+    for field in optional_fields:
+        value = task.get(field)
+        if value:
+            lines.append(f"{field}: {value}")
+    engine_args = task.get("engine_args")
+    if engine_args:
+        lines.append("engine_args:")
+        for key in sorted(engine_args):
+            value = engine_args[key]
+            rendered = json.dumps(value, sort_keys=True) if isinstance(value, (dict, list)) else str(value)
+            lines.append(f"  {key}: {rendered}")
+    log_path = LOGS_DIR / f"{task_id}.log"
+    lines.append(f"log: {log_path}")
+    if log_path.exists():
+        tail = log_path.read_text(errors="replace").splitlines()[-log_tail_lines:]
+        if tail:
+            lines.append("")
+            lines.append("log tail:")
+            lines.extend(tail)
+    return "\n".join(lines)
 
 
 # --- Periodic tick roles -----------------------------------------------------
@@ -2788,6 +4120,11 @@ def report(kind):
     counts = queue_counts()
     for st in STATES:
         lines.append(f"- {st}: {counts[st]}")
+    metrics = read_pr_sweep_metrics()
+    lines += ["", "## pr-sweep guard telemetry"]
+    lines.append(f"- guard skips total: {metrics.get('guard_skip_total', 0)}")
+    for reason, count in sorted((metrics.get("guard_skip_by_reason") or {}).items()):
+        lines.append(f"- {reason}: {count}")
     lines += ["", "## BRAID templates"]
     idx = load_braid_index()
     if not idx:
@@ -2795,6 +4132,7 @@ def report(kind):
     for tt, e in sorted(idx.items()):
         lines.append(
             f"- `{tt}`: uses={e.get('uses',0)}, topology_errors={e.get('topology_errors',0)}"
+            f"{', paused' if e.get('dispatch_paused') else ''}"
         )
     lines += ["", "## Projects"]
     for project in load_config()["projects"]:
@@ -2814,6 +4152,7 @@ def report(kind):
         if ppd_path.exists():
             lines += ["", "## PPD", "", ppd_path.read_text().strip()]
     out.write_text("\n".join(lines))
+    append_event("report", "report_written", details={"kind": kind, "path": str(out)})
     return out
 
 
@@ -2899,7 +4238,16 @@ def status_text():
         for tt, e in sorted(idx.items()):
             lines.append(
                 f"  {tt}: uses={e.get('uses',0)} errs={e.get('topology_errors',0)}"
+                f"{' paused' if e.get('dispatch_paused') else ''}"
             )
+    metrics = read_pr_sweep_metrics()
+    if metrics.get("guard_skip_total", 0):
+        lines.append("")
+        lines.append(
+            "pr-sweep guard: "
+            f"{metrics['guard_skip_total']} skip(s) "
+            f"({', '.join(f'{k}={v}' for k, v in sorted((metrics.get('guard_skip_by_reason') or {}).items()))})"
+        )
     return "\n".join(lines)
 
 
@@ -3005,6 +4353,15 @@ def dispatch_telegram_command(text):
     """Shared dispatcher used by both the file stub and the real bot."""
     if text in ("/status", "status"):
         return status_text()
+    if text in ("/tasks", "tasks"):
+        return running_tasks_text()
+    if text in ("/task", "task"):
+        return "usage: /task <task_id>"
+    if text.startswith("/task ") or text.startswith("task "):
+        task_id = text.split(" ", 1)[1].strip()
+        if not task_id:
+            return "usage: /task <task_id>"
+        return task_text(task_id)
     if text in ("/queue", "queue"):
         lines = ["Queue sample:"]
         for st in ("queued", "running", "blocked", "awaiting-review", "awaiting-qa"):
@@ -3041,7 +4398,7 @@ def dispatch_telegram_command(text):
         enqueue_task(task)
         return f"enqueued: {task['task_id']}"
     return (
-        "unknown command. allowed: /status /queue /planner /reviewer /qa "
+        "unknown command. allowed: /status /tasks /task <task_id> /queue /planner /reviewer /qa "
         "/regression <project> /report morning|evening /enqueue <summary>"
     )
 
@@ -3085,7 +4442,11 @@ def main(argv=None):
     p_mem = sub.add_parser("tick-memory-synthesis")
     p_mem.add_argument("--force", action="store_true")
 
+    p_audit = sub.add_parser("tick-template-audit")
+    p_audit.add_argument("--today", default=None)
+
     sub.add_parser("reap")
+    sub.add_parser("rotate-logs")
 
     p_clean = sub.add_parser("cleanup-worktrees")
     p_clean.add_argument("--dry-run", action="store_true")
@@ -3158,9 +4519,14 @@ def main(argv=None):
     elif args.cmd == "tick-memory-synthesis":
         out = tick_memory_synthesis(force=args.force)
         print("enqueued:" + (",".join(out) if out else "(none)"))
+    elif args.cmd == "tick-template-audit":
+        print(tick_template_audit(today=args.today))
     elif args.cmd == "reap":
         n = reap()
         print(f"reaped {n}")
+    elif args.cmd == "rotate-logs":
+        compressed, evicted, total = rotate_logs()
+        print(f"rotate-logs: {compressed} compressed, {evicted} evicted, {total} bytes retained")
     elif args.cmd == "cleanup-worktrees":
         checked, cleaned, skipped = cleanup_worktrees(dry_run=args.dry_run)
         print(f"cleanup: {checked} checked, {cleaned} cleaned, {skipped} skipped")

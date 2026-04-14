@@ -83,7 +83,7 @@ Each planner tick creates a feature record under `state/features/<feature_id>.js
 
 ### 2. Codex task PRs target `feature/<id>`
 
-On smoke pass the QA worker always writes `artifacts/<task_id>/pr-body.md`, runs the existing secret scan, uses the distinct `devmini-orchestrator <devmini-orchestrator@joshorig.com>` commit identity, and if `auto_push` is enabled pushes `agent/<task_id>` plus opens:
+On smoke pass the QA worker always writes `artifacts/<task_id>/pr-body.md`, uses the distinct `devmini-orchestrator <devmini-orchestrator@joshorig.com>` commit identity, and if `auto_push` is enabled pushes `agent/<task_id>` plus opens:
 
 ```bash
 gh pr create --head agent/<task_id> --base feature/<id> --title "<summary>" --body-file artifacts/<task_id>/pr-body.md
@@ -91,21 +91,29 @@ gh pr create --head agent/<task_id> --base feature/<id> --title "<summary>" --bo
 
 The PR body still carries the `@codex` mention, BRAID provenance, diff stat, smoke log tail, and a manual fallback command. Task JSON is stamped with `push_base_branch`, `push_branch`, `pr_number`, and `pr_url` when the PR opens.
 
+Push safety now has two layers:
+
+- `repo-memory/*.md` writes are still hard-blocked on the built-in secret detector before historian auto-commit or memory-synthesis apply.
+- Generic branch pushes only hard-block on secret findings when `detect-secrets-hook` is installed and the target repo has a `.secrets.baseline`. The older entropy/path heuristic remains advisory-only in the push log so path-like diffs cannot fail delivery on their own.
+
 ### 3. Auto-merge to feature branch when green
 
-`python3 bin/orchestrator.py pr-sweep [--dry-run]` polls open task PRs from `queue/done/`. When a PR is mergeable, approved, free of actionable comments, and its base ref starts with `feature/`, `pr-sweep` runs `gh pr merge --squash --delete-branch`. It never auto-merges a PR whose base is `main`.
+`python3 bin/orchestrator.py pr-sweep [--dry-run]` polls open task PRs from `queue/done/`. When a PR is mergeable, free of actionable comments, free of unresolved allowlisted-bot review threads, and its base ref starts with `feature/`, `pr-sweep` runs `gh pr merge --squash --delete-branch`. It never auto-merges a PR whose base is `main`. Formal approval is not required for task PRs; human review is reserved for the final feature PR to `main`.
 
 On `gh` auth problems or HTTP 401s, the sweep logs and skips without mutating task or feature state.
 
 ### 4. pr-sweep addresses PR feedback autonomously
 
-When a task PR on a feature branch needs attention, `pr-sweep` enqueues a codex `pr-address-feedback` slice bound to the same `feature_id`. That BRAID graph handles rebases, review-comment edits, and follow-up pushes without human intervention unless the configured feedback-round ceiling is exhausted. Dispatch fires in three cases:
+When a task PR on a feature branch needs attention, `pr-sweep` enqueues a codex `pr-address-feedback` slice bound to the same `feature_id`. That BRAID graph handles rebases, failed-check repairs, review-comment edits, and follow-up pushes without human intervention unless the configured feedback-round ceiling is exhausted. Dispatch fires in four cases:
 
 - **Actionable review comments** from auto-handle authors (`chatgpt-codex-connector`, `copilot`, `github-advanced-security`).
 - **Conflicts or stale bases** — `gh` reports `mergeable=CONFLICTING` or `mergeStateStatus` in `DIRTY`/`BEHIND`.
-- **Drift** — `gh` still says `MERGEABLE`, but the worktree HEAD is `drift_threshold` or more commits behind its base (default 5, override via `config/orchestrator.json`). `pr-sweep` synthesises `mergeStateStatus=BEHIND` so the sync fires before the delta widens.
+- **Failed required checks** — `gh` reports `mergeStateStatus=BLOCKED` or `UNSTABLE` and `statusCheckRollup` contains failed / errored / timed-out checks. The failing check names and URLs are injected into the repair prompt.
+- **Drift** — `gh` still says `MERGEABLE`, but the worktree HEAD is `drift_threshold` or more commits behind its base (default 5, optional per-project override in `config/orchestrator.json`). `pr-sweep` synthesises `mergeStateStatus=BEHIND` so the sync fires before the delta widens.
 
-On conflict/drift dispatch the task's `engine_args.conflict_preview` carries a `[CONFLICT PREVIEW]` block (conflict list + diff stats + recent base log, 4000-char budget) that `worker.py` injects into the codex prompt so the solver sees the rebase surface before it starts. The parent task's `pr_sweep.conflict_task_id` pins the active guard slice; subsequent sweeps of the same parent skip dispatch while that guard task is still in `queued`/`claimed`/`running`, so a slow codex rebase can't triple-enqueue.
+Allowlisted bot top-level comments are not treated as actionable just because of author alone; summary/praise comments such as "Didn't find any major issues" are ignored unless they contain an explicit finding marker. On conflict/drift dispatch the task's `engine_args.conflict_preview` carries a `[CONFLICT PREVIEW]` block (conflict list + diff stats + recent base log, 4000-char budget) that `worker.py` injects into the codex prompt so the solver sees the rebase surface before it starts. The parent task's `pr_sweep.conflict_task_id` pins the active guard slice; subsequent sweeps of the same parent skip dispatch while that guard task is still in `queued`/`claimed`/`running`, so a slow codex rebase can't triple-enqueue.
+
+The same sweep also watches feature PRs that are already in `finalizing`. If a feature->`main` PR picks up actionable comments, unresolved allowlisted-bot review threads, enters `CONFLICTING` / `DIRTY` / `BEHIND`, or goes `BLOCKED` / `UNSTABLE` with failed required checks, `pr-sweep` enqueues a follow-up codex slice on the existing `feature/<id>` line. That slice merges `origin/main` into the feature branch when needed, repairs the failed workflow or review issue, and lands through the normal task-PR-to-feature flow before the final feature PR is reconsidered.
 
 ### 5. feature-finalize opens the feature->main PR
 
@@ -121,7 +129,7 @@ Once ready, it aggregates the child PR evidence into `artifacts/<feature_id>/fin
 gh pr create --base main --head feature/<id> --title "<feature summary>" --body-file artifacts/<feature_id>/final-pr-body.md
 ```
 
-This PR is for human review only. The orchestrator never calls `gh pr merge` on a feature PR.
+This PR is for human review only. The orchestrator never calls `gh pr merge` on a feature PR, but it can still service review comments and merge conflicts on that PR by dispatching follow-up codex work back onto the same feature branch.
 
 ### 6. Cleanup on feature merge
 

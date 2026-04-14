@@ -124,6 +124,14 @@ def build_handlers(cfg):
         body = o.dispatch_telegram_command("/queue")
         await send_html(update, block("📋", "queue", body))
 
+    async def cmd_tasks(update, ctx, text):
+        body = o.dispatch_telegram_command("/tasks")
+        await send_html(update, block("🏃", "tasks", body))
+
+    async def cmd_task(update, ctx, text):
+        body = o.dispatch_telegram_command(text)
+        await send_html(update, block("🔎", "task", body))
+
     async def cmd_planner(update, ctx, text):
         o.tick_planner()
         await send_html(update, "✅ <b>planner</b> tick complete")
@@ -223,6 +231,8 @@ def build_handlers(cfg):
         log_reject(chat_id, text, "unknown_command")
         help_text = (
             "/status         orchestrator + queue snapshot\n"
+            "/tasks          running task summary\n"
+            "/task <id>      detail for one task + log tail\n"
             "/queue          sample tasks per state\n"
             "/planner        fire planner tick\n"
             "/planner_status planner state by project\n"
@@ -270,6 +280,8 @@ def build_handlers(cfg):
 
     app = Application.builder().token(cfg["bot_token"]).build()
     app.add_handler(CommandHandler("status", gate(cmd_status)))
+    app.add_handler(CommandHandler("tasks", gate(cmd_tasks)))
+    app.add_handler(CommandHandler("task", gate(cmd_task)))
     app.add_handler(CommandHandler("queue", gate(cmd_queue)))
     app.add_handler(CommandHandler("planner", gate(cmd_planner)))
     app.add_handler(CommandHandler("planner_status", gate(cmd_planner_status)))

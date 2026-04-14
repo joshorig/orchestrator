@@ -19,12 +19,12 @@ _Architectural decisions with enough context that a future agent can tell whethe
 
 - `planner.create_feature()` stays header-only; the first worker lazily creates `feature/<id>`
 - codex tasks inherit `feature_id`; `atomic_claim()` serializes siblings within a feature
-- task PRs target `feature/<id>` and auto-merge there when mergeable and approved
-- `pr-sweep` addresses review comments via the `pr-address-feedback` BRAID graph
+- task PRs target `feature/<id>` and auto-merge there when mergeable and clean
+- `pr-sweep` addresses actionable review comments, failed required checks, drift/conflicts, and unresolved allowlisted-bot review threads via the `pr-address-feedback` BRAID graph, for both task PRs and finalizing feature PRs
 - `feature-finalize` opens the feature->main PR for human review only
 - codex capacity scales from 1 slot to a 6-slot global fleet
 
-**Consequences:** Locks in `feature_id` on every codex task, per-feature serialization in `atomic_claim`, and human review at feature granularity. Rules out per-task human review, auto-merge to `main`, and remote branch deletion from the orchestrator side. Known gaps: degraded `gh auth` still causes `pr-sweep`/`feature-finalize` to skip, and the first autonomous PR-feedback run depends on the `pr-address-feedback` template being present.
+**Consequences:** Locks in `feature_id` on every codex task, per-feature serialization in `atomic_claim`, and human review at feature granularity. Task PRs are allowed to auto-merge once they are clean enough for `pr-sweep` to advance them; the human gate lives at the feature PR to `main`, even though the orchestrator may still dispatch follow-up codex work to clear comments, repair failed checks, or merge `main` conflicts on that PR. Allowlisted bot authors alone are not enough to trigger repair: non-actionable summary comments are ignored unless the body contains an explicit finding marker. Rules out auto-merge to `main` and remote branch deletion from the orchestrator side. Known gaps: degraded `gh auth` still causes `pr-sweep`/`feature-finalize` to skip, and the first autonomous PR-feedback run depends on the `pr-address-feedback` template being present.
 
 ## 2026-04-13 — Upgrade pattern B → pattern C: worker opens the PR + worktree cleanup
 
@@ -68,7 +68,7 @@ Task state mutations on smoke pass:
 
 Config: `"auto_push": false` explicitly set on all three projects (`lvc-standard`, `dag-framework`, `trade-research-platform`). Opt-in per project; default is always off.
 
-**Consequences:** The orchestrator now has a deliverable contract — every smoke-green worktree produces a pr-body.md a human can paste into `gh pr create --body-file`, and with one config flip, the branch is pre-pushed. The `@codex` mention in the body means codex's GitHub reviewer fires automatically when the PR opens, so code review and QA evidence land together without a separate step. Rules out unattended PR creation (pattern C) and auto-merge (pattern D) until we have more observation time — both are future work. The distinct commit identity prevents co-mingling agent commits with human commits in `git blame` / `git log --author` queries. Secret scan is defense in depth: the engineering-memory skill already forbids committing these files, but the orchestrator enforces it at the push boundary. The "driver done even on push failure" split preserves the invariant that QA slot state reflects what the script did; delivery failures are attached to the target, not the driver.
+**Consequences:** The orchestrator now has a deliverable contract — every smoke-green worktree produces a pr-body.md a human can paste into `gh pr create --body-file`, and with one config flip, the branch is pre-pushed. The `@codex` mention in the body means codex's GitHub reviewer fires automatically when the PR opens, so code review and QA evidence land together without a separate step. Rules out unattended PR creation (pattern C) and auto-merge (pattern D) until we have more observation time — both are future work. The distinct commit identity prevents co-mingling agent commits with human commits in `git blame` / `git log --author` queries. Secret scan is now split by risk surface: `repo-memory/*.md` writes still hard-block on the built-in detector, but generic code pushes only hard-block when `detect-secrets-hook` and a repo `.secrets.baseline` are present. The "driver done even on push failure" split preserves the invariant that QA slot state reflects what the script did; delivery failures are attached to the target, not the driver.
 
 ---
 

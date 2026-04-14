@@ -21,6 +21,7 @@ import difflib
 import fcntl
 import hashlib
 import json
+import math
 import os
 import pathlib
 import re
@@ -329,9 +330,13 @@ _SECRET_PATTERNS = [
     (re.compile(r"\bcredentials\.json\b"), "credentials.json"),
 ]
 
+_SECRET_FALSE_POSITIVE_RE = re.compile(
+    r"^(?:sha(?:1|256|512):)?[0-9a-f]{32,64}$|^[0-9a-f]{7,40}$|^[A-F0-9]{32,64}$"
+)
+
 
 def scan_for_secrets(text):
-    """Return a list of (label, snippet) for any secret patterns found."""
+    """Return a list of (label, snippet) for any secret-like patterns found."""
     if not text:
         return []
     hits = []
@@ -341,7 +346,164 @@ def scan_for_secrets(text):
             start = max(0, m.start() - 20)
             end = min(len(text), m.end() + 20)
             hits.append((label, text[start:end].replace("\n", " ")))
+    for token in re.findall(r"\b[A-Za-z0-9+/=_-]{24,}\b", text):
+        if _SECRET_FALSE_POSITIVE_RE.match(token):
+            continue
+        if token.isalpha():
+            continue
+        alphabet = set(token)
+        if len(alphabet) < 6:
+            continue
+        counts = {}
+        for ch in token:
+            counts[ch] = counts.get(ch, 0) + 1
+        entropy = 0.0
+        for count in counts.values():
+            p = count / len(token)
+            entropy -= p * math.log2(p)
+        if entropy >= 4.1:
+            hits.append(("high-entropy token", token[:12] + "..." + token[-8:]))
     return hits
+
+
+def _changed_files_against_base(wt: pathlib.Path, base_branch: str):
+    files = set()
+    for args in (
+        ("diff", "--name-only", "-z", base_branch),
+        ("diff", "--cached", "--name-only", "-z"),
+        ("diff", "--name-only", "-z"),
+        ("ls-files", "--others", "--exclude-standard", "-z"),
+    ):
+        proc = _git(wt, *args)
+        if proc.returncode != 0:
+            continue
+        for part in (proc.stdout or "").split("\x00"):
+            if part:
+                files.add(part)
+    return sorted(files)
+
+
+def _detect_secrets_hook_findings(wt: pathlib.Path, filenames, baseline_path: pathlib.Path | None = None):
+    """Run `detect-secrets-hook` against changed files when configured.
+
+    Returns a list of finding dicts, `[]` for no findings, or `None` when the
+    hook should not run (missing binary, missing baseline, or no files).
+
+    >>> import json, pathlib, tempfile, types
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     baseline = root / ".secrets.baseline"
+    ...     _ = baseline.write_text("{}")
+    ...     old = {k: _detect_secrets_hook_findings.__globals__[k] for k in ("shutil", "subprocess")}
+    ...     class FakeShutil:
+    ...         @staticmethod
+    ...         def which(name):
+    ...             return "/usr/bin/detect-secrets-hook" if name == "detect-secrets-hook" else None
+    ...     class FakeSubprocess:
+    ...         @staticmethod
+    ...         def run(cmd, **kwargs):
+    ...             payload = [{"filename": "foo.py", "type": "Secret Keyword"}]
+    ...             return types.SimpleNamespace(returncode=1, stdout=json.dumps(payload), stderr="")
+    ...     _detect_secrets_hook_findings.__globals__["shutil"] = FakeShutil()
+    ...     _detect_secrets_hook_findings.__globals__["subprocess"] = FakeSubprocess()
+    ...     out1 = _detect_secrets_hook_findings(root, ["foo.py"], baseline)
+    ...     out2 = _detect_secrets_hook_findings(root, [], baseline)
+    ...     out3 = _detect_secrets_hook_findings(root, ["foo.py"], root / "missing.baseline")
+    ...     for key, value in old.items():
+    ...         _detect_secrets_hook_findings.__globals__[key] = value
+    >>> out1[0]["filename"], out2 is None, out3 is None
+    ('foo.py', True, True)
+    """
+    filenames = [name for name in filenames if name]
+    if not filenames:
+        return None
+    hook = shutil.which("detect-secrets-hook")
+    if not hook:
+        return None
+    baseline = baseline_path or (wt / ".secrets.baseline")
+    if not baseline.exists():
+        return None
+    proc = subprocess.run(
+        [hook, "--json", "--baseline", str(baseline), *filenames],
+        cwd=str(wt),
+        text=True,
+        capture_output=True,
+    )
+    body = (proc.stdout or "").strip()
+    if not body:
+        return []
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        return [{"raw": body, "error": proc.stderr.strip()}]
+    if isinstance(parsed, list):
+        return parsed
+    if isinstance(parsed, dict):
+        findings = parsed.get("results")
+        if isinstance(findings, list):
+            return findings
+        if findings is None and parsed:
+            return [parsed]
+        return findings or []
+    return [{"raw": body}]
+
+
+def _repo_memory_secret_hits(wt: pathlib.Path):
+    """Inspect changed repo-memory markdown files for secret-like content.
+
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     wt = pathlib.Path(tmp) / "repo"
+    ...     _ = subprocess.run(["git", "init", "-b", "main", str(wt)], check=True, capture_output=True, text=True)
+    ...     _ = subprocess.run(["git", "-C", str(wt), "config", "user.name", "Doctest"], check=True, capture_output=True, text=True)
+    ...     _ = subprocess.run(["git", "-C", str(wt), "config", "user.email", "doctest@example.com"], check=True, capture_output=True, text=True)
+    ...     (wt / "repo-memory").mkdir()
+    ...     _ = (wt / "repo-memory" / "RECENT_WORK.md").write_text("AKIA1234567890ABCDEF\\n")
+    ...     hits = _repo_memory_secret_hits(wt)
+    >>> hits[0][0]
+    'aws access key'
+    """
+    status = _git(wt, "status", "--porcelain", "--untracked-files=all").stdout or ""
+    paths = set()
+    for raw in status.splitlines():
+        if not raw:
+            continue
+        path = raw[3:].strip()
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1].strip()
+        if path.startswith("repo-memory/") and path.endswith(".md"):
+            paths.add(path)
+    hits = []
+    for rel in sorted(paths):
+        full = wt / rel
+        if not full.exists():
+            continue
+        for label, snippet in scan_for_secrets(full.read_text(errors="replace")):
+            hits.append((label, f"{rel}: {snippet}"))
+    return hits
+
+
+def write_repo_memory_secret_alert(project_name, task_id, reason, hits, log_path=None):
+    ts = dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    o.REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    alert_path = o.REPORT_DIR / f"repo-memory-secret_{project_name}_{ts}.md"
+    body = [
+        f"# REPO-MEMORY SECRET BLOCK — {project_name}",
+        "",
+        f"- task: `{task_id}`",
+        f"- reason: {reason}",
+        f"- time: {o.now_iso()}",
+        "",
+        "Historian output was blocked because repo-memory markdown matched the secret detector.",
+        "",
+        "## Findings",
+    ]
+    for label, snippet in hits[:10]:
+        body.append(f"- {label}: `{snippet[:200]}`")
+    if log_path:
+        body += ["", f"Log: `{log_path}`"]
+    alert_path.write_text("\n".join(body) + "\n")
+    log(f"wrote repo-memory secret alert: {alert_path}")
+    return alert_path
 
 
 def _git(worktree, *args, check=False, timeout=30):
@@ -393,6 +555,17 @@ def _autocommit_worktree(wt: pathlib.Path, target: dict, log_path: str):
     status = _git(wt, "status", "--porcelain").stdout
     if not status.strip():
         return (True, "clean")
+    repo_memory_hits = _repo_memory_secret_hits(wt)
+    if repo_memory_hits:
+        labels = ", ".join(sorted({label for label, _ in repo_memory_hits}))
+        try:
+            with open(log_path, "a") as f:
+                f.write(f"\n# AUTO-COMMIT ABORTED: repo-memory secret-scan hit ({labels})\n")
+                for label, snippet in repo_memory_hits[:8]:
+                    f.write(f"#   {label}: {snippet[:200]}\n")
+        except Exception:
+            pass
+        return (False, f"repo-memory secret-scan hit: {labels}")
     add = _git_agent(wt, "add", "-A")
     if add.returncode:
         return (False, f"add: {add.stderr.strip()}")
@@ -521,13 +694,55 @@ def push_worktree_branch(target, project, worktree, branch, log_path, base_branc
 
     Safety gates:
       - never pushes `main`
-      - aborts if `git diff <base_branch>` hits secret patterns
+      - aborts if `detect-secrets-hook` reports findings against changed files
+        and a repo `.secrets.baseline` exists
       - uses a distinct `devmini-orchestrator` commit identity
       - leaves the worktree intact on failure for human inspection
 
     base_branch: the ref the agent branch was created from. Used for the
     secret-scan diff and the ahead-count check. Typically "main" or
     "feature/<id>".
+
+    >>> import pathlib, tempfile, types
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     wt = root / "wt"
+    ...     wt.mkdir()
+    ...     log_path = root / "push.log"
+    ...     original = {k: push_worktree_branch.__globals__[k] for k in ("scan_for_secrets", "_detect_secrets_hook_findings", "_changed_files_against_base", "_git", "_git_agent", "o")}
+    ...     class FakeO:
+    ...         @staticmethod
+    ...         def now_iso():
+    ...             return "2026-04-14T23:30:00"
+    ...     def fake_git(path, *args, **kwargs):
+    ...         cmd = tuple(args)
+    ...         if cmd[:3] == ("diff", "--name-only", "-z") or cmd[:3] == ("diff", "--cached", "--name-only") or cmd[:2] == ("diff", "--name-only") or cmd[:2] == ("ls-files", "--others"):
+    ...             return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    ...         if cmd[:3] == ("diff", "--cached") or cmd[:1] == ("diff",):
+    ...             return types.SimpleNamespace(returncode=0, stdout="diff --git a/.github/workflows/unresolved-bot-review.yml b/.github/workflows/unresolved-bot-review.yml", stderr="")
+    ...         if cmd[:2] == ("status", "--porcelain"):
+    ...             return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    ...         if cmd[:2] == ("rev-list", "--count"):
+    ...             return types.SimpleNamespace(returncode=0, stdout="1\\n", stderr="")
+    ...         if cmd[:2] == ("rev-parse", "HEAD"):
+    ...             return types.SimpleNamespace(returncode=0, stdout="abc123\\n", stderr="")
+    ...         raise AssertionError(cmd)
+    ...     def fake_git_agent(path, *args, **kwargs):
+    ...         if args[:3] == ("push", "-u", "origin"):
+    ...             return types.SimpleNamespace(returncode=0, stdout="ok\\n", stderr="")
+    ...         raise AssertionError(args)
+    ...     push_worktree_branch.__globals__["scan_for_secrets"] = lambda text: [("high-entropy token", "github/workf...t-review")]
+    ...     push_worktree_branch.__globals__["_detect_secrets_hook_findings"] = lambda wt, filenames: None
+    ...     push_worktree_branch.__globals__["_changed_files_against_base"] = lambda wt, base: []
+    ...     push_worktree_branch.__globals__["_git"] = fake_git
+    ...     push_worktree_branch.__globals__["_git_agent"] = fake_git_agent
+    ...     push_worktree_branch.__globals__["o"] = FakeO()
+    ...     out = push_worktree_branch({"task_id": "task-1", "summary": "Demo"}, {"name": "demo"}, str(wt), "agent/task-1", str(log_path), base_branch="main")
+    ...     log_body = log_path.read_text()
+    ...     for key, value in original.items():
+    ...         push_worktree_branch.__globals__[key] = value
+    >>> out[0], out[1], "PUSH WARNING" in log_body, "PUSH ABORTED" in log_body
+    (True, 'ok', True, False)
     """
     if branch == "main" or branch.endswith("/main"):
         return (False, "refuse to push main", None, 0, None)
@@ -536,22 +751,42 @@ def push_worktree_branch(target, project, worktree, branch, log_path, base_branc
     if not wt.exists():
         return (False, "worktree missing", None, 0, None)
 
-    # Secret scan: look at the full diff vs base_branch AND staged-but-uncommitted.
+    # Advisory secret scan: log suspicious diff content, but don't block pushes.
+    # The hard blocker is `detect-secrets-hook` with a repository baseline.
     full_diff = _git(wt, "diff", base_branch).stdout or ""
     staged = _git(wt, "diff", "--cached").stdout or ""
     unstaged = _git(wt, "diff").stdout or ""
     combined = full_diff + "\n" + staged + "\n" + unstaged
-    hits = scan_for_secrets(combined)
-    if hits:
-        labels = ", ".join(sorted({h[0] for h in hits}))
+    advisory_hits = scan_for_secrets(combined)
+    if advisory_hits:
+        labels = ", ".join(sorted({h[0] for h in advisory_hits}))
         try:
             with open(log_path, "a") as f:
-                f.write(f"\n# PUSH ABORTED: secret-scan hit ({labels})\n")
-                for label, snippet in hits[:8]:
+                f.write(f"\n# PUSH WARNING: advisory secret-scan hit ({labels})\n")
+                for label, snippet in advisory_hits[:8]:
                     f.write(f"#   {label}: ...{snippet}...\n")
         except Exception:
             pass
-        return (False, f"secret-scan hit: {labels}", None, 0, None)
+    changed_files = _changed_files_against_base(wt, base_branch)
+    hook_findings = _detect_secrets_hook_findings(wt, changed_files)
+    if hook_findings:
+        labels = sorted({
+            finding.get("type")
+            or finding.get("secret_type")
+            or finding.get("filename")
+            or "detect-secrets finding"
+            for finding in hook_findings
+        })
+        reason = ", ".join(labels)
+        try:
+            with open(log_path, "a") as f:
+                f.write(f"\n# PUSH ABORTED: detect-secrets findings ({reason})\n")
+                for finding in hook_findings[:8]:
+                    rendered = json.dumps(finding, sort_keys=True)
+                    f.write(f"#   {rendered[:300]}\n")
+        except Exception:
+            pass
+        return (False, f"detect-secrets findings: {reason}", None, 0, None)
 
     # Auto-commit anything the agent left uncommitted. The agent process is
     # expected to commit its own work, but we fall back to a single squash
@@ -898,7 +1133,15 @@ def run_claude_memory_synthesis(task, cfg, timeout, log_path):
     if not markdown_sane(candidate):
         o.move_task(task_id, "running", "failed", reason="candidate markdown invalid")
         return
-    if scan_for_secrets(candidate):
+    candidate_hits = scan_for_secrets(candidate)
+    if candidate_hits:
+        write_repo_memory_secret_alert(
+            project["name"],
+            task_id,
+            "candidate contains secret-like content",
+            candidate_hits,
+            log_path=str(log_path),
+        )
         o.move_task(task_id, "running", "failed", reason="candidate contains secret-like content")
         return
 
@@ -1810,6 +2053,14 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
         o.braid_template_record_use(bt, topology_error=False)
         ok, info = _autocommit_worktree(pathlib.Path(wt), target, log_path)
         if not ok:
+            if "repo-memory secret-scan hit" in info:
+                write_repo_memory_secret_alert(
+                    project["name"],
+                    task_id,
+                    info,
+                    _repo_memory_secret_hits(pathlib.Path(wt)),
+                    log_path=str(log_path),
+                )
             def mut_fail(t):
                 t["finished_at"] = o.now_iso()
                 t["failure"] = f"auto-commit: {info}"
@@ -1872,7 +2123,7 @@ def _format_conflict_preview(conflict_preview):
     )
 
 
-def build_pr_feedback_prompt(*, target, graph_body, base_branch, conflicts, comments, pr_number, conflict_preview=None):
+def build_pr_feedback_prompt(*, target, graph_body, base_branch, conflicts, comments, pr_number, check_failures=None, conflict_preview=None):
     """Build the codex prompt for a pr-feedback task.
 
     >>> prompt = build_pr_feedback_prompt(
@@ -1905,6 +2156,13 @@ def build_pr_feedback_prompt(*, target, graph_body, base_branch, conflicts, comm
             f"{c.get('body','').strip()}"
         )
     comments_text = "\n\n".join(comment_blocks) or "(no review comments — rebase-only run)"
+    check_blocks = []
+    for i, c in enumerate(check_failures or [], 1):
+        check_blocks.append(
+            f"### Failed check {i}: {c.get('name','check')} [{c.get('conclusion','UNKNOWN')}]\n"
+            f"{c.get('details_url','(no details url)')}"
+        )
+    checks_text = "\n\n".join(check_blocks) or "(no failed checks captured)"
     conflict_preview_text = _format_conflict_preview(conflict_preview)
 
     header = (
@@ -1923,14 +2181,67 @@ def build_pr_feedback_prompt(*, target, graph_body, base_branch, conflicts, comm
         f"{conflict_preview_text}"
         "[REVIEW COMMENTS TO ADDRESS]\n"
         f"{comments_text}\n\n"
+        "[FAILED CHECKS TO REPAIR]\n"
+        f"{checks_text}\n\n"
         "[ACTIONS YOU CAN TAKE]\n"
         f"- You are inside the target worktree on branch agent/{target.get('task_id')}.\n"
         f"- The base branch `{base_branch}` has already been fetched from origin.\n"
         f"- If there are conflicts, rebase onto origin/{base_branch} and resolve them.\n"
         "- Apply fixes requested by the review comments.\n"
+        "- If a failed check points at workflow or CI breakage, repair the underlying cause in the branch.\n"
         "- Commit your changes using the existing agent git identity if needed.\n"
         "- Do NOT push — worker.py will re-run smoke and push with --force-with-lease "
         "after it validates your work.\n\n"
+        "[OUTPUT CONTRACT]\n"
+        "Emit exactly one of these as the final line of your response:\n"
+        "  BRAID_OK: <one-line summary of what you did>\n"
+        "  BRAID_TOPOLOGY_ERROR: <reason the graph could not be traversed>\n"
+    )
+
+
+def build_feature_pr_feedback_prompt(*, task, graph_body, comments, pr_number, conflicts, check_failures=None):
+    """Build the codex prompt for a feature->main PR follow-up slice.
+
+    The worktree is rooted on `feature/<id>` and will later open a normal
+    task PR back into that feature branch, so the prompt is comment-focused
+    rather than instructing a direct rebase onto `main`.
+    """
+    comment_blocks = []
+    for i, c in enumerate(comments or [], 1):
+        comment_blocks.append(
+            f"### Comment {i} by @{c.get('author','?')} at {c.get('created_at','?')}\n"
+            f"{c.get('body','').strip()}"
+        )
+    comments_text = "\n\n".join(comment_blocks) or "(no review comments — conflict-only run)"
+    check_blocks = []
+    for i, c in enumerate(check_failures or [], 1):
+        check_blocks.append(
+            f"### Failed check {i}: {c.get('name','check')} [{c.get('conclusion','UNKNOWN')}]\n"
+            f"{c.get('details_url','(no details url)')}"
+        )
+    checks_text = "\n\n".join(check_blocks) or "(no failed checks captured)"
+    return (
+        "[BRAID REASONING GRAPH — traverse deterministically. If you cannot, "
+        "emit exactly one line `BRAID_TOPOLOGY_ERROR: <reason>` as the final line and stop.]\n\n"
+        f"{graph_body}\n\n"
+        "[END BRAID GRAPH]\n\n"
+        f"[FEATURE PR FEEDBACK CONTEXT]\n"
+        f"Feature PR #{pr_number} for feature {task.get('feature_id')} needs maintenance.\n"
+        f"Original summary: {task.get('summary','(no summary)')}\n"
+        "Target branch of the final PR: main\n"
+        f"Conflicts with main: {conflicts}\n\n"
+        "[REVIEW COMMENTS TO ADDRESS]\n"
+        f"{comments_text}\n\n"
+        "[FAILED CHECKS TO REPAIR]\n"
+        f"{checks_text}\n\n"
+        "[ACTIONS YOU CAN TAKE]\n"
+        f"- You are inside a fresh worktree on branch agent/{task.get('task_id')} based on feature/{task.get('feature_id')}.\n"
+        "- Fetch `origin/main` before changing code.\n"
+        "- If there are conflicts, merge `origin/main` into your current branch and resolve them.\n"
+        "- Do NOT rebase this branch onto `main`; the follow-up PR must still target the feature branch.\n"
+        "- Apply fixes requested by the feature PR review comments.\n"
+        "- If a failed check points at workflow or CI breakage, repair the underlying cause in the feature branch.\n"
+        "- Commit your changes using the existing agent git identity if needed.\n\n"
         "[OUTPUT CONTRACT]\n"
         "Emit exactly one of these as the final line of your response:\n"
         "  BRAID_OK: <one-line summary of what you did>\n"
@@ -2008,7 +2319,9 @@ def run_pr_feedback_task(task, cfg):
         prompt = build_pr_feedback_prompt(
             target=target, graph_body=graph_body,
             base_branch=base_branch, conflicts=conflicts, comments=comments,
-            pr_number=pr_number, conflict_preview=conflict_preview,
+            pr_number=pr_number,
+            check_failures=eargs.get("check_failures") or [],
+            conflict_preview=conflict_preview,
         )
 
         timeout = eargs.get(
@@ -2297,7 +2610,17 @@ def run_codex_slot(task, cfg):
         )
 
         memory_ctx = read_memory_context(project["path"])
-        prompt = build_codex_prompt(task, graph_body, memory_ctx)
+        if mode == "feature-pr-feedback":
+            prompt = build_feature_pr_feedback_prompt(
+                task=task,
+                graph_body=graph_body,
+                comments=(task.get("engine_args") or {}).get("comments") or [],
+                pr_number=(task.get("engine_args") or {}).get("feature_pr_number"),
+                conflicts=bool((task.get("engine_args") or {}).get("conflicts", False)),
+                check_failures=(task.get("engine_args") or {}).get("check_failures") or [],
+            )
+        else:
+            prompt = build_codex_prompt(task, graph_body, memory_ctx)
 
         timeout = task.get("engine_args", {}).get(
             "timeout_sec",
@@ -2399,6 +2722,14 @@ def run_codex_slot(task, cfg):
             o.braid_template_record_use(bt, topology_error=False)
             ok, info = _autocommit_worktree(pathlib.Path(wt_path), task, log_path)
             if not ok:
+                if "repo-memory secret-scan hit" in info:
+                    write_repo_memory_secret_alert(
+                        project["name"],
+                        task_id,
+                        info,
+                        _repo_memory_secret_hits(pathlib.Path(wt_path)),
+                        log_path=str(log_path),
+                    )
                 def mut_fail(t):
                     t["finished_at"] = o.now_iso()
                     t["failure"] = f"auto-commit: {info}"
