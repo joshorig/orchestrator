@@ -151,6 +151,42 @@ def build_handlers(cfg):
         except SystemExit as exc:
             await send_html(update, f"❌ <b>error</b>: {html_escape(str(exc))}")
 
+    async def cmd_planner_status(update, ctx, text):
+        parts = text.split(maxsplit=1)
+        project = parts[1].strip() if len(parts) > 1 else None
+        body = o.planner_status_text(project_filter=project)
+        await send_html(update, block("📋", "planner status", body))
+
+    async def cmd_planner_enable(update, ctx, text):
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            await send_html(update, "❌ usage: <code>/planner_enable &lt;project&gt;</code>")
+            return
+        project = parts[1].strip()
+        cfg_names = {p["name"] for p in o.load_config()["projects"]}
+        if project not in cfg_names:
+            await send_html(update, f"❌ unknown project: <code>{html_escape(project)}</code>")
+            return
+        changed = o.set_planner_disabled(project, False)
+        suffix = "" if changed else " (was already enabled)"
+        await send_html(update, f"✅ planner <b>enabled</b> for <code>{html_escape(project)}</code>{suffix}")
+
+    async def cmd_planner_disable(update, ctx, text):
+        parts = text.split(maxsplit=2)
+        if len(parts) < 2:
+            await send_html(update, "❌ usage: <code>/planner_disable &lt;project&gt; [reason]</code>")
+            return
+        project = parts[1].strip()
+        reason = parts[2].strip() if len(parts) > 2 else ""
+        cfg_names = {p["name"] for p in o.load_config()["projects"]}
+        if project not in cfg_names:
+            await send_html(update, f"❌ unknown project: <code>{html_escape(project)}</code>")
+            return
+        changed = o.set_planner_disabled(project, True, reason=reason)
+        suffix = f" (reason: {html_escape(reason)})" if reason else ""
+        status_word = "disabled" if changed else "already disabled"
+        await send_html(update, f"✅ planner <b>{status_word}</b> for <code>{html_escape(project)}</code>{suffix}")
+
     async def cmd_report(update, ctx, text):
         parts = text.split(maxsplit=1)
         kind = parts[1].strip() if len(parts) > 1 else "morning"
@@ -189,6 +225,9 @@ def build_handlers(cfg):
             "/status         orchestrator + queue snapshot\n"
             "/queue          sample tasks per state\n"
             "/planner        fire planner tick\n"
+            "/planner_status planner state by project\n"
+            "/planner_enable <p> enable planner for project\n"
+            "/planner_disable <p> [reason] disable planner for project\n"
             "/reviewer       fire reviewer tick\n"
             "/qa             fire qa smoke tick\n"
             "/regression <p> queue full regression sweep for project\n"
@@ -233,6 +272,9 @@ def build_handlers(cfg):
     app.add_handler(CommandHandler("status", gate(cmd_status)))
     app.add_handler(CommandHandler("queue", gate(cmd_queue)))
     app.add_handler(CommandHandler("planner", gate(cmd_planner)))
+    app.add_handler(CommandHandler("planner_status", gate(cmd_planner_status)))
+    app.add_handler(CommandHandler("planner_enable", gate(cmd_planner_enable)))
+    app.add_handler(CommandHandler("planner_disable", gate(cmd_planner_disable)))
     app.add_handler(CommandHandler("reviewer", gate(cmd_reviewer)))
     app.add_handler(CommandHandler("qa", gate(cmd_qa)))
     app.add_handler(CommandHandler("regression", gate(cmd_regression)))

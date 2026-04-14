@@ -37,6 +37,7 @@ CONFIG_PATH = STATE_ROOT / "config" / "orchestrator.json"
 QUEUE_ROOT = STATE_ROOT / "queue"
 AGENT_STATE_DIR = STATE_ROOT / "state" / "agents"
 RUNTIME_DIR = STATE_ROOT / "state" / "runtime"
+PLANNER_DISABLED_DIR = RUNTIME_DIR / "planner-disabled"
 CLAIMS_DIR = RUNTIME_DIR / "claims"
 LOCKS_DIR = RUNTIME_DIR / "locks"
 FEATURES_DIR = STATE_ROOT / "state" / "features"
@@ -1684,6 +1685,47 @@ def list_features(status=None):
     return out
 
 
+def _project_has_open_feature(project_name):
+    """Return True when a project has any non-terminal feature record.
+
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     old = _project_has_open_feature.__globals__["FEATURES_DIR"]
+    ...     _project_has_open_feature.__globals__["FEATURES_DIR"] = pathlib.Path(tmp)
+    ...     _project_has_open_feature("demo")
+    ...     _project_has_open_feature.__globals__["FEATURES_DIR"] = old
+    False
+
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     old = _project_has_open_feature.__globals__["FEATURES_DIR"]
+    ...     _project_has_open_feature.__globals__["FEATURES_DIR"] = pathlib.Path(tmp)
+    ...     write_json_atomic(pathlib.Path(tmp) / "open.json", {"project": "demo", "status": "open"})
+    ...     _project_has_open_feature("demo")
+    ...     _project_has_open_feature.__globals__["FEATURES_DIR"] = old
+    True
+
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     old = _project_has_open_feature.__globals__["FEATURES_DIR"]
+    ...     _project_has_open_feature.__globals__["FEATURES_DIR"] = pathlib.Path(tmp)
+    ...     write_json_atomic(pathlib.Path(tmp) / "merged.json", {"project": "demo", "status": "merged"})
+    ...     _project_has_open_feature("demo")
+    ...     _project_has_open_feature.__globals__["FEATURES_DIR"] = old
+    False
+
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     old = _project_has_open_feature.__globals__["FEATURES_DIR"]
+    ...     _project_has_open_feature.__globals__["FEATURES_DIR"] = pathlib.Path(tmp)
+    ...     write_json_atomic(pathlib.Path(tmp) / "other.json", {"project": "other", "status": "open"})
+    ...     _project_has_open_feature("demo")
+    ...     _project_has_open_feature.__globals__["FEATURES_DIR"] = old
+    False
+    """
+    for f in list_features():
+        if f.get("project") == project_name and f.get("status") in ("open", "finalizing"):
+            return True
+    return False
+
+
 def create_feature(*, project, summary, source, roadmap_entry=None, roadmap_entry_id=None):
     """Create a new feature record in state/features/<id>.json.
 
@@ -1950,6 +1992,55 @@ def agent_statuses():
     return [read_json(p, {}) for p in sorted(AGENT_STATE_DIR.glob("*.json"))]
 
 
+def planner_disabled(project_name):
+    """Return True when planner is runtime-disabled for a project.
+
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     old = planner_disabled.__globals__["PLANNER_DISABLED_DIR"]
+    ...     planner_disabled.__globals__["PLANNER_DISABLED_DIR"] = pathlib.Path(tmp)
+    ...     planner_disabled("demo")
+    ...     planner_disabled.__globals__["PLANNER_DISABLED_DIR"] = old
+    False
+    """
+    return (PLANNER_DISABLED_DIR / f"{project_name}.flag").exists()
+
+
+def set_planner_disabled(project_name, disabled, *, reason=""):
+    """Set or clear the runtime planner-disabled flag for a project.
+
+    Return True iff the flag state actually changed.
+
+    >>> import json, pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     old_dir = set_planner_disabled.__globals__["PLANNER_DISABLED_DIR"]
+    ...     old_now = set_planner_disabled.__globals__["now_iso"]
+    ...     set_planner_disabled.__globals__["PLANNER_DISABLED_DIR"] = pathlib.Path(tmp)
+    ...     set_planner_disabled.__globals__["now_iso"] = lambda: "2026-04-14T12:00:00"
+    ...     changed1 = set_planner_disabled("demo", True, reason="x")
+    ...     body = json.loads((pathlib.Path(tmp) / "demo.flag").read_text())
+    ...     changed2 = set_planner_disabled("demo", True)
+    ...     changed3 = set_planner_disabled("demo", False)
+    ...     changed4 = set_planner_disabled("demo", False)
+    ...     out = (changed1, body["reason"], "disabled_at" in body, changed2, changed3, (pathlib.Path(tmp) / "demo.flag").exists(), changed4)
+    ...     set_planner_disabled.__globals__["PLANNER_DISABLED_DIR"] = old_dir
+    ...     set_planner_disabled.__globals__["now_iso"] = old_now
+    >>> out
+    (True, 'x', True, False, True, False, False)
+    """
+    PLANNER_DISABLED_DIR.mkdir(parents=True, exist_ok=True)
+    path = PLANNER_DISABLED_DIR / f"{project_name}.flag"
+    if disabled:
+        if path.exists():
+            return False
+        write_json_atomic(path, {"disabled_at": now_iso(), "reason": reason})
+        return True
+    if not path.exists():
+        return False
+    path.unlink()
+    return True
+
+
 # --- Queue inspection --------------------------------------------------------
 
 def queue_counts():
@@ -2001,6 +2092,66 @@ def tick_planner():
     Gated: skips if any slot already has >1 outstanding task in
     queued/claimed/running. Prevents the 3-min tick cadence from unbounded
     queue growth when workers can't keep up.
+
+    >>> import pathlib, tempfile, types
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     repo = root / "repo"
+    ...     memdir = repo / "repo-memory"
+    ...     memdir.mkdir(parents=True)
+    ...     _ = (memdir / "CURRENT_STATE.md").write_text("ok\\n")
+    ...     old = {k: tick_planner.__globals__[k] for k in ("load_config", "engine_outstanding", "write_agent_status", "project_hard_stopped", "acquire_lock", "assigned_roadmap_entries", "parse_roadmap_next_todo", "create_feature", "new_task", "enqueue_task", "FEATURES_DIR", "PLANNER_DISABLED_DIR")}
+    ...     tick_planner.__globals__["load_config"] = lambda: {"projects": [{"name": "demo", "path": str(repo)}]}
+    ...     tick_planner.__globals__["engine_outstanding"] = lambda: {"claude": 0, "codex": 0, "qa": 0}
+    ...     tick_planner.__globals__["write_agent_status"] = lambda *args, **kwargs: None
+    ...     tick_planner.__globals__["project_hard_stopped"] = lambda name: False
+    ...     tick_planner.__globals__["acquire_lock"] = lambda *args, **kwargs: types.SimpleNamespace(close=lambda: None)
+    ...     tick_planner.__globals__["assigned_roadmap_entries"] = lambda name: set()
+    ...     tick_planner.__globals__["parse_roadmap_next_todo"] = lambda path, skip_ids=None: {"id": "R-001", "title": "First", "body": "TODO"}
+    ...     tick_planner.__globals__["create_feature"] = lambda **kwargs: {"feature_id": "feature-1", "summary": "[R-001] First"}
+    ...     tick_planner.__globals__["new_task"] = lambda **kwargs: kwargs
+    ...     calls = []
+    ...     tick_planner.__globals__["enqueue_task"] = lambda task: calls.append(task)
+    ...     tick_planner.__globals__["FEATURES_DIR"] = root / "features"
+    ...     tick_planner.__globals__["PLANNER_DISABLED_DIR"] = root / "planner-disabled"
+    ...     tick_planner.__globals__["FEATURES_DIR"].mkdir(parents=True, exist_ok=True)
+    ...     write_json_atomic(tick_planner.__globals__["FEATURES_DIR"] / "open.json", {"project": "demo", "status": "open"})
+    ...     tick_planner()
+    ...     out = len(calls)
+    ...     for key, value in old.items():
+    ...         tick_planner.__globals__[key] = value
+    >>> out
+    0
+
+    >>> import pathlib, tempfile, types
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     repo = root / "repo"
+    ...     memdir = repo / "repo-memory"
+    ...     memdir.mkdir(parents=True)
+    ...     _ = (memdir / "CURRENT_STATE.md").write_text("ok\\n")
+    ...     old = {k: tick_planner.__globals__[k] for k in ("load_config", "engine_outstanding", "write_agent_status", "project_hard_stopped", "acquire_lock", "assigned_roadmap_entries", "parse_roadmap_next_todo", "create_feature", "new_task", "enqueue_task", "FEATURES_DIR", "PLANNER_DISABLED_DIR")}
+    ...     tick_planner.__globals__["load_config"] = lambda: {"projects": [{"name": "demo", "path": str(repo)}]}
+    ...     tick_planner.__globals__["engine_outstanding"] = lambda: {"claude": 0, "codex": 0, "qa": 0}
+    ...     tick_planner.__globals__["write_agent_status"] = lambda *args, **kwargs: None
+    ...     tick_planner.__globals__["project_hard_stopped"] = lambda name: False
+    ...     tick_planner.__globals__["acquire_lock"] = lambda *args, **kwargs: types.SimpleNamespace(close=lambda: None)
+    ...     tick_planner.__globals__["assigned_roadmap_entries"] = lambda name: set()
+    ...     tick_planner.__globals__["parse_roadmap_next_todo"] = lambda path, skip_ids=None: {"id": "R-001", "title": "First", "body": "TODO"}
+    ...     tick_planner.__globals__["create_feature"] = lambda **kwargs: {"feature_id": "feature-1", "summary": "[R-001] First"}
+    ...     tick_planner.__globals__["new_task"] = lambda **kwargs: kwargs
+    ...     calls = []
+    ...     tick_planner.__globals__["enqueue_task"] = lambda task: calls.append(task)
+    ...     tick_planner.__globals__["FEATURES_DIR"] = root / "features"
+    ...     tick_planner.__globals__["PLANNER_DISABLED_DIR"] = root / "planner-disabled"
+    ...     tick_planner.__globals__["FEATURES_DIR"].mkdir(parents=True, exist_ok=True)
+    ...     write_json_atomic(tick_planner.__globals__["FEATURES_DIR"] / "merged.json", {"project": "demo", "status": "merged"})
+    ...     tick_planner()
+    ...     out = len(calls)
+    ...     for key, value in old.items():
+    ...         tick_planner.__globals__[key] = value
+    >>> out
+    1
     """
     outstanding = engine_outstanding()
     backed_up = {e: n for e, n in outstanding.items() if n > 1}
@@ -2018,6 +2169,10 @@ def tick_planner():
             continue
         if project_hard_stopped(project["name"]):
             skipped_hard_stop.append(project["name"])
+            continue
+        if _project_has_open_feature(project["name"]):
+            continue
+        if planner_disabled(project["name"]):
             continue
         lock_fh = acquire_lock(f"{project['name']}.lock", mode="exclusive", timeout_sec=60)
         try:
@@ -2367,6 +2522,87 @@ def status_text():
             lines.append(
                 f"  {tt}: uses={e.get('uses',0)} errs={e.get('topology_errors',0)}"
             )
+    return "\n".join(lines)
+
+
+def planner_status_text(project_filter=None):
+    """Return a fixed-width planner status table in config order.
+
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     features = root / "features"
+    ...     disabled = root / "planner-disabled"
+    ...     queue_root = root / "queue"
+    ...     for state in STATES:
+    ...         (queue_root / state).mkdir(parents=True, exist_ok=True)
+    ...     old = {k: planner_status_text.__globals__[k] for k in ("FEATURES_DIR", "PLANNER_DISABLED_DIR", "QUEUE_ROOT", "load_config", "project_hard_stopped")}
+    ...     planner_status_text.__globals__["FEATURES_DIR"] = features
+    ...     planner_status_text.__globals__["PLANNER_DISABLED_DIR"] = disabled
+    ...     planner_status_text.__globals__["QUEUE_ROOT"] = queue_root
+    ...     planner_status_text.__globals__["load_config"] = lambda: {"projects": [{"name": "demo", "path": str(root)}]}
+    ...     planner_status_text.__globals__["project_hard_stopped"] = lambda name: False
+    ...     body1 = planner_status_text()
+    ...     _ = set_planner_disabled("demo", True, reason="pause")
+    ...     write_json_atomic(features / "open.json", {"project": "demo", "status": "open"})
+    ...     write_json_atomic(queue_root / "claimed" / "task-1.json", {"project": "demo"})
+    ...     body2 = planner_status_text()
+    ...     body3 = planner_status_text(project_filter="missing")
+    ...     for key, value in old.items():
+    ...         planner_status_text.__globals__[key] = value
+    >>> ("demo" in body1 and "enabled" in body1 and "0" in body1, "disabled" in body2 and "1" in body2, body3)
+    (True, True, 'error: unknown project missing')
+    """
+    cfg = load_config()
+    projects = cfg.get("projects", [])
+    names = [p["name"] for p in projects]
+    if project_filter is not None and project_filter not in names:
+        return f"error: unknown project {project_filter}"
+    rows = []
+    for project in projects:
+        name = project["name"]
+        if project_filter is not None and name != project_filter:
+            continue
+        open_features = 0
+        for feature in list_features():
+            if feature.get("project") == name and feature.get("status") in ("open", "finalizing"):
+                open_features += 1
+        in_flight = 0
+        for state in ("claimed", "running"):
+            for p in queue_dir(state).glob("*.json"):
+                task = read_json(p, {})
+                if task.get("project") == name:
+                    in_flight += 1
+        rows.append({
+            "project": name,
+            "planner": "enabled" if not planner_disabled(name) else "disabled",
+            "hard_stop": "yes" if project_hard_stopped(name) else "no",
+            "open_features": str(open_features),
+            "in_flight": str(in_flight),
+        })
+    widths = {
+        "project": max(len("project"), *(len(r["project"]) for r in rows)) if rows else len("project"),
+        "planner": max(len("planner"), *(len(r["planner"]) for r in rows)) if rows else len("planner"),
+        "hard_stop": max(len("hard-stop"), *(len(r["hard_stop"]) for r in rows)) if rows else len("hard-stop"),
+        "open_features": max(len("open-features"), *(len(r["open_features"]) for r in rows)) if rows else len("open-features"),
+        "in_flight": max(len("in-flight"), *(len(r["in_flight"]) for r in rows)) if rows else len("in-flight"),
+    }
+
+    def fmt(project, planner, hard_stop, open_features, in_flight):
+        return (
+            project.ljust(widths["project"]) + " | " +
+            planner.ljust(widths["planner"]) + " | " +
+            hard_stop.ljust(widths["hard_stop"]) + " | " +
+            open_features.ljust(widths["open_features"]) + " | " +
+            in_flight.ljust(widths["in_flight"])
+        )
+
+    lines = [
+        fmt("project", "planner", "hard-stop", "open-features", "in-flight"),
+        fmt("-" * widths["project"], "-" * widths["planner"], "-" * widths["hard_stop"], "-" * widths["open_features"], "-" * widths["in_flight"]),
+    ]
+    for row in rows:
+        lines.append(fmt(row["project"], row["planner"], row["hard_stop"], row["open_features"], row["in_flight"]))
     return "\n".join(lines)
 
 
