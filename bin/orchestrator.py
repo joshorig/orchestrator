@@ -18,6 +18,7 @@ from collections import deque
 from dataclasses import dataclass
 import datetime as dt
 import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -26,6 +27,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 
 DEV_ROOT = pathlib.Path(os.environ.get("DEV_ROOT", "/Volumes/devssd"))
@@ -1031,7 +1033,25 @@ def cleanup_worktrees(dry_run=False):
             else:
                 f["status"] = "abandoned"
 
-        update_feature(feature["feature_id"], mut_feature)
+        feature = update_feature(feature["feature_id"], mut_feature)
+        if state == "MERGED" and feature.get("roadmap_entry_id"):
+            historian = new_task(
+                role="historian",
+                engine="codex",
+                project=project_name,
+                summary=(
+                    f"Flip ROADMAP.md [{feature['roadmap_entry_id']}] status TODO→DONE "
+                    f"(feature {feature['feature_id']} merged)"
+                ),
+                source=f"cleanup-feature-merge:{feature['feature_id']}",
+                braid_template=project_historian_template(project_name),
+                feature_id=feature["feature_id"],
+                engine_args={
+                    "roadmap_entry_id": feature["roadmap_entry_id"],
+                    "merged_feature_id": feature["feature_id"],
+                },
+            )
+            enqueue_task(historian)
         cleaned += 1
         print(f"cleaned feature {feature.get('feature_id')}: {state}")
 
@@ -1359,6 +1379,7 @@ def lint_templates_command(*, template=None, lint_all=False):
 # parallelism happens ACROSS features, bounded by codex slot count.
 
 FEATURE_STATES = ("open", "finalizing", "merged", "abandoned")
+TERMINAL_FEATURE_STATES = {"merged", "abandoned"}
 
 
 def new_feature_id():
@@ -1384,7 +1405,7 @@ def list_features(status=None):
     return out
 
 
-def create_feature(*, project, summary, source):
+def create_feature(*, project, summary, source, roadmap_entry=None, roadmap_entry_id=None):
     """Create a new feature record in state/features/<id>.json.
 
     The git branch itself is created lazily by the first codex worker that
@@ -1400,7 +1421,11 @@ def create_feature(*, project, summary, source):
         "feature_id": feature_id,
         "project": project,
         "branch": branch,
-        "summary": summary,
+        "summary": (
+            f"[{roadmap_entry['id']}] {roadmap_entry['title']}"
+            if roadmap_entry else summary
+        ),
+        "roadmap_entry_id": roadmap_entry_id or (roadmap_entry or {}).get("id"),
         "source": source,
         "status": "open",
         "child_task_ids": [],
@@ -1450,6 +1475,186 @@ def in_flight_feature_ids():
             if fid:
                 fids.add(fid)
     return fids
+
+
+def acquire_lock(lock_name, mode, timeout_sec=0):
+    """Acquire an advisory lock from state/runtime/locks.
+
+    Returns an open file handle whose lifetime holds the lock.
+    """
+    LOCKS_DIR.mkdir(parents=True, exist_ok=True)
+    lock_path = LOCKS_DIR / lock_name
+    fh = open(lock_path, "a+")
+    flag = fcntl.LOCK_SH if mode == "shared" else fcntl.LOCK_EX
+    deadline = time.monotonic() + max(timeout_sec, 0)
+    while True:
+        try:
+            fcntl.flock(fh.fileno(), flag | fcntl.LOCK_NB)
+            return fh
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                fh.close()
+                raise TimeoutError(f"could not acquire {mode} lock {lock_name}")
+            time.sleep(1.0)
+
+
+def parse_roadmap_next_todo(project_path, skip_ids=None):
+    """Return the first TODO roadmap entry for a project, or None.
+
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     (root / "repo-memory").mkdir()
+    ...     _ = (root / "repo-memory" / "ROADMAP.md").write_text(
+    ...         "## Active\\n\\n"
+    ...         "### [R-001] First item\\n"
+    ...         "- **Status:** TODO\\n"
+    ...         "- **Goal:** Ship it.\\n\\n"
+    ...         "### [R-002] Second item\\n"
+    ...         "- **Status:** DONE\\n"
+    ...     )
+    ...     entry = parse_roadmap_next_todo(root)
+    ...     (entry["id"], entry["title"])
+    ('R-001', 'First item')
+
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     (root / "repo-memory").mkdir()
+    ...     _ = (root / "repo-memory" / "ROADMAP.md").write_text(
+    ...         "## Active\\n\\n"
+    ...         "### [R-001] Busy item\\n"
+    ...         "- **Status:** IN_PROGRESS\\n\\n"
+    ...         "### [R-002] Ready item\\n"
+    ...         "- **Status:** TODO\\n"
+    ...         "- **Acceptance:** Works.\\n"
+    ...     )
+    ...     parse_roadmap_next_todo(root)["id"]
+    'R-002'
+
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     parse_roadmap_next_todo(pathlib.Path(tmp)) is None
+    True
+
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     (root / "repo-memory").mkdir()
+    ...     _ = (root / "repo-memory" / "ROADMAP.md").write_text(
+    ...         "### [R-001] Done item\\n"
+    ...         "- **Status:** DONE\\n\\n"
+    ...         "### [R-002] Blocked item\\n"
+    ...         "- **Status:** BLOCKED\\n"
+    ...     )
+    ...     parse_roadmap_next_todo(root) is None
+    True
+    """
+    roadmap_path = pathlib.Path(project_path) / "repo-memory" / "ROADMAP.md"
+    if not roadmap_path.exists():
+        return None
+
+    text = roadmap_path.read_text()
+    entry_re = re.compile(r"^### \[(?P<id>R-\d+)\] (?P<title>.+?)\s*$", re.MULTILINE)
+    boundary_re = re.compile(r"^## |^### \[R-\d+\] ", re.MULTILINE)
+    status_re = re.compile(r"^- \*\*Status:\*\* (?P<status>[A-Z_]+)\s*$", re.MULTILINE)
+
+    skipped = set(skip_ids or ())
+    for match in entry_re.finditer(text):
+        boundary = boundary_re.search(text, match.end())
+        end = boundary.start() if boundary else len(text)
+        body = text[match.start():end].strip()
+        status = status_re.search(body)
+        if not status or status.group("status") != "TODO":
+            continue
+        if match.group("id") in skipped:
+            continue
+        return {
+            "id": match.group("id"),
+            "title": match.group("title").strip(),
+            "body": body,
+        }
+    return None
+
+
+def assigned_roadmap_entries(project):
+    """Return roadmap entry ids assigned to non-terminal features for a project.
+
+    Features created before roadmap wiring may not carry `roadmap_entry_id`.
+    Those legacy records are ignored rather than masking a real roadmap entry.
+
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     old = assigned_roadmap_entries.__globals__["FEATURES_DIR"]
+    ...     assigned_roadmap_entries.__globals__["FEATURES_DIR"] = pathlib.Path(tmp)
+    ...     assigned_roadmap_entries("demo")
+    ...     assigned_roadmap_entries.__globals__["FEATURES_DIR"] = old
+    set()
+
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     old = assigned_roadmap_entries.__globals__["FEATURES_DIR"]
+    ...     assigned_roadmap_entries.__globals__["FEATURES_DIR"] = pathlib.Path(tmp)
+    ...     write_json_atomic(assigned_roadmap_entries.__globals__["FEATURES_DIR"] / "legacy.json", {
+    ...         "feature_id": "feature-1",
+    ...         "project": "demo",
+    ...         "status": "open",
+    ...     })
+    ...     assigned_roadmap_entries("demo")
+    ...     assigned_roadmap_entries.__globals__["FEATURES_DIR"] = old
+    set()
+
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     old = assigned_roadmap_entries.__globals__["FEATURES_DIR"]
+    ...     assigned_roadmap_entries.__globals__["FEATURES_DIR"] = pathlib.Path(tmp)
+    ...     write_json_atomic(assigned_roadmap_entries.__globals__["FEATURES_DIR"] / "merged.json", {
+    ...         "feature_id": "feature-1",
+    ...         "project": "demo",
+    ...         "status": "merged",
+    ...         "roadmap_entry_id": "R-001",
+    ...     })
+    ...     assigned_roadmap_entries("demo")
+    ...     assigned_roadmap_entries.__globals__["FEATURES_DIR"] = old
+    set()
+
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     old = assigned_roadmap_entries.__globals__["FEATURES_DIR"]
+    ...     assigned_roadmap_entries.__globals__["FEATURES_DIR"] = pathlib.Path(tmp)
+    ...     write_json_atomic(assigned_roadmap_entries.__globals__["FEATURES_DIR"] / "abandoned.json", {
+    ...         "feature_id": "feature-1",
+    ...         "project": "demo",
+    ...         "status": "abandoned",
+    ...         "roadmap_entry_id": "R-001",
+    ...     })
+    ...     assigned_roadmap_entries("demo")
+    ...     assigned_roadmap_entries.__globals__["FEATURES_DIR"] = old
+    set()
+
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     old = assigned_roadmap_entries.__globals__["FEATURES_DIR"]
+    ...     assigned_roadmap_entries.__globals__["FEATURES_DIR"] = pathlib.Path(tmp)
+    ...     write_json_atomic(assigned_roadmap_entries.__globals__["FEATURES_DIR"] / "one.json", {
+    ...         "feature_id": "feature-1",
+    ...         "project": "demo",
+    ...         "status": "open",
+    ...         "roadmap_entry_id": "R-001",
+    ...     })
+    ...     write_json_atomic(assigned_roadmap_entries.__globals__["FEATURES_DIR"] / "two.json", {
+    ...         "feature_id": "feature-2",
+    ...         "project": "demo",
+    ...         "status": "finalizing",
+    ...         "roadmap_entry_id": "R-002",
+    ...     })
+    ...     print(sorted(assigned_roadmap_entries("demo")))
+    ...     assigned_roadmap_entries.__globals__["FEATURES_DIR"] = old
+    ['R-001', 'R-002']
+    """
+    assigned = set()
+    for feature in list_features():
+        if feature.get("project") != project:
+            continue
+        if feature.get("status") in TERMINAL_FEATURE_STATES:
+            continue
+        roadmap_entry_id = feature.get("roadmap_entry_id")
+        if roadmap_entry_id:
+            assigned.add(roadmap_entry_id)
+    return assigned
 
 
 # --- Agent status ------------------------------------------------------------
@@ -1535,24 +1740,41 @@ def tick_planner():
         if project_hard_stopped(project["name"]):
             skipped_hard_stop.append(project["name"])
             continue
-        feature = create_feature(
-            project=project["name"],
-            summary=f"Planner-emitted feature for {project['name']}",
-            source="tick-planner",
-        )
-        task = new_task(
-            role="planner",
-            engine="claude",
-            project=project["name"],
-            summary=(
-                f"Review repo-memory and decompose next actionable work for "
-                f"{project['name']} (feature {feature['feature_id']})."
-            ),
-            source="tick-planner",
-            braid_template=project_historian_template(project["name"]),
-            feature_id=feature["feature_id"],
-        )
-        enqueue_task(task)
+        lock_fh = acquire_lock(f"{project['name']}.lock", mode="exclusive", timeout_sec=60)
+        try:
+            assigned = assigned_roadmap_entries(project["name"])
+            roadmap_entry = parse_roadmap_next_todo(project["path"], skip_ids=assigned)
+            if roadmap_entry is None:
+                roadmap_path = memdir / "ROADMAP.md"
+                if not roadmap_path.exists():
+                    print(
+                        f"WARN tick-planner: {project['name']} missing {roadmap_path}",
+                        file=sys.stderr,
+                    )
+                continue
+            feature = create_feature(
+                project=project["name"],
+                summary=f"Planner-emitted feature for {project['name']}",
+                source=f"tick-planner:{roadmap_entry['id']}",
+                roadmap_entry=roadmap_entry,
+                roadmap_entry_id=roadmap_entry["id"],
+            )
+            task = new_task(
+                role="planner",
+                engine="claude",
+                project=project["name"],
+                summary=(
+                    f"Decompose roadmap entry {feature['summary']} for "
+                    f"{project['name']} (feature {feature['feature_id']})."
+                ),
+                source="tick-planner",
+                braid_template=project_historian_template(project["name"]),
+                feature_id=feature["feature_id"],
+                engine_args={"roadmap_entry": roadmap_entry},
+            )
+            enqueue_task(task)
+        finally:
+            lock_fh.close()
     if skipped_hard_stop:
         write_agent_status(
             "planner", "idle",

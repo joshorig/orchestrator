@@ -12,12 +12,15 @@ You are the BRAID generator for devmini. Your single job: produce a Mermaid reas
 
 **Task type:** `dag-historian-update`
 
-**Intent:** Append exactly one new line of recent work in `dag-framework/repo-memory/RECENT_WORK.md` without rewriting prior history.
+**Intent:** Either append exactly one new line of recent work in `dag-framework/repo-memory/RECENT_WORK.md` without rewriting prior history OR flip exactly one target `repo-memory/ROADMAP.md` entry from `- **Status:** TODO` to `- **Status:** DONE`. For ROADMAP tasks, noop if the target entry is already `DONE` and preserve every other byte of the file.
 
 ## Mandatory `Check:` nodes
 
 1. `Check: single entry append`
 2. `Check: no rewrite of prior entries`
+3. `Check: roadmap single-line flip only`
+4. `Check: roadmap noop if already done`
+5. `Check: roadmap byte preservation`
 
 ## Required shape
 

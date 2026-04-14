@@ -1029,7 +1029,7 @@ def planner_template_roles(project_name):
     return roles
 
 
-def planner_system_prompt(project_name):
+def planner_system_prompt(project_name, roadmap_entry_body=""):
     historian_template = planner_historian_template(project_name)
     implementer_templates = planner_implementer_templates(project_name)
     if project_name == "lvc-standard":
@@ -1055,9 +1055,17 @@ def planner_system_prompt(project_name):
         "repo-memory/RECENT_WORK.md, DECISIONS.md, or FAILURES.md. No source code changes.\n\n"
     )
     allowed = ", ".join(f'"{name}"' for name in (historian_template, *implementer_templates))
+    roadmap_block = (
+        "Decompose only the roadmap entry below. Treat it as the entire target work "
+        "for this planner run.\n\n"
+        f"{roadmap_entry_body.strip()}\n\n"
+        if roadmap_entry_body else
+        "No roadmap entry was provided. Emit an empty array [].\n\n"
+    )
     return (
         "You are the BRAID generator for devmini. Your job: read the project memory "
         "and propose at most 3 bounded CODEX execution slices for the next actionable work.\n\n"
+        f"{roadmap_block}"
         "Only the following braid_template values are valid for codex slices in this project:\n"
         f"{implementer_desc}{historian_desc}"
         "Do NOT emit reviewer or QA slices — those are scheduled by separate tickers. "
@@ -1252,7 +1260,8 @@ def run_claude_planner(task, cfg, timeout, log_path):
         return
 
     memory_ctx = read_memory_context(project["path"])
-    system_prompt = planner_system_prompt(project["name"])
+    roadmap_entry = (task.get("engine_args") or {}).get("roadmap_entry") or {}
+    system_prompt = planner_system_prompt(project["name"], roadmap_entry.get("body", ""))
     user_prompt = (
         f"PROJECT: {project['name']}\n\n"
         f"PARENT TASK: {task['summary']}\n\n"
