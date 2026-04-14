@@ -159,6 +159,9 @@ def new_task(
     parent_task_id=None,
     feature_id=None,
     engine_args=None,
+    depends_on=None,
+    worktree=None,
+    base_branch=None,
 ):
     if role not in VALID_ROLES:
         raise ValueError(f"role must be one of {VALID_ROLES}: {role}")
@@ -179,10 +182,12 @@ def new_task(
         "braid_template_path": None,
         "braid_template_hash": None,
         "braid_generate_if_missing": braid_generate_if_missing,
-        "worktree": None,
+        "worktree": worktree,
+        "base_branch": base_branch,
         "log_path": None,
         "artifacts": [],
         "engine_args": engine_args or {},
+        "depends_on": list(depends_on or []),
         "topology_error": None,
         "created_at": now_iso(),
         "claimed_at": None,
@@ -223,6 +228,32 @@ def move_task(task_id, from_state, to_state, reason="", mutator=None):
     return dst, task
 
 
+def _atomic_claim_doctest_case(dep_state):
+    with tempfile.TemporaryDirectory() as tmp:
+        old_root = atomic_claim.__globals__["QUEUE_ROOT"]
+        old_now = atomic_claim.__globals__["now_iso"]
+        atomic_claim.__globals__["QUEUE_ROOT"] = pathlib.Path(tmp)
+        atomic_claim.__globals__["now_iso"] = lambda: "2026-04-14T12:00:00"
+        try:
+            for state in STATES:
+                _ = queue_dir(state)
+            dep = new_task(role="implementer", engine="codex", project="demo", summary="dep", source="x")
+            dep["task_id"] = "task-dep"
+            write_json_atomic(task_path("task-dep", dep_state), dep)
+            blocked = new_task(role="implementer", engine="codex", project="demo", summary="blocked", source="x", depends_on=["task-dep"])
+            blocked["task_id"] = "task-blocked"
+            write_json_atomic(task_path("task-blocked", "queued"), blocked)
+            if dep_state == "done":
+                return atomic_claim("codex")["task_id"]
+            ready = new_task(role="implementer", engine="codex", project="demo", summary="ready", source="x")
+            ready["task_id"] = "task-ready"
+            write_json_atomic(task_path("task-ready", "queued"), ready)
+            return atomic_claim("codex")["task_id"]
+        finally:
+            atomic_claim.__globals__["QUEUE_ROOT"] = old_root
+            atomic_claim.__globals__["now_iso"] = old_now
+
+
 def project_hard_stopped(project_name):
     """Return True if the project has any blocked task tagged regression-failure.
     Plan §5 hard stop: no implementer/planner work runs for a project until a
@@ -250,9 +281,14 @@ def atomic_claim(slot_engine):
     Codex slot also skips tasks whose feature_id is already held by another
     claimed/running task — sibling slices of the same feature serialize to
     avoid concurrent merges on the shared feature branch.
+
+    >>> _atomic_claim_doctest_case("done")
+    'task-blocked'
+    >>> _atomic_claim_doctest_case("running")
+    'task-ready'
     """
     queued = queue_dir("queued")
-    candidates = sorted(queued.glob("*.json"))
+    candidates = sorted(queued.glob("*.json"), key=lambda p: p.stat().st_mtime)
     busy_features = in_flight_feature_ids() if slot_engine == "codex" else set()
     for src in candidates:
         try:
@@ -268,6 +304,19 @@ def atomic_claim(slot_engine):
         if slot_engine == "codex":
             fid = task.get("feature_id")
             if fid and fid in busy_features:
+                continue
+        deps = task.get("depends_on") or []
+        if deps:
+            blocked = False
+            for dep_id in deps:
+                if _task_exists_in_queue(dep_id, states=("done",)):
+                    continue
+                if _task_exists_in_queue(dep_id, states=("queued", "claimed", "running")):
+                    blocked = True
+                    break
+                blocked = True
+                break
+            if blocked:
                 continue
         dst = task_path(task["task_id"], "claimed")
         try:
@@ -1051,6 +1100,50 @@ def _feature_branch_on_origin(project_path, branch):
     return bool((proc.stdout or "").strip())
 
 
+def _feature_all_children_failed_without_retry(feature):
+    """Return True when every child landed failed/abandoned and no retry is active.
+
+    >>> _feature_all_children_failed_doctest()
+    True
+    """
+    child_ids = feature.get("child_task_ids") or []
+    if not child_ids:
+        return False
+    all_failed = True
+    for child_id in child_ids:
+        if not (
+            task_path(child_id, "failed").exists()
+            or task_path(child_id, "abandoned").exists()
+        ):
+            all_failed = False
+            break
+    if not all_failed:
+        return False
+    fid = feature.get("feature_id")
+    for state in ("queued", "claimed", "running"):
+        for p in queue_dir(state).glob("*.json"):
+            task = read_json(p, {})
+            if task.get("feature_id") == fid:
+                return False
+    return True
+
+
+def _feature_all_children_failed_doctest():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        queue_root = root / "queue"
+        for state in STATES:
+            (queue_root / state).mkdir(parents=True, exist_ok=True)
+        old_root = _feature_all_children_failed_doctest.__globals__["QUEUE_ROOT"]
+        _feature_all_children_failed_doctest.__globals__["QUEUE_ROOT"] = queue_root
+        try:
+            write_json_atomic(queue_root / "failed" / "task-a.json", {"task_id": "task-a", "feature_id": "feature-1"})
+            write_json_atomic(queue_root / "abandoned" / "task-b.json", {"task_id": "task-b", "feature_id": "feature-1"})
+            return _feature_all_children_failed_without_retry({"feature_id": "feature-1", "child_task_ids": ["task-a", "task-b"]})
+        finally:
+            _feature_all_children_failed_doctest.__globals__["QUEUE_ROOT"] = old_root
+
+
 def feature_finalize(dry_run=False):
     """Open feature->main PRs for fully merged features.
 
@@ -1078,6 +1171,34 @@ def feature_finalize(dry_run=False):
             for child in children
         )
         if not ready:
+            if feature.get("status") == "open" and _feature_all_children_failed_without_retry(feature):
+                try:
+                    project = get_project(config, feature["project"])
+                except KeyError:
+                    print(f"feature-finalize {feature_id}: unknown project {feature.get('project')}, skip abandon")
+                    skipped += 1
+                    continue
+                branch = feature.get("branch") or f"feature/{feature_id}"
+                if dry_run:
+                    print(f"DRY-RUN feature-finalize {feature_id}: would mark abandoned (all children failed)")
+                else:
+                    def mut_feature(f):
+                        f["status"] = "abandoned"
+                        f["abandoned_at"] = now_iso()
+                        f["abandoned_reason"] = "all children failed with no retry"
+                    update_feature(feature_id, mut_feature)
+                    append_transition(feature_id, "open", "abandoned", "all children failed")
+                    _write_pr_alert(
+                        project["name"], feature_id, "feature", "all children failed with no retry", None,
+                    )
+                    branch_drop = subprocess.run(
+                        ["git", "branch", "-d", branch],
+                        cwd=project["path"],
+                        capture_output=True, text=True, check=False,
+                    )
+                    if branch_drop.returncode != 0:
+                        print(f"feature-finalize {feature_id}: local branch retained ({branch_drop.stderr.strip()[:200]})")
+                abandoned += 1
             continue
 
         if not feature.get("child_task_ids"):

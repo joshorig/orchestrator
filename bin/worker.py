@@ -358,6 +358,54 @@ def _git_agent(worktree, *args, check=False, timeout=60):
     )
 
 
+def _autocommit_doctest_case(dirty):
+    with tempfile.TemporaryDirectory() as tmp:
+        wt = pathlib.Path(tmp) / "repo"
+        log_path = pathlib.Path(tmp) / "auto.log"
+        _ = subprocess.run(["git", "init", "-b", "main", str(wt)], check=True, capture_output=True, text=True)
+        _ = subprocess.run(["git", "-C", str(wt), "config", "user.name", "Doctest"], check=True, capture_output=True, text=True)
+        _ = subprocess.run(["git", "-C", str(wt), "config", "user.email", "doctest@example.com"], check=True, capture_output=True, text=True)
+        _ = (wt / "tracked.txt").write_text("base\n")
+        _ = subprocess.run(["git", "-C", str(wt), "add", "tracked.txt"], check=True, capture_output=True, text=True)
+        _ = subprocess.run(["git", "-C", str(wt), "commit", "-m", "base"], check=True, capture_output=True, text=True)
+        if dirty:
+            _ = (wt / "new.txt").write_text("untracked\n")
+        result = _autocommit_worktree(wt, {"task_id": "task-1", "summary": "Demo"}, str(log_path))
+        if not dirty:
+            return result
+        head = subprocess.run(["git", "-C", str(wt), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+        clean = subprocess.run(["git", "-C", str(wt), "status", "--porcelain"], check=True, capture_output=True, text=True).stdout.strip()
+        body = log_path.read_text()
+        return (result[0], result[1] == head, "# AUTO-COMMIT " in body, clean == "")
+
+
+def _autocommit_worktree(wt: pathlib.Path, target: dict, log_path: str):
+    """Commit any dirty tracked/untracked worktree changes under agent identity.
+
+    Returns (ok: bool, sha_or_err: str). A clean worktree is a successful no-op.
+
+    >>> _autocommit_doctest_case(True)
+    (True, True, True, True)
+
+    >>> _autocommit_doctest_case(False)
+    (True, 'clean')
+    """
+    status = _git(wt, "status", "--porcelain").stdout
+    if not status.strip():
+        return (True, "clean")
+    add = _git_agent(wt, "add", "-A")
+    if add.returncode:
+        return (False, f"add: {add.stderr.strip()}")
+    msg = f"agent: {target.get('summary', target['task_id'])}\n\ntask_id: {target['task_id']}\n"
+    commit = _git_agent(wt, "commit", "-m", msg)
+    if commit.returncode:
+        return (False, f"commit: {commit.stderr.strip()}")
+    sha = _git(wt, "rev-parse", "HEAD").stdout.strip()
+    with open(log_path, "a") as f:
+        f.write(f"\n# AUTO-COMMIT {sha}\n")
+    return (True, sha)
+
+
 def write_pr_body(target, project, qa_log_path, driver_task_id, base_branch="main"):
     """Write artifacts/<target_id>/pr-body.md with PR-ready evidence.
 
@@ -1074,9 +1122,13 @@ def planner_system_prompt(project_name, roadmap_entry_body=""):
         "(e.g. CI workflow changes, release automation, cross-project refactors), "
         "SKIP it — do not include it in your output. If nothing fits, emit an empty array [].\n\n"
         f'Use only these template strings verbatim: {allowed}.\n'
-        "Every object MUST include summary and braid_template. No prose, no markdown fences.\n"
+        "Every object MUST include summary and braid_template. "
+        "Slices may also include optional depends_on as a list of zero-based sibling slice indices "
+        "that must complete before that slice can run. Use depends_on only for same-feature "
+        "ordering constraints within this emitted array; otherwise omit it.\n"
         "Emit ONLY a JSON array of objects, each with keys:\n"
-        "  summary (≤120 chars), braid_template (one of the valid values above, verbatim).\n"
+        "  summary (≤120 chars), braid_template (one of the valid values above, verbatim), "
+        "optional depends_on (list[int]).\n"
         "No prose, no markdown fences."
     )
 
@@ -1322,7 +1374,8 @@ def run_claude_planner(task, cfg, timeout, log_path):
 
     enqueued = []
     dropped = []
-    for s in slices[:3]:
+    sibling_task_ids = []
+    for idx, s in enumerate(slices[:3]):
         raw_tpl = s.get("braid_template")
         summ = s.get("summary", "")
         if raw_tpl not in TEMPLATE_ROLE:
@@ -1341,9 +1394,27 @@ def run_claude_planner(task, cfg, timeout, log_path):
             braid_template=raw_tpl,
             parent_task_id=task_id,
             feature_id=feature_id,
+            depends_on=[],
         )
+        raw_depends = s.get("depends_on")
+        resolved = []
+        if isinstance(raw_depends, list):
+            for dep in raw_depends:
+                if not isinstance(dep, int):
+                    dropped.append((raw_tpl, summ[:80], f"depends_on index not int: {dep!r}"))
+                    resolved = None
+                    break
+                if dep < 0 or dep >= idx:
+                    dropped.append((raw_tpl, summ[:80], f"depends_on index out of range: {dep}"))
+                    resolved = None
+                    break
+                resolved.append(sibling_task_ids[dep])
+        if resolved is None:
+            continue
+        child["depends_on"] = resolved
         o.enqueue_task(child)
         enqueued.append(child["task_id"])
+        sibling_task_ids.append(child["task_id"])
         if feature_id:
             try:
                 o.append_feature_child(feature_id, child["task_id"])
@@ -1368,8 +1439,9 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
 
     Loads the lvc-reviewer-pass BRAID template as system context plus the
     target's git diff vs main as user context, runs claude, parses verdict,
-    promotes target → awaiting-qa on APPROVE or → failed on REQUEST_CHANGE.
-    The reviewer task itself is marked done with the verdict in its log.
+    promotes target → awaiting-qa on APPROVE or enqueues a review-feedback
+    codex pass on REQUEST_CHANGE. The reviewer task itself is marked done with
+    the verdict in its log.
     """
     task_id = task["task_id"]
     project_name = task.get("project")
@@ -1510,13 +1582,257 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
         o.move_task(target_id, "awaiting-review", "awaiting-qa",
                     reason=f"approved by {task_id}", mutator=mut_target)
     else:
-        o.move_task(target_id, "awaiting-review", "failed",
-                    reason=f"review requested changes ({task_id})", mutator=mut_target)
+        _handle_review_request_change(task_id, project_name, target, raw[:6000], mut_target)
 
     def mut_self(t):
         t["finished_at"] = o.now_iso()
     o.move_task(task_id, "running", "done",
                 reason=f"reviewed {target_id} -> {verdict}", mutator=mut_self)
+
+
+def _handle_review_request_change(reviewer_task_id, project_name, target, review_findings, mut_target):
+    """Route reviewer request_change into feedback retry or terminal failure.
+
+    >>> _review_request_change_doctest()
+    ((('move', 'failed', 'review rounds exhausted (3)', 4), ('alert', 'review rounds exhausted (3)')), (('enqueue', 2, 'review-address-feedback'), ('move', 'queued', 'review feedback round 2', 2)))
+    """
+    rounds = int(target.get("review_feedback_rounds", 0)) + 1
+    MAX_ROUNDS = 3
+    target_id = target["task_id"]
+    if rounds > MAX_ROUNDS:
+        def mut_fail_target(t):
+            mut_target(t)
+            t["review_feedback_rounds"] = rounds
+        o.move_task(
+            target_id, "awaiting-review", "failed",
+            reason=f"review rounds exhausted ({MAX_ROUNDS})", mutator=mut_fail_target,
+        )
+        o._write_pr_alert(
+            project_name,
+            target_id,
+            target.get("pr_number") or "review-feedback",
+            f"review rounds exhausted ({MAX_ROUNDS})",
+            target.get("pr_url"),
+        )
+        return
+
+    feedback_task = o.new_task(
+        role="implementer",
+        engine="codex",
+        project=target["project"],
+        feature_id=target.get("feature_id"),
+        parent_task_id=target_id,
+        braid_template="review-address-feedback",
+        base_branch=target.get("base_branch"),
+        worktree=target.get("worktree"),
+        source=f"review-feedback:{reviewer_task_id}",
+        summary=f"Address reviewer findings on {target_id} (round {rounds})",
+        engine_args={
+            "review_findings": review_findings,
+            "target_task_id": target_id,
+            "round": rounds,
+        },
+    )
+    o.enqueue_task(feedback_task)
+    def mut_requeue_target(t):
+        mut_target(t)
+        t["review_feedback_rounds"] = rounds
+    o.move_task(
+        target_id, "awaiting-review", "queued",
+        reason=f"review feedback round {rounds}", mutator=mut_requeue_target,
+    )
+
+
+def _review_request_change_doctest():
+    calls = []
+    class FakeO:
+        def new_task(self, **kwargs):
+            return {"task_id": "task-feedback", **kwargs}
+        def enqueue_task(self, task):
+            calls.append(("enqueue", task["engine_args"]["round"], task["braid_template"]))
+        def move_task(self, task_id, from_state, to_state, reason="", mutator=None):
+            body = {"review_feedback_rounds": 0}
+            if mutator:
+                mutator(body)
+            calls.append(("move", to_state, reason, body.get("review_feedback_rounds")))
+        def _write_pr_alert(self, project_name, target_id, pr_number, reason, pr_url):
+            calls.append(("alert", reason))
+    old_o = _review_request_change_doctest.__globals__["o"]
+    _review_request_change_doctest.__globals__["o"] = FakeO()
+    try:
+        _handle_review_request_change("reviewer-1", "demo", {"task_id": "task-a", "project": "demo", "feature_id": "f1", "base_branch": "main", "worktree": "/tmp/wt", "review_feedback_rounds": 3}, "need tests", lambda t: t.update({"reviewed_by": "reviewer-1"}))
+        exhausted = (calls[0], calls[1])
+        calls.clear()
+        _handle_review_request_change("reviewer-2", "demo", {"task_id": "task-b", "project": "demo", "feature_id": "f2", "base_branch": "main", "worktree": "/tmp/wt", "review_feedback_rounds": 1}, "need docs", lambda t: t.update({"reviewed_by": "reviewer-2"}))
+        retried = (calls[0], calls[1])
+        return (exhausted, retried)
+    finally:
+        _review_request_change_doctest.__globals__["o"] = old_o
+
+
+def run_review_feedback_task(task, cfg, timeout, log_path):
+    task_id = task["task_id"]
+    eargs = task.get("engine_args") or {}
+    target_id = eargs.get("target_task_id")
+    round_no = eargs.get("round")
+    review_findings = eargs.get("review_findings", "")
+    bt = task.get("braid_template") or "review-address-feedback"
+
+    if not target_id:
+        o.move_task(task_id, "claimed", "failed", reason="review-feedback: missing target_task_id")
+        return
+
+    target_file = o.queue_dir("queued") / f"{target_id}.json"
+    target = o.read_json(target_file, None)
+    if target is None:
+        o.move_task(task_id, "claimed", "failed",
+                    reason=f"review-feedback: target {target_id} not in queued/")
+        return
+
+    wt_str = task.get("worktree") or target.get("worktree")
+    if not wt_str or not pathlib.Path(wt_str).exists():
+        o.move_task(task_id, "claimed", "failed",
+                    reason=f"review-feedback: target worktree missing: {wt_str}")
+        return
+    wt = pathlib.Path(wt_str)
+    base_branch = task.get("base_branch") or target.get("base_branch") or base_branch_for_task(target)
+
+    try:
+        project = o.get_project(cfg, task["project"])
+    except KeyError:
+        o.move_task(task_id, "claimed", "failed", reason="review-feedback: unknown project")
+        return
+
+    graph_body, graph_hash = o.braid_template_load(bt)
+    if graph_body is None:
+        if task.get("braid_generate_if_missing", True):
+            regen = o.new_task(
+                role="planner", engine="claude",
+                project=project["name"],
+                summary=f"Generate BRAID template for {bt}",
+                source=f"regen-for:{task_id}",
+                braid_template=bt,
+                engine_args={"mode": "template-gen"},
+            )
+            o.enqueue_task(regen)
+            def mut_block(t):
+                t["topology_error"] = "template_missing"
+            o.move_task(task_id, "claimed", "blocked",
+                        reason="template missing", mutator=mut_block)
+            return
+        o.move_task(task_id, "claimed", "failed", reason="template missing, regen disabled")
+        return
+
+    lock_fh = None
+    try:
+        lock_fh = acquire_lock(f"{project['name']}.lock", mode="shared", timeout_sec=60)
+        memory_ctx = read_memory_context(project["path"])
+        diff_text = _git(wt, "diff", base_branch).stdout or ""
+        if len(diff_text) > 30000:
+            diff_text = diff_text[:30000] + "\n\n[...diff truncated at 30k chars...]\n"
+        prompt = (
+            "[BRAID REASONING GRAPH — traverse deterministically. If you cannot, "
+            "emit exactly one line `BRAID_TOPOLOGY_ERROR: <reason>` as the final line and stop.]\n\n"
+            f"{graph_body}\n\n"
+            "[END BRAID GRAPH]\n\n"
+            f"[TARGET TASK]\n{target_id}\n\n"
+            f"[REVIEW FEEDBACK TO ADDRESS]\n{review_findings}\n\n"
+            f"[CURRENT DIFF vs {base_branch}]\n{diff_text or f'(empty diff vs {base_branch})'}\n\n"
+            f"[PROJECT MEMORY]\n{memory_ctx}\n\n"
+            "[OUTPUT CONTRACT]\n"
+            "Emit exactly one of these as the final line of your response:\n"
+            "  BRAID_OK: <one-line summary of what you changed>\n"
+            "  BRAID_TOPOLOGY_ERROR: <reason the graph could not be traversed>\n"
+        )
+
+        last_msg_path = o.LOGS_DIR / f"{task_id}.last.txt"
+        def mut_running(t):
+            t["braid_template_path"] = f"braid/templates/{bt}.mmd"
+            t["braid_template_hash"] = graph_hash
+            t["worktree"] = str(wt)
+            t["base_branch"] = base_branch
+            t["started_at"] = o.now_iso()
+            t["log_path"] = str(log_path)
+        o.move_task(task_id, "claimed", "running",
+                    reason=f"review-feedback for {target_id}", mutator=mut_running)
+
+        cmd = [
+            "codex", "exec",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--skip-git-repo-check",
+            "-C", str(wt),
+            "--ephemeral",
+            "-o", str(last_msg_path),
+            prompt,
+        ]
+
+        with pathlib.Path(log_path).open("w") as logf:
+            logf.write(f"# review-feedback task={task_id} target={target_id} round={round_no}\n")
+            logf.write(f"# template={bt} hash={graph_hash}\n")
+            logf.write(f"# worktree: {wt}\n\n---\n")
+            logf.flush()
+            try:
+                proc = subprocess.run(
+                    cmd, stdout=logf, stderr=subprocess.STDOUT, text=True, timeout=timeout,
+                )
+            except subprocess.TimeoutExpired:
+                def mut_fail(t):
+                    t["finished_at"] = o.now_iso()
+                    t["failure"] = f"codex timeout {timeout}s"
+                o.move_task(task_id, "running", "failed",
+                            reason=f"review-feedback timeout {timeout}s", mutator=mut_fail)
+                return
+
+        trailer = ""
+        if last_msg_path.exists():
+            lines = [l.strip() for l in last_msg_path.read_text().splitlines() if l.strip()]
+            for line in reversed(lines[-20:]):
+                if line.startswith("BRAID_OK") or line.startswith("BRAID_TOPOLOGY_ERROR"):
+                    trailer = line
+                    break
+
+        if trailer.startswith("BRAID_TOPOLOGY_ERROR"):
+            o.braid_template_record_use(bt, topology_error=True)
+            def mut_fail(t):
+                t["finished_at"] = o.now_iso()
+                t["topology_error"] = trailer
+            o.move_task(task_id, "running", "failed", reason=trailer[:80], mutator=mut_fail)
+            return
+
+        if not trailer.startswith("BRAID_OK"):
+            def mut_fail(t):
+                t["finished_at"] = o.now_iso()
+            o.move_task(task_id, "running", "failed",
+                        reason=f"review-feedback no BRAID trailer (exit {proc.returncode})",
+                        mutator=mut_fail)
+            return
+
+        o.braid_template_record_use(bt, topology_error=False)
+        ok, info = _autocommit_worktree(pathlib.Path(wt), target, log_path)
+        if not ok:
+            def mut_fail(t):
+                t["finished_at"] = o.now_iso()
+                t["failure"] = f"auto-commit: {info}"
+            o.move_task(task_id, "running", "failed",
+                        reason=f"auto-commit: {info}", mutator=mut_fail)
+            return
+
+        def mut_target(t):
+            t["finished_at"] = o.now_iso()
+            t["review_feedback_rounds"] = int(round_no or t.get("review_feedback_rounds", 0))
+            if info not in ("", "clean"):
+                t["artifacts"] = t.get("artifacts", []) + [info]
+        o.move_task(target_id, "queued", "awaiting-review",
+                    reason=f"review feedback applied ({task_id})", mutator=mut_target)
+
+        def mut_done(t):
+            t["finished_at"] = o.now_iso()
+            t["review_feedback_commit"] = info
+        o.move_task(task_id, "running", "done",
+                    reason=f"review-feedback finished for {target_id}", mutator=mut_done)
+    finally:
+        if lock_fh is not None:
+            lock_fh.close()
 
 
 # --- pr-feedback handler ----------------------------------------------------
@@ -1875,6 +2191,14 @@ def run_codex_slot(task, cfg):
     mode = (task.get("engine_args") or {}).get("mode")
     if mode == "pr-feedback":
         return run_pr_feedback_task(task, cfg)
+    if bt == "review-address-feedback":
+        timeout = task.get("engine_args", {}).get(
+            "timeout_sec",
+            cfg.get("slots", {}).get("codex", {}).get("timeout_sec", DEFAULT_TIMEOUTS["codex"]),
+        )
+        log_path = o.LOGS_DIR / f"{task_id}.log"
+        o.LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        return run_review_feedback_task(task, cfg, timeout, log_path)
 
     if not bt:
         o.move_task(task_id, "claimed", "failed", reason="codex task has no braid_template")
@@ -2048,9 +2372,18 @@ def run_codex_slot(task, cfg):
 
         if trailer.startswith("BRAID_OK"):
             o.braid_template_record_use(bt, topology_error=False)
+            ok, info = _autocommit_worktree(pathlib.Path(wt_path), task, log_path)
+            if not ok:
+                def mut_fail(t):
+                    t["finished_at"] = o.now_iso()
+                    t["failure"] = f"auto-commit: {info}"
+                o.move_task(task_id, "running", "failed", reason=f"auto-commit: {info}", mutator=mut_fail)
+                return
             def mut_ok(t):
                 t["finished_at"] = o.now_iso()
                 t["artifacts"] = t.get("artifacts", []) + [branch]
+                if info not in ("", "clean"):
+                    t["artifacts"].append(info)
             o.move_task(task_id, "running", "awaiting-review", reason=trailer[:80], mutator=mut_ok)
             return
 

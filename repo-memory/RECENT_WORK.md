@@ -4,6 +4,27 @@ _Append-only log. New entries go at the top. One entry per completed task or mil
 
 ---
 
+## 2026-04-14 — post-canary fixes: pre-review auto-commit + review-feedback loop + depends_on + feature auto-abandon
+
+**Summary:** Closed the four post-canary gaps without touching `feature-20260414-045850-b7d47e` or its failed task files. `bin/worker.py` now auto-commits codex output before `awaiting-review`, reviewer `request_change` verdicts loop through a new `review-address-feedback` codex slice on the existing worktree instead of dead-ending, planner-emitted sibling ordering now flows through `depends_on` and is enforced by `atomic_claim`, and `feature_finalize` now abandons features whose children all ended in `failed/` or `abandoned/` with no retry left in flight.
+
+**Changed:**
+- `bin/worker.py` — added `_autocommit_worktree`, `_autocommit_doctest_case`, `_handle_review_request_change`, `_review_request_change_doctest`, and `run_review_feedback_task`; `run_codex_slot` now routes `review-address-feedback` tasks directly and auto-commits normal codex work before `running -> awaiting-review`; `run_claude_reviewer` now requeues review-feedback work for up to 3 rounds and escalates via the existing PR-alert path after exhaustion.
+- `bin/orchestrator.py` — `new_task()` now accepts `depends_on`, `worktree`, and `base_branch`; planner decomposition prompts/emission now support optional zero-based `depends_on` indices and resolve them to sibling task ids; `atomic_claim()` honors `depends_on` and skips dep-blocked slices while preserving FIFO claim of independent work; `_feature_all_children_failed_without_retry()` feeds a new `feature_finalize()` abandonment branch with local `git branch -d` cleanup on success.
+- `braid/generators/review-address-feedback.prompt.md`, `braid/templates/review-address-feedback.mmd`, `braid/index.json` — new hand-authored pre-PR feedback BRAID template, flat flowchart with 5 distinct `ReviseCheck<N>` nodes, registry hash `sha256:80ae72841a6ccc055b6d8900dfe116470b227de58d088512b2c9bbc245970a87`.
+
+**Validation:**
+- Doctests: combined example count moved from `113` to `119` (`N+6`); `python3 -m doctest bin/orchestrator.py bin/worker.py` passes clean.
+- `python3 bin/orchestrator.py lint-templates --template review-address-feedback` passes with `0` warnings.
+- `python3 bin/orchestrator.py status` exits `0`.
+- Canary killed by untracked-file blindness — see failed `task-20260414-045947-0db815` (empty diff) and `task-20260414-045947-eed73f` (invisible new tests).
+
+**Follow-on:**
+- Re-dispatch the two failed canary slices against the now commit-clean worker path.
+- If review-feedback rounds exhaust again, inspect the alert artifact rather than letting the target silently fail in place.
+
+---
+
 ## 2026-04-14 — pr-sweep BEHIND/drift detection + running guard + conflict preview (commit `1c13b8c`)
 
 **Summary:** Extended `pr_sweep` to keep more PRs moving without human babysitting. Case 1 (conflict dispatch) now fires on `mergeable=CONFLICTING` OR `mergeStateStatus in (DIRTY, BEHIND)`, a drift probe synthesises BEHIND on MERGEABLE PRs whose worktree has fallen `drift_threshold` or more commits behind base (default 5), a running-task guard keyed by `pr_sweep.conflict_task_id` suppresses duplicate dispatch while a feedback slice is still in flight, and a new `[CONFLICT PREVIEW]` block (conflict file list + diff stats + recent base log, 4000-char budget) is threaded into `pr-address-feedback` prompts so the codex solver sees the rebase surface up front. BEHIND was removed from the silent-stamp predicate since it is now actionable.

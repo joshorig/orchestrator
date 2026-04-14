@@ -1,0 +1,82 @@
+{
+  "dag-historian-update": {
+    "created_at": "2026-04-14T00:30:00",
+    "generator_model": "hand-authored",
+    "hash": "sha256:116c2b4116decc8855597820ed71e534004077c8a6b8b9b880e2caafb0f6c0bc",
+    "path": "braid/templates/dag-historian-update.mmd",
+    "topology_errors": 0,
+    "uses": 0
+  },
+  "dag-implement-node": {
+    "created_at": "2026-04-14T00:30:00",
+    "generator_model": "hand-authored",
+    "hash": "sha256:d9112b85fc62235353c876d571f74e0efa85d6da365ad3269505ba8fb59fd026",
+    "path": "braid/templates/dag-implement-node.mmd",
+    "topology_errors": 0,
+    "uses": 0
+  },
+  "lvc-historian-update": {
+    "created_at": "2026-04-13T03:10:31",
+    "generator_model": "claude-opus",
+    "hash": "sha256:93e4dc4a077e25c0ebb35a7365403692063b102a72b0ad6af62244ea379409d0",
+    "path": "braid/templates/lvc-historian-update.mmd",
+    "topology_errors": 0,
+    "uses": 116
+  },
+  "lvc-implement-operator": {
+    "created_at": "2026-04-13T21:27:01",
+    "generator_model": "claude-opus",
+    "hash": "sha256:a513adbfc98884a74a05308752ae611085e17546f6a4e458aaabbce6908a7872",
+    "path": "braid/templates/lvc-implement-operator.mmd",
+    "topology_errors": 14,
+    "uses": 32
+  },
+  "lvc-reviewer-pass": {
+    "created_at": "2026-04-13T03:11:41",
+    "generator_model": "claude-opus",
+    "hash": "sha256:658bce98cc8eaf6df4fbc368245c37026c82bdfbd67710095d6370d6ee2cbb88",
+    "path": "braid/templates/lvc-reviewer-pass.mmd",
+    "topology_errors": 1,
+    "uses": 161
+  },
+  "memory-synthesis": {
+    "created_at": "2026-04-14T00:30:00",
+    "generator_model": "hand-authored",
+    "hash": "sha256:1de58e43f0cc346b680e2914183f68f1208963f2007e2cbef98b1e88a04e4e2e",
+    "path": "braid/templates/memory-synthesis.mmd",
+    "topology_errors": 0,
+    "uses": 0
+  },
+  "pr-address-feedback": {
+    "created_at": "2026-04-13T23:30:00",
+    "generator_model": "hand-authored",
+    "hash": "sha256:35bbfe1a966bab208466781f2cedde53407386dd1e1f1d9d98c7080b2c87e5e6",
+    "path": "braid/templates/pr-address-feedback.mmd",
+    "topology_errors": 0,
+    "uses": 0
+  },
+  "review-address-feedback": {
+    "created_at": "2026-04-14T07:20:00",
+    "generator_model": "hand-authored",
+    "hash": "sha256:80ae72841a6ccc055b6d8900dfe116470b227de58d088512b2c9bbc245970a87",
+    "path": "braid/templates/review-address-feedback.mmd",
+    "topology_errors": 0,
+    "uses": 0
+  },
+  "trp-implement-pipeline-stage": {
+    "created_at": "2026-04-14T00:30:00",
+    "generator_model": "hand-authored",
+    "hash": "sha256:9fcd256e665a76105d19590d28c439e066be44ec1699c4e0b69ed6eea66c5457",
+    "path": "braid/templates/trp-implement-pipeline-stage.mmd",
+    "topology_errors": 0,
+    "uses": 0
+  },
+  "trp-ui-component": {
+    "created_at": "2026-04-14T00:30:00",
+    "generator_model": "hand-authored",
+    "hash": "sha256:884786ac2732da9464e09370c530501e2dc12c6221a44bff63e1813ed88011b2",
+    "path": "braid/templates/trp-ui-component.mmd",
+    "topology_errors": 0,
+    "uses": 0
+  }
+}
