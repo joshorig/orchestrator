@@ -28,6 +28,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -59,6 +60,139 @@ def base_branch_for_task(task):
     return f"feature/{fid}" if fid else "main"
 
 
+class MainDirtyOrAhead(RuntimeError):
+    """Raised when local main cannot safely host a new feature branch cut."""
+
+
+def _preflight_doctest_setup():
+    """Create a disposable repo + file:// remote for preflight_main doctests."""
+    tmp = tempfile.TemporaryDirectory()
+    root = pathlib.Path(tmp.name)
+    remote = root / "remote.git"
+    seed = root / "seed"
+    canonical = root / "canonical"
+    remote_uri = remote.resolve().as_uri()
+
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
+    subprocess.run(["git", "init", "-b", "main", str(seed)], check=True, capture_output=True, text=True)
+    for repo in (seed,):
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "Doctest"], check=True, capture_output=True, text=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "doctest@example.com"], check=True, capture_output=True, text=True)
+    (seed / "README.md").write_text("seed\n")
+    subprocess.run(["git", "-C", str(seed), "add", "README.md"], check=True, capture_output=True, text=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "initial"], check=True, capture_output=True, text=True)
+    subprocess.run(["git", "-C", str(seed), "remote", "add", "origin", remote_uri], check=True, capture_output=True, text=True)
+    subprocess.run(["git", "-C", str(seed), "push", "-u", "origin", "main"], check=True, capture_output=True, text=True)
+    subprocess.run(["git", "--git-dir", str(remote), "symbolic-ref", "HEAD", "refs/heads/main"], check=True, capture_output=True, text=True)
+    subprocess.run(["git", "clone", "--branch", "main", remote_uri, str(canonical)], check=True, capture_output=True, text=True)
+    subprocess.run(["git", "-C", str(canonical), "config", "user.name", "Doctest"], check=True, capture_output=True, text=True)
+    subprocess.run(["git", "-C", str(canonical), "config", "user.email", "doctest@example.com"], check=True, capture_output=True, text=True)
+    return tmp, {"root": root, "remote": remote, "remote_uri": remote_uri, "seed": seed, "canonical": canonical}
+
+
+def preflight_main(project_path):
+    """Verify local main is clean and not ahead of origin/main.
+
+    Performs an authoritative `git fetch origin main`, then refuses if the
+    canonical checkout has uncommitted changes or if local `main` contains
+    commits that `origin/main` lacks. Returns `None` on success and raises
+    `MainDirtyOrAhead` on refusal.
+
+    >>> tmp, env = _preflight_doctest_setup()
+    >>> preflight_main(str(env["canonical"])) is None
+    True
+    >>> _ = subprocess.run(
+    ...     ["git", "-C", str(env["seed"]), "commit", "--allow-empty", "-m", "remote-ahead"],
+    ...     check=True, capture_output=True, text=True,
+    ... )
+    >>> _ = subprocess.run(
+    ...     ["git", "-C", str(env["seed"]), "push", "origin", "main"],
+    ...     check=True, capture_output=True, text=True,
+    ... )
+    >>> preflight_main(str(env["canonical"])) is None
+    True
+    >>> tmp.cleanup()
+
+    >>> tmp, env = _preflight_doctest_setup()
+    >>> _ = (env["canonical"] / "dirty.txt").write_text("dirty\\n")
+    >>> try:
+    ...     preflight_main(str(env["canonical"]))
+    ... except MainDirtyOrAhead as exc:
+    ...     "uncommitted" in str(exc)
+    True
+    >>> tmp.cleanup()
+
+    >>> tmp, env = _preflight_doctest_setup()
+    >>> _ = (env["canonical"] / "staged.txt").write_text("staged\\n")
+    >>> _ = subprocess.run(
+    ...     ["git", "-C", str(env["canonical"]), "add", "staged.txt"],
+    ...     check=True, capture_output=True, text=True,
+    ... )
+    >>> try:
+    ...     preflight_main(str(env["canonical"]))
+    ... except MainDirtyOrAhead as exc:
+    ...     "uncommitted" in str(exc)
+    True
+    >>> tmp.cleanup()
+
+    >>> tmp, env = _preflight_doctest_setup()
+    >>> _ = subprocess.run(
+    ...     ["git", "-C", str(env["canonical"]), "commit", "--allow-empty", "-m", "local-ahead"],
+    ...     check=True, capture_output=True, text=True,
+    ... )
+    >>> try:
+    ...     preflight_main(str(env["canonical"]))
+    ... except MainDirtyOrAhead as exc:
+    ...     "not in origin/main" in str(exc)
+    True
+    >>> tmp.cleanup()
+
+    >>> tmp, env = _preflight_doctest_setup()
+    >>> missing_remote = env["root"] / "missing.git"
+    >>> _ = subprocess.run(
+    ...     ["git", "-C", str(env["canonical"]), "remote", "set-url", "origin", missing_remote.resolve().as_uri()],
+    ...     check=True, capture_output=True, text=True,
+    ... )
+    >>> try:
+    ...     preflight_main(str(env["canonical"]))
+    ... except MainDirtyOrAhead as exc:
+    ...     "fetch origin main failed" in str(exc)
+    True
+    >>> tmp.cleanup()
+    """
+    fetch = subprocess.run(
+        ["git", "-C", project_path, "fetch", "origin", "main"],
+        capture_output=True,
+        text=True,
+    )
+    if fetch.returncode != 0:
+        detail = (fetch.stderr or fetch.stdout or "").strip()
+        raise MainDirtyOrAhead(
+            f"fetch origin main failed: {detail[:200] or 'unknown git fetch failure'}"
+        )
+
+    status = subprocess.run(
+        ["git", "-C", project_path, "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    if status.stdout.strip():
+        raise MainDirtyOrAhead(
+            f"{project_path} has uncommitted changes on main working tree"
+        )
+
+    ancestor = subprocess.run(
+        ["git", "-C", project_path, "merge-base", "--is-ancestor", "main", "origin/main"],
+        capture_output=True,
+        text=True,
+    )
+    if ancestor.returncode != 0:
+        raise MainDirtyOrAhead(
+            f"{project_path} local main has commits not in origin/main"
+        )
+
+
 def ensure_feature_branch(project_path, feature_branch):
     """Create `feature_branch` locally + on origin if it doesn't already exist.
 
@@ -69,6 +203,8 @@ def ensure_feature_branch(project_path, feature_branch):
 
     Returns True if the branch was newly created, False if it already existed.
     """
+    preflight_main(project_path)
+
     # Fast path: branch already present locally.
     probe = subprocess.run(
         ["git", "-C", project_path, "rev-parse", "--verify", "--quiet", feature_branch],
@@ -1093,6 +1229,7 @@ VALID_TOPOLOGY_REASONS = (
     "baseline_red",
     "graph_unreachable",
     "graph_malformed",
+    "main_dirty_or_ahead",
 )
 
 
@@ -1722,7 +1859,30 @@ def run_codex_slot(task, cfg):
 
         base_branch = base_branch_for_task(task)
         if base_branch != "main":
-            ensure_feature_branch(project["path"], base_branch)
+            try:
+                ensure_feature_branch(project["path"], base_branch)
+            except MainDirtyOrAhead as exc:
+                def mut_block_main(t):
+                    t["finished_at"] = o.now_iso()
+                    t["topology_error"] = "main_dirty_or_ahead"
+                    t["topology_error_message"] = str(exc)
+                o.move_task(
+                    task_id,
+                    "claimed",
+                    "blocked",
+                    reason=str(exc)[:80],
+                    mutator=mut_block_main,
+                )
+                try:
+                    write_regression_alert(
+                        project["name"],
+                        task_id,
+                        f"main_dirty_or_ahead: {exc}",
+                        None,
+                    )
+                except Exception as alert_exc:
+                    log(f"main_dirty_or_ahead alert write failed: {alert_exc}")
+                return
 
         wt_path, branch, base_branch = make_worktree(
             project["path"], task_id, base_branch=base_branch,
