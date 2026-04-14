@@ -1,0 +1,144 @@
+# devmini orchestrator — Roadmap
+
+_Append-only. Top-to-bottom is priority order. Status mutates in place; entries are never deleted. DONE/ABANDONED stay for history and are skipped by the planner._
+
+**Theme:** Harden the orchestrator from "working vertical slice" into a trusted autonomous runtime — enforce scoping controls before enabling the workflow, close the observability gaps around BRAID template health, prove one feature end-to-end on lvc-standard, then widen fleet parallelism and start on the BRAID paper §7 futures.
+
+**Critical path:** R-001 → R-002 → R-003 (vertical-slice canary) → R-004/R-005 (hardening the new pr-sweep surface) → R-006/R-007 (closing the generator-quality loop) → R-011 (parallelism) → R-012/R-013 (paper §7 futures).
+
+## Active
+
+### [R-001] Planner cap + planner_enabled toggle + telegram controls
+- **Status:** DONE (commit `b63b6c4`, 2026-04-14)
+- **Feature id:** null
+- **Goal:** Planner can be scoped to one active feature per project AND enabled/disabled per-project via Telegram, so a targeted test run on one repo does not fan out across the three-project fleet.
+- **Scope:** `_project_has_open_feature` helper in `bin/orchestrator.py`; `planner_disabled` / `set_planner_disabled` backed by flag files under `state/runtime/planner-disabled/`; `planner_status_text` renderer; three new gates in `tick_planner` (hard_stopped → open_feature → planner_disabled → lock → plan); three new Telegram handlers `/planner_status`, `/planner_enable`, `/planner_disable` in `bin/telegram_bot.py`; inline doctests for every new helper.
+- **Out of scope:** Cross-project feature caps, reviewer/QA slot toggles, historical audit log of enable/disable events, config-file mutation.
+- **Acceptance:** Landed green — 278 insertions across `bin/orchestrator.py` + `bin/telegram_bot.py`, zero deletions; +19 new doctest examples (orchestrator 36→55), worker untouched at 58, combined 113 passing; `pr-sweep --dry-run` output unchanged; round-trip smoke `set_planner_disabled(..., True) → planner_disabled() → set_planner_disabled(..., False)` prints `True True True False`; three Telegram handlers registered at `telegram_bot.py:275-277` with matching help text block.
+- **Depends on:** none.
+- **Notes:** Blocks R-002. Four new helpers anchored at `orchestrator.py:1688/1995/2009/2528`.
+
+### [R-002] Telegram bot activation + minimum-viable plist fleet
+- **Status:** TODO
+- **Feature id:** null
+- **Goal:** Bring the workflow online for the first time — bot live, minimum plists loaded, stale queue cleared — scoped to lvc-standard only.
+- **Scope:** `config/telegram.json` is **already configured** (real bot_token, `allowed_chat_ids=[5596375259]`, `push_reports=true`, chmod 600 after pass-2 tightening); `launchctl load` the minimum set (planner, reviewer, qa-scheduler, pr-sweep, reaper, cleanup-worktrees, feature-finalize, worker.claude, **1×** worker.codex, worker.qa, telegram-bot — 11 plists); one-shot pre-flight `mv queue/done/task-20260414-003015-*.json queue/abandoned/` for the three orphan historian tasks; `set_planner_disabled dag-framework` and `set_planner_disabled trade-research-platform` to keep them out of the planner sweep.
+- **Out of scope:** Loading the 5 extra codex plists (codex-2..6) — deferred to R-011. Loading the regression plist cadence hack (sun/wed schedule auto-fires without a load step).
+- **Acceptance:** `launchctl list | grep devmini` shows the 11 target plists running; `/status` from the allowed chat returns a live snapshot; the next morning/evening report written to `reports/` is pushed to all allowed chats within 60s; dag + trp are visibly `disabled` in `/planner_status`.
+- **Depends on:** [R-001].
+- **Notes:** Runtime activation, not code. telegram.json was seeded in the pass-1 bootstrap (commit `5900d4d`) and is gitignored; no population step is needed. The stale-sweep is a pre-flight runtime step kept out of the R-001 commit by design.
+
+### [R-003] Vertical-slice canary run on lvc-standard
+- **Status:** TODO
+- **Feature id:** null
+- **Goal:** First end-to-end feature runs planner → codex → reviewer → qa → pr-sweep → feature-finalize on lvc-standard without human intervention beyond the feature→main merge click, with the BRAID health canary green.
+- **Scope:** Pick the first lvc `ROADMAP.md` entry (candidate: `[R-004] Per-node metrics exporter` — meatier than historian, lighter than R-001 watermarks); let the planner enqueue one feature for it; observe the pass through every state; capture the full transition trace in `repo-memory/RECENT_WORK.md`; compute first live BRAID PPD numbers for `lvc-implement-operator`.
+- **Out of scope:** dag-framework / trp runs (still disabled by R-001 flags); parallel features; deliberate regression-failure drills (separate pass-2 entry).
+- **Acceptance:** One task PR auto-merged to `feature/<id>` without human review beyond auto-handle authors; feature-finalize opens the feature→main PR; `braid/index.json[lvc-implement-operator].topology_errors` **does not grow** from its pinned 14 (the canary gate in CURRENT_STATE "Known concerns"); `braid/index.json[lvc-implement-operator].uses` increments by 1+; no reaper-salvaged stale claims in `transitions.log`.
+- **Depends on:** [R-001], [R-002].
+- **Notes:** This is the forcing function for every preceding pass-1/pass-2 claim. Failure modes are the interesting output — catalog them as `repo-memory/FAILURES.md` entries and promote any blocker to an R-XXX of its own.
+
+### [R-004] drift_threshold per-project override
+- **Status:** TODO
+- **Feature id:** null
+- **Goal:** `config/orchestrator.json` projects table supports an optional `drift_threshold` that overrides the global `CONFIG_DEFAULTS["drift_threshold"] = 5` for a single project.
+- **Scope:** Extend the project schema with optional `drift_threshold`, thread through `load_config()` so it lands alongside the other per-project config, update `pr_sweep` to read project-level first and fall back to the global default, new inline doctest covering override + fallback paths.
+- **Out of scope:** Per-PR overrides, dynamic threshold tuning based on merge latency, UI for the override.
+- **Acceptance:** Setting `drift_threshold: 10` on lvc-standard makes pr-sweep require 10 commits of drift before synthesising `BEHIND` for that project; dag-framework / trp continue to use the default 5.
+- **Depends on:** none.
+- **Notes:** Explicitly called out as a pass-2 gap in the 1c13b8c RECENT_WORK follow-on.
+
+### [R-005] pr-sweep running-guard telemetry
+- **Status:** TODO
+- **Feature id:** null
+- **Goal:** Observability for how often the new `pr_sweep.conflict_task_id` guard actually suppresses duplicate dispatch, so the sweep cadence can be tuned.
+- **Scope:** New counter in `state/runtime/pr-sweep-metrics.json` (atomic rewrite via `write_json_atomic`), incremented each time the guard short-circuits a dispatch path; surfaced in `status_text()` and the morning PPD report; doctest exercising increment + persistence.
+- **Out of scope:** Prometheus export, histograms, cross-sweep aggregation windows, per-PR breakdowns.
+- **Acceptance:** After a sustained feedback round on a conflict-heavy PR, the counter is non-zero and visible in both `/status` output and the next morning report.
+- **Depends on:** [R-002] (need live pr-sweep runs to populate the counter).
+- **Notes:** Closes the observability gap flagged in the 1c13b8c follow-on. Without this, "is the guard working?" is answered only by grepping `transitions.log`.
+
+### [R-006] BRAID generator-prompt linter — close the last 5%
+- **Status:** TODO
+- **Feature id:** null
+- **Goal:** Every generated template body is linted on write with the R1..R7 rules already in place; the remaining false-positive on `lvc-reviewer-pass` R7 is resolved, and the linter runs weekly as a historian sweep to catch rot on templates that have not been regenerated recently.
+- **Scope:** Fix the R7 literal-detector heuristic that flags `lvc-reviewer-pass` (currently suppressed as a known non-blocker); add dedicated unit tests per rule (R1 node-atomicity, R2 labeled-edges, R3 terminal-check, R4 distinct-revise-per-gate, R5 reachability, R6 syntax, R7 repo-literal); wire a new `tick_template_audit` that runs `lint-templates --all` and appends findings to `reports/template-audit-<date>.md`.
+- **Out of scope:** ML-based quality scoring, auto-regen on lint failure (that's R-007), dynamic principle learning.
+- **Acceptance:** `lint-templates --all` reports 0 warnings on every live template; the per-rule unit tests cover the R1..R7 branches; one simulated bad template in CI-style fixture triggers the expected rule rejection.
+- **Depends on:** [R-003] (need real topology_errors signal to calibrate R7 without regressing).
+- **Notes:** Partial land already in CURRENT_STATE "Live BRAID stats". This entry closes the last 5%.
+
+### [R-007] Auto-regen on sustained topology_errors
+- **Status:** TODO
+- **Feature id:** null
+- **Goal:** When a template's live error rate crosses a threshold, automatically enqueue a claude regeneration task instead of waiting for a human to notice the counter growing.
+- **Scope:** Reap-time check: if `errors / uses > 0.10` over the last N runs (configurable), auto-enqueue `engine=claude, role=planner` with `braid_template_write` contract for that template; pause codex dispatch of that task type until the new hash lands; `transitions.log` stamp so the decision is auditable.
+- **Out of scope:** Multi-template parallel regen, gradient-based quality scoring, cross-project template sharing.
+- **Acceptance:** Synthetic drill — inject 5 topology_errors on a low-traffic template, confirm a regen task auto-enqueues within one reaper tick, dispatch of that task type pauses until the lint-gated new template lands, then resumes.
+- **Depends on:** [R-005] (metrics), [R-006] (linter must gate regen output).
+- **Notes:** The "dynamic mid-run re-planning beyond basic retry" gap flagged out-of-scope in the pass-1 plan — this entry finally addresses it at the template-lifecycle level (still static mid-task, adaptive across tasks).
+
+### [R-008] Log rotation + structured event stream
+- **Status:** TODO
+- **Feature id:** null
+- **Goal:** Prevent `logs/*.log` from growing unbounded and give the historian a structured event stream to summarise from, instead of grepping free-form logs.
+- **Scope:** Rotate per-task logs to gzipped archive after 7 days; consolidate agent-status events into `state/runtime/events.jsonl` (append-only, one JSON per line, schema: `ts`, `role`, `event`, `task_id`, `feature_id`, `details`); size cap at 1GB total with rolling eviction on oldest archive.
+- **Out of scope:** Remote log shipping, full ELK/Loki integration, log-based alerting (that's pass-3).
+- **Acceptance:** 14-day idle soak keeps `logs/` under 1GB; historian can consume `events.jsonl` for RECENT_WORK entries; rotated archives are re-readable on demand (`gzcat` round-trip).
+- **Depends on:** [R-002] (need sustained operation to justify rotation effort).
+- **Notes:** Deferred from pass-1 plan §5. Low priority until the first real disk-pressure event.
+
+### [R-009] trade-research-platform regression — real-stack compose
+- **Status:** TODO
+- **Feature id:** null
+- **Goal:** `qa/regression.sh` for trade-research-platform actually exercises a compose-started backend, not the Vite dev server that Playwright webServer currently spawns.
+- **Scope:** Add a `compose-stack` Playwright project + EXIT-trapped compose lifecycle stage in `qa/regression.sh`; ensure teardown survives every failure path; wire into the sun regression cadence.
+- **Out of scope:** Crypto-specific Playwright assertions (those belong to the trp project's own roadmap), containerised JMH, cross-browser matrix.
+- **Acceptance:** `qa/regression.sh` on trp brings up `docker compose`, runs the full Playwright sweep against the live backend, tears down cleanly even on intermediate failure, artifacts land in `/Volumes/devssd/qa-artifacts/trade-research-platform/regression/<ts>/`.
+- **Depends on:** [R-003] (vertical slice must prove on the simpler lvc-standard path first).
+- **Notes:** Flagged in CURRENT_STATE as a pass-2 known concern. Hand-off prompt already drafted but not executed.
+
+### [R-010] Secrets scanning on repo-memory writes
+- **Status:** TODO
+- **Feature id:** null
+- **Goal:** Every historian-enqueued write to `repo-memory/*.md` passes through a secrets detector before commit, blocking on any hit.
+- **Scope:** Lightweight regex + entropy detector invoked from the historian worker path; rejection list for known benign patterns (e.g. example hashes in docs); abort commit on hit with a Telegram alert so the human can inspect the offending diff.
+- **Out of scope:** Full TruffleHog integration, historical log scanning, credential rotation workflow.
+- **Acceptance:** Injecting a synthetic AWS key into a RECENT_WORK append triggers a rejection with a clear error; benign content (including prose that mentions "password" or "token" as words) passes.
+- **Depends on:** none.
+- **Notes:** Deferred from pass-1 plan §5. Becomes first-class once `repo-memory` is the system of record and the historian is appending on every task completion.
+
+### [R-011] 6-slot codex fleet activation + cross-feature parallelism
+- **Status:** TODO
+- **Feature id:** null
+- **Goal:** Unblock the dormant `worker.codex-2..6.plist` slots and let the orchestrator run multiple features in parallel across projects without deadlock or VM-resource contention.
+- **Scope:** Load the 5 extra codex plists; lift the R-001 one-active-feature-per-project cap to a configurable `max_active_features` (default 1, override per project); add cross-repo advisory locks to prevent simultaneous compose-heavy regression sweeps from colliding on the colima VM; 3-to-6 concurrent-feature soak test with memory pressure monitoring.
+- **Out of scope:** Dynamic auto-scaling, cross-host orchestration, budget-based worker throttling.
+- **Acceptance:** Six codex workers claim six distinct `feature_id`s concurrently without deadlock or duplicate claims; memory pressure stays under 14GB on the 16GB M4 throughout the soak; no repo ends up with corrupt feature state; `transitions.log` shows the intended interleaving.
+- **Depends on:** [R-003], [R-005], [R-008] (observability must land before unleashing parallelism).
+- **Notes:** The 6-slot fleet was provisioned in plan pass-1 §3 but intentionally held back pending first successful vertical slice. This entry is the gate.
+
+### [R-012] Dynamic mid-task refinement — `BRAID_REFINE` contract
+- **Status:** TODO
+- **Feature id:** null
+- **Goal:** Codex solvers can signal "graph insufficient, request a targeted refinement" mid-task and receive a patched template without aborting — replacing the current all-or-nothing `BRAID_TOPOLOGY_ERROR → full regen` loop.
+- **Scope:** New solver output contract `BRAID_REFINE: <node-id>: <missing-edge-condition>`; partial-template-edit path (apply a diff to the existing `.mmd`, not a full regen); lint gate on the patch; re-dispatch the original task with the refreshed template as system context.
+- **Out of scope:** Full BRAID paper §7 Architect-model fine-tune, multi-round refinement in a single task, visual graph ingestion (R-013).
+- **Acceptance:** Synthetic drill where a solver hits a missing-condition edge mid-traversal emits a `BRAID_REFINE` trailer; within one claude round-trip the patched template is linted, written, and the original task is re-dispatched and completes with `BRAID_OK`.
+- **Depends on:** [R-006], [R-007].
+- **Notes:** BRAID paper §7 "dynamic re-planning" future work, partially addressed here without requiring a new model.
+
+### [R-013] Visual graph ingestion (BRAID paper §7)
+- **Status:** TODO
+- **Feature id:** null
+- **Goal:** Solvers receive a rendered PNG of the Mermaid graph alongside the source, letting vision-capable engine variants reason over topology visually instead of parsing Mermaid text.
+- **Scope:** Add `mermaid-cli` to the worker harness; render template → PNG at dispatch time; attach the image to the codex prompt when the active engine variant supports image inputs; fall back to source-only for non-vision engines; cache renders keyed on template hash so regens invalidate automatically.
+- **Out of scope:** Interactive graph editing, live topology visualisation, animated traversal replays.
+- **Acceptance:** A codex run with an image-enabled engine traverses the visual graph and emits `BRAID_OK` on a task where the Mermaid source has been deliberately stripped from the prompt (image only).
+- **Depends on:** [R-012].
+- **Notes:** BRAID paper §7 explicit future-work item. Value hinges on downstream model support — not all codex variants accept image prompts.
+
+## Completed
+
+### [R-000] pr-sweep BEHIND/drift detection + running guard + conflict preview — 2026-04-14 (commit `1c13b8c`, docs follow-up `1154442`)
+Case 1 conflict dispatch widened to `CONFLICTING / DIRTY / BEHIND`, drift probe synthesises `BEHIND` on MERGEABLE PRs whose worktree has drifted `drift_threshold` (default 5) commits behind base, running-task guard via `pr_sweep.conflict_task_id` suppresses duplicate dispatch while a feedback slice is in flight, and the new `[CONFLICT PREVIEW]` block (conflict list + diff stats + recent base log, 4000-char budget) is threaded into `pr-address-feedback` prompts so the codex solver sees the rebase surface up front. 5 new helpers in `bin/orchestrator.py`, 1 new helper in `bin/worker.py`, 5 new inline doctests, 58/58 doctests green. Docs captured in `README.md §4`, `bin/orchestrator.py` pr_sweep header, and `RECENT_WORK.md`. Pushed to local `main` only — no remote configured for the orchestrator repo.
