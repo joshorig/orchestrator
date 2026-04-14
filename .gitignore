@@ -24,3 +24,7 @@ __pycache__/
 .DS_Store
 .vscode/
 .idea/
+
+# Local caches and archives
+.token-savior-cache.json
+archive/
