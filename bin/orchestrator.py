@@ -1020,21 +1020,7 @@ def pr_sweep(dry_run=False):
             fb_enqueued += 1
             continue
 
-        # Case 3: waiting on review. Don't merge, don't alert — just stamp.
-        if review_decision == "CHANGES_REQUESTED":
-            task = update_task_in_place(task_file, stamp_sweep({
-                "last_mergeable": mergeable,
-                "last_review_decision": review_decision,
-            }))
-            continue
-        if merge_state in ("BLOCKED", "UNSTABLE"):
-            task = update_task_in_place(task_file, stamp_sweep({
-                "last_mergeable": mergeable,
-                "last_merge_state": merge_state,
-            }))
-            continue
-
-        # Case 3.5: unresolved review threads from allowlisted bots block
+        # Case 2.5: unresolved review threads from allowlisted bots block
         # merge AND dispatch a pr-feedback round so the solver can self-
         # heal. reviewDecision stays "" when a bot leaves a plain review-
         # thread comment instead of a formal Changes Requested review, so
@@ -1047,6 +1033,14 @@ def pr_sweep(dry_run=False):
         # tick sees isResolved=true and merges — closing the self-heal
         # loop without human intervention. chatgpt-codex-connector does
         # NOT mark its own threads resolved, so the orchestrator has to.
+        #
+        # MUST run before Case 3's BLOCKED/UNSTABLE silent-stamp: the
+        # GH-side unresolved-bot-review workflow is itself a required
+        # check, so the very condition this gate is meant to heal puts
+        # the PR into merge_state=UNSTABLE. If Case 3 catches it first,
+        # pr-sweep just stamps and skips forever — the self-heal loop
+        # never closes. Same reasoning applies to CHANGES_REQUESTED:
+        # a bot that files a formal review would otherwise silently win.
         unresolved_bot_threads = _unresolved_bot_review_threads(
             repo_path, pr_number, pr_url,
         )
@@ -1098,6 +1092,20 @@ def pr_sweep(dry_run=False):
                 "unresolved_bot_threads": count,
             }))
             skipped += 1
+            continue
+
+        # Case 3: waiting on review. Don't merge, don't alert — just stamp.
+        if review_decision == "CHANGES_REQUESTED":
+            task = update_task_in_place(task_file, stamp_sweep({
+                "last_mergeable": mergeable,
+                "last_review_decision": review_decision,
+            }))
+            continue
+        if merge_state in ("BLOCKED", "UNSTABLE"):
+            task = update_task_in_place(task_file, stamp_sweep({
+                "last_mergeable": mergeable,
+                "last_merge_state": merge_state,
+            }))
             continue
 
         # Case 4: fully green — auto-merge (feature-targeted only).
