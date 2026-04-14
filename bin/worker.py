@@ -2167,9 +2167,34 @@ def run_pr_feedback_task(task, cfg):
         o.update_task_in_place(target_file, mut_target)
 
         o.braid_template_record_use(bt, topology_error=False)
+
+        # Self-heal close-out: mark any bot review threads this feedback
+        # round addressed as resolved, so the next pr-sweep tick sees
+        # isResolved=true on the PR and auto-merges. chatgpt-codex-
+        # connector does NOT mark its own threads resolved after a fix —
+        # if the orchestrator does not do it, the PR stays blocked in
+        # Case 3.5 forever. Failures are logged but not fatal: the fix
+        # is already pushed, and a stuck unresolved thread is a re-check,
+        # not a regression.
+        thread_ids = [
+            c.get("thread_id") for c in (comments or []) if c.get("thread_id")
+        ]
+        resolved_count = 0
+        if thread_ids:
+            resolved_count, failed_count = o._resolve_review_threads(
+                project["path"], thread_ids,
+            )
+            with log_path.open("a") as lf:
+                lf.write(
+                    f"\n# resolveReviewThread: {resolved_count} resolved, "
+                    f"{failed_count} failed ({len(set(thread_ids))} unique thread(s))\n"
+                )
+
         def mut_ok(t):
             t["finished_at"] = o.now_iso()
             t["pr_feedback_new_sha"] = new_sha
+            if thread_ids:
+                t["resolved_thread_count"] = resolved_count
         o.move_task(task_id, "running", "done",
                     reason=f"pr-feedback pushed {new_sha}", mutator=mut_ok)
 

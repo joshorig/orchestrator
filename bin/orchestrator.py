@@ -465,14 +465,22 @@ def _comment_is_actionable(comment):
 def _unresolved_bot_review_threads(repo_path, pr_number, pr_url=None):
     """Return unresolved PR review threads started by allowlisted bots.
 
-    This is the merge-gate equivalent of `_comment_is_actionable`: both share
-    the AUTO_HANDLE_COMMENT_AUTHORS allowlist, but this path uses GraphQL to
-    reach `reviewThreads.isResolved`, which the REST `comments` field on
-    `gh pr view` does NOT expose. Without this check, a P2 review-thread
-    comment from chatgpt-codex-connector is invisible to pr-sweep — the PR
-    shows reviewDecision="" (no formal "Changes Requested") and Case 4 merges
-    through it. That is exactly how PR #13 shipped a buggy
-    AgronaHistogram.addToBucket past an unresolved bot review.
+    Shape matches `_extract_actionable_comments` so the result can be
+    handed straight to `_enqueue_pr_feedback`:
+        {id, author, body, created_at, thread_id, url, path, line}
+    where `id` is the comment databaseId (used for dedup against
+    handled_comment_ids) and `thread_id` is the GraphQL node id of the
+    owning review thread (used by worker.py after the fix lands to call
+    resolveReviewThread and close the self-heal loop).
+
+    Same AUTO_HANDLE_COMMENT_AUTHORS allowlist as `_comment_is_actionable`,
+    but this path uses GraphQL to reach `reviewThreads.isResolved`, which
+    the REST `comments` field on `gh pr view` does NOT expose. Without
+    this check, a P2 review-thread comment from chatgpt-codex-connector
+    is invisible to pr-sweep — the PR shows reviewDecision="" (no formal
+    "Changes Requested") and Case 4 merges through it. That is how PR
+    #13 shipped a buggy AgronaHistogram.addToBucket past an unresolved
+    bot review.
 
     Mirrors the GraphQL query in
     .github/workflows/unresolved-bot-review.yml so the client-side and
@@ -514,11 +522,18 @@ def _unresolved_bot_review_threads(repo_path, pr_number, pr_url=None):
         "      reviewThreads(first:100) {"
         "        pageInfo { hasNextPage }"
         "        nodes {"
+        "          id"
         "          isResolved"
         "          path"
         "          line"
         "          comments(first:1) {"
-        "            nodes { author { login } url body }"
+        "            nodes {"
+        "              databaseId"
+        "              author { login }"
+        "              url"
+        "              body"
+        "              createdAt"
+        "            }"
         "          }"
         "        }"
         "      }"
@@ -563,14 +578,71 @@ def _unresolved_bot_review_threads(repo_path, pr_number, pr_url=None):
         normalized = login[:-5] if login.endswith("[bot]") else login
         if normalized not in AUTO_HANDLE_COMMENT_AUTHORS:
             continue
+        comment_id = first.get("databaseId")
+        thread_id = t.get("id")
+        if comment_id is None or not thread_id:
+            continue
         out.append({
-            "login": (first.get("author") or {}).get("login", ""),
+            "id": str(comment_id),
+            "author": (first.get("author") or {}).get("login", ""),
+            "body": (first.get("body") or "")[:4000],
+            "created_at": first.get("createdAt", ""),
+            "thread_id": thread_id,
+            "url": first.get("url"),
             "path": t.get("path"),
             "line": t.get("line"),
-            "url": first.get("url"),
-            "body": (first.get("body") or "")[:500],
         })
     return out
+
+
+def _resolve_review_threads(repo_path, thread_ids):
+    """Mark the given review thread node IDs resolved via GraphQL mutation.
+
+    Called after a pr-feedback task successfully pushes its fix — closes
+    the self-heal loop so the next pr-sweep tick sees isResolved=true and
+    auto-merges, rather than re-alerting on the same thread forever.
+    chatgpt-codex-connector does NOT mark its own threads resolved after a
+    fix, so if the orchestrator does not resolve them itself the PR sits
+    blocked in pr-sweep until a human clicks "Resolve conversation".
+
+    Returns (resolved_count, failed_count). Fails soft — any single
+    mutation error is logged but does not raise, and the caller is
+    expected to move the task to done regardless (the fix is already
+    pushed; an unresolved thread is a re-check, not a regression).
+    """
+    if not thread_ids:
+        return (0, 0)
+    mutation = (
+        "mutation($tid: ID!) {"
+        "  resolveReviewThread(input: {threadId: $tid}) {"
+        "    thread { id isResolved }"
+        "  }"
+        "}"
+    )
+    resolved = failed = 0
+    seen = set()
+    for tid in thread_ids:
+        if not tid or tid in seen:
+            continue
+        seen.add(tid)
+        try:
+            proc = subprocess.run(
+                ["gh", "api", "graphql",
+                 "-F", f"tid={tid}",
+                 "-f", f"query={mutation}"],
+                cwd=repo_path,
+                capture_output=True, text=True, timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            failed += 1
+            print(f"resolveReviewThread: timeout on {tid}")
+            continue
+        if proc.returncode != 0:
+            failed += 1
+            print(f"resolveReviewThread {tid}: {(proc.stderr or '').strip()[:200]}")
+            continue
+        resolved += 1
+    return (resolved, failed)
 
 
 def _extract_actionable_comments(pr_info, already_handled):
@@ -963,39 +1035,68 @@ def pr_sweep(dry_run=False):
             continue
 
         # Case 3.5: unresolved review threads from allowlisted bots block
-        # merge. reviewDecision stays "" when a bot leaves a plain review
-        # comment instead of a formal Changes Requested review, so Case 4
-        # would otherwise merge straight through. GraphQL is the only path
-        # to reviewThreads.isResolved — REST `gh pr view --json comments`
-        # does not expose it. Mirrors
-        # .github/workflows/unresolved-bot-review.yml (the GH-side backstop).
+        # merge AND dispatch a pr-feedback round so the solver can self-
+        # heal. reviewDecision stays "" when a bot leaves a plain review-
+        # thread comment instead of a formal Changes Requested review, so
+        # Case 2's REST-comment scan can't see these and Case 4 would
+        # merge straight through. GraphQL is the only path to
+        # reviewThreads.isResolved — .github/workflows/unresolved-bot-
+        # review.yml mirrors this query as the GH-side backstop. After
+        # pr-feedback's fix lands, worker.run_pr_feedback_task calls
+        # _resolve_review_threads on the stored thread_ids so the next
+        # tick sees isResolved=true and merges — closing the self-heal
+        # loop without human intervention. chatgpt-codex-connector does
+        # NOT mark its own threads resolved, so the orchestrator has to.
         unresolved_bot_threads = _unresolved_bot_review_threads(
             repo_path, pr_number, pr_url,
         )
         if unresolved_bot_threads:
             count = len(unresolved_bot_threads)
-            updates = {
+            new_thread_comments = [
+                c for c in unresolved_bot_threads
+                if c.get("id") and c["id"] not in set(handled_ids)
+            ]
+            if new_thread_comments:
+                if rounds >= PR_SWEEP_MAX_FEEDBACK_ROUNDS:
+                    _write_pr_alert(
+                        project_name, task.get("task_id"), pr_number,
+                        f"exhausted {rounds} pr-feedback rounds, "
+                        f"{count} unresolved bot review thread(s) "
+                        f"({len(new_thread_comments)} not yet attempted)",
+                        pr_url,
+                    )
+                    task = update_task_in_place(task_file, stamp_sweep({
+                        "last_mergeable": mergeable,
+                        "escalated_comments": True,
+                        "unresolved_bot_threads": count,
+                    }))
+                    alerted += 1
+                    continue
+                if dry_run:
+                    print(f"DRY-RUN pr-sweep {task.get('task_id')}: would enqueue "
+                          f"feedback for {len(new_thread_comments)} bot review thread(s)")
+                    continue
+                _enqueue_pr_feedback(
+                    task, project_name, pr_number, base_ref,
+                    conflicts=False, comments=new_thread_comments,
+                )
+                task = update_task_in_place(task_file, stamp_sweep({
+                    "last_mergeable": mergeable,
+                    "feedback_rounds": rounds + 1,
+                    "last_feedback_reason": "unresolved_bot_review_threads",
+                    "handled_comment_ids": handled_ids + [c["id"] for c in new_thread_comments],
+                    "unresolved_bot_threads": count,
+                }))
+                fb_enqueued += 1
+                continue
+            # All unresolved threads are already in handled_comment_ids —
+            # a previous round is in flight or its fix failed to satisfy
+            # the bot and no new comment has landed. Do NOT fall through
+            # to Case 4 (would merge an un-green PR); stamp and skip.
+            task = update_task_in_place(task_file, stamp_sweep({
                 "last_mergeable": mergeable,
                 "unresolved_bot_threads": count,
-                "last_feedback_reason": "unresolved_bot_review_threads",
-            }
-            if not sweep.get("bot_review_alerted_at"):
-                sample = unresolved_bot_threads[0]
-                _write_pr_alert(
-                    project_name, task.get("task_id"), pr_number,
-                    f"{count} unresolved review thread(s) from allowlisted "
-                    f"bot(s); first: @{sample.get('login') or '(bot)'} at "
-                    f"{sample.get('path') or '(none)'}:"
-                    f"{sample.get('line') or 0}",
-                    pr_url,
-                )
-                updates["bot_review_alerted_at"] = now_iso()
-                alerted += 1
-            task = update_task_in_place(task_file, stamp_sweep(updates))
-            print(
-                f"pr-sweep {task.get('task_id')}: blocked on {count} "
-                f"unresolved bot review thread(s)"
-            )
+            }))
             skipped += 1
             continue
 
