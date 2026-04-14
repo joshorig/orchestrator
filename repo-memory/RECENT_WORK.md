@@ -4,6 +4,27 @@ _Append-only log. New entries go at the top. One entry per completed task or mil
 
 ---
 
+## 2026-04-14 — pr-sweep BEHIND/drift detection + running guard + conflict preview (commit `1c13b8c`)
+
+**Summary:** Extended `pr_sweep` to keep more PRs moving without human babysitting. Case 1 (conflict dispatch) now fires on `mergeable=CONFLICTING` OR `mergeStateStatus in (DIRTY, BEHIND)`, a drift probe synthesises BEHIND on MERGEABLE PRs whose worktree has fallen `drift_threshold` or more commits behind base (default 5), a running-task guard keyed by `pr_sweep.conflict_task_id` suppresses duplicate dispatch while a feedback slice is still in flight, and a new `[CONFLICT PREVIEW]` block (conflict file list + diff stats + recent base log, 4000-char budget) is threaded into `pr-address-feedback` prompts so the codex solver sees the rebase surface up front. BEHIND was removed from the silent-stamp predicate since it is now actionable.
+
+**Changed:**
+- `bin/orchestrator.py` (+229) — `CONFIG_DEFAULTS = {"drift_threshold": 5}` applied via `load_config()` setdefault; Case 1 predicate widened at line 707 (`CONFLICTING/DIRTY/BEHIND`); drift probe between lines 685–693 (`dispatch_reason = "drift_sync"` when synthesised); running-task guard at line 729 pinned via `pr_sweep.conflict_task_id`; silent-stamp predicate trimmed at line 787 to `BLOCKED/UNSTABLE`; `_enqueue_pr_feedback` populates `engine_args.conflict_preview` on conflict dispatch. New helpers: `_task_exists_in_queue`, `_run_git_capture`, `_git_drift_ahead_count`, `_build_conflict_preview`, `_trim_conflict_preview`. 3 new inline doctests (B: BEHIND triggers Case 1; C: drift count 7 with CLEAN synthesises BEHIND; D: running guard skips first dispatch and dispatches after guard task leaves the queue) via `__globals__` subprocess fakes.
+- `bin/worker.py` (+54) — `_format_conflict_preview` helper renders the `[CONFLICT PREVIEW]` block with three subsections, `build_pr_feedback_prompt` accepts `conflict_preview=None` (injected after `[PR FEEDBACK CONTEXT]`, before `[REVIEW COMMENTS TO ADDRESS]`), `run_pr_feedback_task` threads `eargs.get("conflict_preview")` into the builder. 2 new inline doctests (rendered-when-present / omitted-when-None).
+
+**Validation:**
+- `python3 -m doctest -v bin/orchestrator.py bin/worker.py` → 58 tests, 58 passed.
+- `python3 bin/orchestrator.py pr-sweep --dry-run` → exit 0, `0 checked, 0 merged, 0 feedback enqueued, 0 alerted, 0 skipped`.
+- `grep -n 'merge_state in' bin/orchestrator.py` → BEHIND present at line 707 (Case 1), absent from line 787 (silent stamp).
+- Only 2 files touched, no new files.
+
+**Follow-on:**
+- Push is a no-op for now — the orchestrator repo has no remote configured, so commit `1c13b8c` lives on local `main` only. Configure a remote (`git remote add origin …`) or confirm local-only is intentional.
+- Pass-2 gap: `drift_threshold` is a global default in `CONFIG_DEFAULTS`. Per-project override via the `projects` table in `config/orchestrator.json` is the obvious extension; not yet wired.
+- No metric yet for how often the running guard catches duplicate dispatch; currently only observable via `state/runtime/transitions.log` stamps.
+
+---
+
 ## 2026-04-14 — Option A landed: operator fix + dispatch wiring + PPD + memory synthesis (commit `74d50e0`)
 
 **Summary:** Single atomic commit closes every item in `prompts/option-a-work-order.md`. Operator template regenerated into a flat shape with distinct `ReviseCheck<N>` per gate (R4 clean), planner dispatch wired for all four new project-specific task types, `bin/ppd_report.py` added with morning-report integration, and memory-synthesis task type wired into a weekly per-project tick.

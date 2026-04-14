@@ -362,10 +362,20 @@ def reap():
 #   4. If PR has new actionable comments from auto-handle authors: enqueue a
 #      codex pr-feedback task, record comment_ids in pr_sweep.handled_comment_ids
 #      so we don't re-enqueue the same comments on the next tick.
-#   5. If PR is CONFLICTING: also enqueue a pr-feedback task (the BRAID graph
-#      instructs the agent to rebase onto base first before addressing any
-#      comments).
-#   6. If pr_sweep.feedback_rounds >= PR_SWEEP_MAX_FEEDBACK_ROUNDS: stop
+#   5. If PR is CONFLICTING (mergeable=CONFLICTING or mergeStateStatus in
+#      DIRTY/BEHIND): enqueue a pr-feedback task. The BRAID graph instructs
+#      the agent to rebase onto base first before touching any comments. The
+#      task's engine_args carries a `[CONFLICT PREVIEW]` block (conflict list
+#      + diff stats + recent base log, 4000-char budget) so the solver sees
+#      the rebase surface up front. The parent task's pr_sweep.conflict_task_id
+#      pins the active guard slice; subsequent sweeps of the same parent skip
+#      dispatch while the guard task is still in queued/claimed/running.
+#   6. Drift probe: if mergeable=MERGEABLE but the worktree HEAD is
+#      `drift_threshold` or more commits behind its base (configurable,
+#      default 5), synthesise mergeStateStatus=BEHIND so Case 1 fires a
+#      drift_sync pr-feedback task. Prevents slow-rot merges that technically
+#      pass gh but have drifted far enough to surprise reviewers.
+#   7. If pr_sweep.feedback_rounds >= PR_SWEEP_MAX_FEEDBACK_ROUNDS: stop
 #      enqueuing more feedback tasks and write a Telegram alert instead so a
 #      human can take over.
 #

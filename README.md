@@ -99,7 +99,13 @@ On `gh` auth problems or HTTP 401s, the sweep logs and skips without mutating ta
 
 ### 4. pr-sweep addresses PR feedback autonomously
 
-When a task PR on a feature branch has conflicts or actionable review comments, `pr-sweep` enqueues a codex `pr-address-feedback` slice bound to the same `feature_id`. That BRAID graph handles rebases, review-comment edits, and follow-up pushes without human intervention unless the configured feedback-round ceiling is exhausted.
+When a task PR on a feature branch needs attention, `pr-sweep` enqueues a codex `pr-address-feedback` slice bound to the same `feature_id`. That BRAID graph handles rebases, review-comment edits, and follow-up pushes without human intervention unless the configured feedback-round ceiling is exhausted. Dispatch fires in three cases:
+
+- **Actionable review comments** from auto-handle authors (`chatgpt-codex-connector`, `copilot`, `github-advanced-security`).
+- **Conflicts or stale bases** — `gh` reports `mergeable=CONFLICTING` or `mergeStateStatus` in `DIRTY`/`BEHIND`.
+- **Drift** — `gh` still says `MERGEABLE`, but the worktree HEAD is `drift_threshold` or more commits behind its base (default 5, override via `config/orchestrator.json`). `pr-sweep` synthesises `mergeStateStatus=BEHIND` so the sync fires before the delta widens.
+
+On conflict/drift dispatch the task's `engine_args.conflict_preview` carries a `[CONFLICT PREVIEW]` block (conflict list + diff stats + recent base log, 4000-char budget) that `worker.py` injects into the codex prompt so the solver sees the rebase surface before it starts. The parent task's `pr_sweep.conflict_task_id` pins the active guard slice; subsequent sweeps of the same parent skip dispatch while that guard task is still in `queued`/`claimed`/`running`, so a slow codex rebase can't triple-enqueue.
 
 ### 5. feature-finalize opens the feature->main PR
 
