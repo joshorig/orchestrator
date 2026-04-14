@@ -1534,7 +1534,54 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
 # track the iteration count, last-applied sha, and handled comment ids so the
 # next pr-sweep tick knows what has already been addressed.
 
-def build_pr_feedback_prompt(*, target, graph_body, base_branch, conflicts, comments, pr_number):
+def _format_conflict_preview(conflict_preview):
+    if not conflict_preview:
+        return ""
+
+    def bullets(value):
+        if isinstance(value, str):
+            items = [line.strip() for line in value.splitlines() if line.strip()]
+        else:
+            items = [str(item).strip() for item in (value or []) if str(item).strip()]
+        return "\n".join(f"- {item}" for item in items) or "- (none)"
+
+    return (
+        "[CONFLICT PREVIEW]\n"
+        "Our commits since base\n"
+        f"{bullets(conflict_preview.get('our_commits'))}\n\n"
+        "Their commits since divergence\n"
+        f"{bullets(conflict_preview.get('their_commits'))}\n\n"
+        "Likely conflict files\n"
+        f"{bullets(conflict_preview.get('likely_conflict_files'))}\n\n"
+    )
+
+
+def build_pr_feedback_prompt(*, target, graph_body, base_branch, conflicts, comments, pr_number, conflict_preview=None):
+    """Build the codex prompt for a pr-feedback task.
+
+    >>> prompt = build_pr_feedback_prompt(
+    ...     target={"task_id": "task-1", "summary": "Demo"},
+    ...     graph_body="flowchart TD",
+    ...     base_branch="feature/demo",
+    ...     conflicts=True,
+    ...     comments=[],
+    ...     pr_number=12,
+    ...     conflict_preview={"our_commits": "abc", "their_commits": "def", "likely_conflict_files": ["a.py", "b.py"]},
+    ... )
+    >>> "[CONFLICT PREVIEW]" in prompt and "Likely conflict files" in prompt
+    True
+    >>> prompt2 = build_pr_feedback_prompt(
+    ...     target={"task_id": "task-1", "summary": "Demo"},
+    ...     graph_body="flowchart TD",
+    ...     base_branch="feature/demo",
+    ...     conflicts=False,
+    ...     comments=[],
+    ...     pr_number=12,
+    ...     conflict_preview=None,
+    ... )
+    >>> "[CONFLICT PREVIEW]" in prompt2
+    False
+    """
     comment_blocks = []
     for i, c in enumerate(comments or [], 1):
         comment_blocks.append(
@@ -1542,6 +1589,7 @@ def build_pr_feedback_prompt(*, target, graph_body, base_branch, conflicts, comm
             f"{c.get('body','').strip()}"
         )
     comments_text = "\n\n".join(comment_blocks) or "(no review comments — rebase-only run)"
+    conflict_preview_text = _format_conflict_preview(conflict_preview)
 
     header = (
         f"PR #{pr_number} for target {target.get('task_id')} needs maintenance.\n"
@@ -1556,6 +1604,7 @@ def build_pr_feedback_prompt(*, target, graph_body, base_branch, conflicts, comm
         f"{graph_body}\n\n"
         "[END BRAID GRAPH]\n\n"
         f"[PR FEEDBACK CONTEXT]\n{header}\n\n"
+        f"{conflict_preview_text}"
         "[REVIEW COMMENTS TO ADDRESS]\n"
         f"{comments_text}\n\n"
         "[ACTIONS YOU CAN TAKE]\n"
@@ -1581,6 +1630,7 @@ def run_pr_feedback_task(task, cfg):
     conflicts = bool(eargs.get("conflicts", False))
     comments = eargs.get("comments") or []
     base_branch = eargs.get("base_branch") or "main"
+    conflict_preview = eargs.get("conflict_preview")
 
     log_path = o.LOGS_DIR / f"{task_id}.log"
     o.LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1642,7 +1692,7 @@ def run_pr_feedback_task(task, cfg):
         prompt = build_pr_feedback_prompt(
             target=target, graph_body=graph_body,
             base_branch=base_branch, conflicts=conflicts, comments=comments,
-            pr_number=pr_number,
+            pr_number=pr_number, conflict_preview=conflict_preview,
         )
 
         timeout = eargs.get(

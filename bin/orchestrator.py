@@ -27,6 +27,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 
@@ -68,6 +69,9 @@ STATES = (
 
 VALID_ENGINES = ("claude", "codex", "qa")
 VALID_ROLES = ("planner", "implementer", "reviewer", "qa", "historian")
+CONFIG_DEFAULTS = {
+    "drift_threshold": 5,
+}
 
 
 @dataclass(frozen=True)
@@ -87,7 +91,10 @@ def now_iso():
 
 
 def load_config():
-    return json.loads(CONFIG_PATH.read_text())
+    data = json.loads(CONFIG_PATH.read_text())
+    for key, value in CONFIG_DEFAULTS.items():
+        data.setdefault(key, value)
+    return data
 
 
 def get_project(config, name):
@@ -473,6 +480,147 @@ def pr_sweep(dry_run=False):
     """Sweep open task PRs: auto-merge clean ones, dispatch pr-feedback, alert on stuck.
 
     Returns (checked, merged, feedback_enqueued, alerted, skipped).
+
+    >>> import json, pathlib, tempfile, types
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     queue_root = root / "queue"
+    ...     for state in STATES:
+    ...         (queue_root / state).mkdir(parents=True, exist_ok=True)
+    ...     task = {
+    ...         "task_id": "task-behind",
+    ...         "project": "demo",
+    ...         "pr_number": 7,
+    ...         "summary": "demo",
+    ...         "feature_id": "f1",
+    ...         "worktree": str(root / "wt"),
+    ...         "pr_sweep": {"feedback_rounds": 0},
+    ...     }
+    ...     (root / "wt").mkdir()
+    ...     task_path = queue_root / "done" / "task-behind.json"
+    ...     _ = task_path.write_text(json.dumps(task))
+    ...     calls = []
+    ...     original = {k: pr_sweep.__globals__[k] for k in ("QUEUE_ROOT", "load_config", "get_project", "_extract_actionable_comments", "_enqueue_pr_feedback", "_write_pr_alert", "now_iso", "subprocess")}
+    ...     class FakeSubprocess:
+    ...         TimeoutExpired = subprocess.TimeoutExpired
+    ...         def run(self, cmd, **kwargs):
+    ...             if cmd[:3] == ["gh", "pr", "view"]:
+    ...                 payload = {"state": "OPEN", "mergeable": "MERGEABLE", "mergeStateStatus": "BEHIND", "reviewDecision": "", "baseRefName": "feature/demo", "url": "https://example/pr/7", "comments": []}
+    ...                 return types.SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+    ...             if cmd[:4] == ["git", "-C", str(root / "wt"), "fetch"]:
+    ...                 return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    ...             if cmd[:5] == ["git", "-C", str(root / "wt"), "rev-list", "--count"]:
+    ...                 return types.SimpleNamespace(returncode=0, stdout="0\\n", stderr="")
+    ...             raise AssertionError(cmd)
+    ...     pr_sweep.__globals__["QUEUE_ROOT"] = queue_root
+    ...     pr_sweep.__globals__["load_config"] = lambda: {"projects": [{"name": "demo", "path": str(root)}], "drift_threshold": 5}
+    ...     pr_sweep.__globals__["get_project"] = lambda config, name: config["projects"][0]
+    ...     pr_sweep.__globals__["_extract_actionable_comments"] = lambda info, handled: []
+    ...     pr_sweep.__globals__["_enqueue_pr_feedback"] = lambda *args, **kwargs: calls.append(kwargs) or "task-new"
+    ...     pr_sweep.__globals__["_write_pr_alert"] = lambda *args, **kwargs: None
+    ...     pr_sweep.__globals__["now_iso"] = lambda: "2026-04-14T12:00:00"
+    ...     pr_sweep.__globals__["subprocess"] = FakeSubprocess()
+    ...     _ = pr_sweep()
+    ...     saved = json.loads(task_path.read_text())
+    ...     observed = ([c["conflicts"] for c in calls], saved["pr_sweep"]["last_feedback_reason"])
+    ...     for key, value in original.items():
+    ...         pr_sweep.__globals__[key] = value
+    >>> observed
+    ([True], 'conflict')
+
+    >>> import json, pathlib, tempfile, types
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     queue_root = root / "queue"
+    ...     for state in STATES:
+    ...         (queue_root / state).mkdir(parents=True, exist_ok=True)
+    ...     wt = root / "wt"
+    ...     wt.mkdir()
+    ...     task = {
+    ...         "task_id": "task-drift",
+    ...         "project": "demo",
+    ...         "pr_number": 8,
+    ...         "summary": "demo",
+    ...         "feature_id": "f1",
+    ...         "worktree": str(wt),
+    ...         "pr_sweep": {"feedback_rounds": 0},
+    ...     }
+    ...     task_path = queue_root / "done" / "task-drift.json"
+    ...     _ = task_path.write_text(json.dumps(task))
+    ...     calls = []
+    ...     original = {k: pr_sweep.__globals__[k] for k in ("QUEUE_ROOT", "load_config", "get_project", "_extract_actionable_comments", "_enqueue_pr_feedback", "_write_pr_alert", "now_iso", "subprocess")}
+    ...     class FakeSubprocess:
+    ...         TimeoutExpired = subprocess.TimeoutExpired
+    ...         def run(self, cmd, **kwargs):
+    ...             if cmd[:3] == ["gh", "pr", "view"]:
+    ...                 payload = {"state": "OPEN", "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN", "reviewDecision": "", "baseRefName": "feature/demo", "url": "https://example/pr/8", "comments": []}
+    ...                 return types.SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+    ...             if cmd[:4] == ["git", "-C", str(wt), "fetch"]:
+    ...                 return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    ...             if cmd[:5] == ["git", "-C", str(wt), "rev-list", "--count"]:
+    ...                 return types.SimpleNamespace(returncode=0, stdout="7\\n", stderr="")
+    ...             raise AssertionError(cmd)
+    ...     pr_sweep.__globals__["QUEUE_ROOT"] = queue_root
+    ...     pr_sweep.__globals__["load_config"] = lambda: {"projects": [{"name": "demo", "path": str(root)}], "drift_threshold": 5}
+    ...     pr_sweep.__globals__["get_project"] = lambda config, name: config["projects"][0]
+    ...     pr_sweep.__globals__["_extract_actionable_comments"] = lambda info, handled: []
+    ...     pr_sweep.__globals__["_enqueue_pr_feedback"] = lambda *args, **kwargs: calls.append(kwargs) or "task-drift-sync"
+    ...     pr_sweep.__globals__["_write_pr_alert"] = lambda *args, **kwargs: None
+    ...     pr_sweep.__globals__["now_iso"] = lambda: "2026-04-14T12:00:00"
+    ...     pr_sweep.__globals__["subprocess"] = FakeSubprocess()
+    ...     _ = pr_sweep()
+    ...     saved = json.loads(task_path.read_text())
+    ...     observed = (saved["pr_sweep"]["last_feedback_reason"], saved["pr_sweep"]["last_merge_state"], saved["pr_sweep"]["conflict_task_id"])
+    ...     for key, value in original.items():
+    ...         pr_sweep.__globals__[key] = value
+    >>> observed
+    ('drift_sync', 'BEHIND', 'task-drift-sync')
+
+    >>> import json, pathlib, tempfile, types
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     queue_root = root / "queue"
+    ...     for state in STATES:
+    ...         (queue_root / state).mkdir(parents=True, exist_ok=True)
+    ...     wt = root / "wt"
+    ...     wt.mkdir()
+    ...     task = {
+    ...         "task_id": "task-guard",
+    ...         "project": "demo",
+    ...         "pr_number": 9,
+    ...         "summary": "demo",
+    ...         "feature_id": "f1",
+    ...         "worktree": str(wt),
+    ...         "pr_sweep": {"feedback_rounds": 0, "conflict_task_id": "task-existing"},
+    ...     }
+    ...     task_path = queue_root / "done" / "task-guard.json"
+    ...     _ = task_path.write_text(json.dumps(task))
+    ...     _ = (queue_root / "running" / "task-existing.json").write_text("{}")
+    ...     calls = []
+    ...     original = {k: pr_sweep.__globals__[k] for k in ("QUEUE_ROOT", "load_config", "get_project", "_extract_actionable_comments", "_enqueue_pr_feedback", "_write_pr_alert", "now_iso", "subprocess")}
+    ...     class FakeSubprocess:
+    ...         TimeoutExpired = subprocess.TimeoutExpired
+    ...         def run(self, cmd, **kwargs):
+    ...             payload = {"state": "OPEN", "mergeable": "CONFLICTING", "mergeStateStatus": "DIRTY", "reviewDecision": "", "baseRefName": "feature/demo", "url": "https://example/pr/9", "comments": []}
+    ...             return types.SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+    ...     pr_sweep.__globals__["QUEUE_ROOT"] = queue_root
+    ...     pr_sweep.__globals__["load_config"] = lambda: {"projects": [{"name": "demo", "path": str(root)}], "drift_threshold": 5}
+    ...     pr_sweep.__globals__["get_project"] = lambda config, name: config["projects"][0]
+    ...     pr_sweep.__globals__["_extract_actionable_comments"] = lambda info, handled: []
+    ...     pr_sweep.__globals__["_enqueue_pr_feedback"] = lambda *args, **kwargs: calls.append(kwargs) or "task-retry"
+    ...     pr_sweep.__globals__["_write_pr_alert"] = lambda *args, **kwargs: None
+    ...     pr_sweep.__globals__["now_iso"] = lambda: "2026-04-14T12:00:00"
+    ...     pr_sweep.__globals__["subprocess"] = FakeSubprocess()
+    ...     first = pr_sweep()
+    ...     (queue_root / "running" / "task-existing.json").unlink()
+    ...     _ = (queue_root / "done" / "task-existing.json").write_text("{}")
+    ...     second = pr_sweep()
+    ...     saved = json.loads(task_path.read_text())
+    ...     observed = (first[2], second[2], len(calls), saved["pr_sweep"]["conflict_task_id"])
+    ...     for key, value in original.items():
+    ...         pr_sweep.__globals__[key] = value
+    >>> observed
+    (0, 1, 1, 'task-retry')
     """
     if shutil.which("gh") is None:
         print("pr-sweep: gh CLI not installed, nothing to do", file=sys.stderr)
@@ -533,6 +681,17 @@ def pr_sweep(dry_run=False):
         mergeable = info.get("mergeable", "UNKNOWN")
         review_decision = info.get("reviewDecision", "")
         merge_state = info.get("mergeStateStatus", "")
+        dispatch_reason = "conflict"
+
+        drift_threshold = int(config.get("drift_threshold", CONFIG_DEFAULTS["drift_threshold"]))
+        if mergeable == "MERGEABLE":
+            drift_count = _git_drift_ahead_count(
+                task.get("worktree"), base_ref,
+                warn_prefix=f"pr-sweep {task.get('task_id')}",
+            )
+            if drift_count is not None and drift_count >= drift_threshold:
+                merge_state = "BEHIND"
+                dispatch_reason = "drift_sync"
 
         def stamp_sweep(updates):
             def mut(t):
@@ -545,7 +704,7 @@ def pr_sweep(dry_run=False):
         # Case 1: conflicts — rebase needed. Only feature-branch-targeted PRs
         # get an auto-rebase attempt (safe because we own the feature branch).
         # Conflicts on feature->main PRs alert the human directly.
-        if mergeable == "CONFLICTING" or merge_state == "DIRTY":
+        if mergeable == "CONFLICTING" or merge_state in ("DIRTY", "BEHIND"):
             if not base_ref.startswith("feature/"):
                 alert = _write_pr_alert(
                     project_name, task.get("task_id"), pr_number,
@@ -567,16 +726,26 @@ def pr_sweep(dry_run=False):
                     stamp_sweep({"last_mergeable": mergeable, "escalated_conflict": True}))
                 alerted += 1
                 continue
+            guard_task_id = sweep.get("conflict_task_id")
+            if guard_task_id and _task_exists_in_queue(guard_task_id):
+                task = update_task_in_place(task_file, stamp_sweep({
+                    "last_mergeable": mergeable,
+                    "last_merge_state": merge_state,
+                }))
+                continue
             if dry_run:
                 print(f"DRY-RUN pr-sweep {task.get('task_id')}: would enqueue rebase feedback")
                 continue
-            _enqueue_pr_feedback(task, project_name, pr_number, base_ref,
-                                 conflicts=True, comments=actionable)
+            conflict_task_id = _enqueue_pr_feedback(task, project_name, pr_number, base_ref,
+                                                    conflicts=True, comments=actionable)
             task = update_task_in_place(task_file, stamp_sweep({
                 "last_mergeable": mergeable,
+                "last_merge_state": merge_state,
                 "feedback_rounds": rounds + 1,
-                "last_feedback_reason": "conflict",
+                "last_feedback_reason": dispatch_reason,
                 "handled_comment_ids": handled_ids + [c["id"] for c in actionable],
+                "conflict_task_id": conflict_task_id,
+                "conflict_task_dispatched_at": now_iso(),
             }))
             fb_enqueued += 1
             continue
@@ -615,7 +784,7 @@ def pr_sweep(dry_run=False):
                 "last_review_decision": review_decision,
             }))
             continue
-        if merge_state in ("BLOCKED", "UNSTABLE", "BEHIND"):
+        if merge_state in ("BLOCKED", "UNSTABLE"):
             task = update_task_in_place(task_file, stamp_sweep({
                 "last_mergeable": mergeable,
                 "last_merge_state": merge_state,
@@ -674,10 +843,109 @@ def update_task_in_place(task_file, mutator):
     return task
 
 
+def _task_exists_in_queue(task_id, states=("queued", "claimed", "running")):
+    return any(task_path(task_id, state).exists() for state in states)
+
+
+def _run_git_capture(worktree, args, *, timeout=15, warn_prefix="git"):
+    wt = pathlib.Path(worktree) if worktree else None
+    if wt is None or not wt.exists():
+        print(f"{warn_prefix}: git command skipped, worktree missing")
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(wt), *args],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        print(f"{warn_prefix}: git {' '.join(args)} failed: {exc}")
+        return None
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()[:200]
+        print(f"{warn_prefix}: git {' '.join(args)} failed: {err or 'non-zero exit'}")
+        return None
+    return proc.stdout
+
+
+def _git_drift_ahead_count(worktree, base_ref, *, timeout=15, warn_prefix="git-drift"):
+    if _run_git_capture(worktree, ["fetch", "origin", base_ref], timeout=timeout, warn_prefix=warn_prefix) is None:
+        return None
+    count_text = _run_git_capture(
+        worktree,
+        ["rev-list", "--count", f"HEAD..origin/{base_ref}"],
+        timeout=timeout,
+        warn_prefix=warn_prefix,
+    )
+    if count_text is None:
+        return None
+    try:
+        return int((count_text or "0").strip())
+    except ValueError:
+        print(f"{warn_prefix}: git rev-list returned non-integer drift count: {(count_text or '').strip()[:40]}")
+        return None
+
+
+def _trim_conflict_preview(preview, budget=4000):
+    while len(json.dumps(preview, sort_keys=True)) > budget and (preview.get("our_commits") or preview.get("their_commits")):
+        for key in ("our_commits", "their_commits"):
+            text = preview.get(key) or ""
+            if not text:
+                continue
+            if len(text) <= 64:
+                preview[key] = ""
+            else:
+                cut = max(32, len(text) - max(128, len(json.dumps(preview, sort_keys=True)) - budget))
+                preview[key] = text[:cut].rstrip() + "\n...[truncated]"
+            if len(json.dumps(preview, sort_keys=True)) <= budget:
+                break
+    while len(json.dumps(preview, sort_keys=True)) > budget and preview.get("likely_conflict_files"):
+        preview["likely_conflict_files"] = preview["likely_conflict_files"][:-1]
+    return preview
+
+
+def _build_conflict_preview(worktree, base_branch):
+    ref = f"origin/{base_branch}"
+    our_commits = _run_git_capture(
+        worktree, ["log", "-n", "50", "--oneline", "--stat", f"{ref}..HEAD"], warn_prefix="pr-feedback preview",
+    )
+    their_commits = _run_git_capture(
+        worktree, ["log", "-n", "50", "--oneline", "--stat", f"HEAD..{ref}"], warn_prefix="pr-feedback preview",
+    )
+    ours_files = _run_git_capture(
+        worktree, ["diff", "--name-only", f"{ref}...HEAD"], warn_prefix="pr-feedback preview",
+    )
+    theirs_files = _run_git_capture(
+        worktree, ["diff", "--name-only", f"HEAD...{ref}"], warn_prefix="pr-feedback preview",
+    )
+    preview = {
+        "our_commits": (our_commits or "").strip(),
+        "their_commits": (their_commits or "").strip(),
+        "likely_conflict_files": sorted(set(filter(None, (ours_files or "").splitlines())) & set(filter(None, (theirs_files or "").splitlines()))),
+    }
+    if not any((preview["our_commits"], preview["their_commits"], preview["likely_conflict_files"])):
+        return None
+    return _trim_conflict_preview(preview)
+
+
 def _enqueue_pr_feedback(target, project_name, pr_number, base_branch, *, conflicts, comments):
-    """Create a codex pr-feedback task bound to target's feature_id."""
+    """Create a codex pr-feedback task bound to target's feature_id.
+
+    >>> captured = {}
+    >>> original = {k: _enqueue_pr_feedback.__globals__[k] for k in ("new_task", "enqueue_task", "_build_conflict_preview")}
+    >>> _enqueue_pr_feedback.__globals__["new_task"] = lambda **kwargs: captured.setdefault("task", {"task_id": "task-preview", **kwargs}) or captured["task"]
+    >>> _enqueue_pr_feedback.__globals__["enqueue_task"] = lambda task: captured.setdefault("enqueued", task["task_id"])
+    >>> _enqueue_pr_feedback.__globals__["_build_conflict_preview"] = lambda worktree, base: {"our_commits": "a", "their_commits": "b", "likely_conflict_files": ["conflict.py"]}
+    >>> target = {"task_id": "task-target", "feature_id": "f1", "worktree": "/tmp/demo"}
+    >>> _enqueue_pr_feedback(target, "demo", 42, "feature/demo", conflicts=True, comments=[])
+    'task-preview'
+    >>> captured["task"]["engine_args"]["conflict_preview"]["likely_conflict_files"]
+    ['conflict.py']
+    >>> for key, value in original.items():
+    ...     _enqueue_pr_feedback.__globals__[key] = value
+    """
     target_id = target.get("task_id")
     summary_prefix = "Rebase and address feedback" if conflicts else "Address feedback"
+    conflict_preview = _build_conflict_preview(target.get("worktree"), base_branch) if conflicts else None
     summary = (
         f"{summary_prefix} on pr #{pr_number} for {target_id}"
     )[:240]
@@ -696,6 +964,7 @@ def _enqueue_pr_feedback(target, project_name, pr_number, base_branch, *, confli
             "pr_number": pr_number,
             "base_branch": base_branch,
             "conflicts": conflicts,
+            "conflict_preview": conflict_preview,
             "comments": comments,
         },
     )
