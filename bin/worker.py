@@ -270,6 +270,35 @@ def make_worktree(project_path, task_id, base_branch="main"):
     wt_root.mkdir(parents=True, exist_ok=True)
     wt_path = wt_root / task_id
     branch = f"agent/{task_id}"
+    # A previous `git worktree add` can fail after creating the branch/worktree
+    # registration, leaving a clean but unusable skeleton behind. Clean that up
+    # before retrying so the task can resume without manual branch surgery.
+    existing = subprocess.run(
+        ["git", "-C", project_path, "worktree", "list", "--porcelain"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    if f"worktree {wt_path}\n" in existing.stdout:
+        subprocess.run(
+            ["git", "-C", project_path, "worktree", "remove", "--force", str(wt_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    branch_probe = subprocess.run(
+        ["git", "-C", project_path, "rev-parse", "--verify", "--quiet", branch],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if branch_probe.returncode == 0:
+        subprocess.run(
+            ["git", "-C", project_path, "branch", "-D", branch],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
     subprocess.run(
         ["git", "worktree", "add", str(wt_path), "-b", branch, base_branch],
         cwd=project_path,
