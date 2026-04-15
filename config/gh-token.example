@@ -1,0 +1,3 @@
+# Copy to gh-token (chmod 600) and replace the placeholder below with a real
+# GitHub PAT on a single line. The real gh-token file is gitignored.
+ghp_REPLACE_WITH_YOUR_PAT

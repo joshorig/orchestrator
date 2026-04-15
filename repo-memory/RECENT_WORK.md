@@ -4,6 +4,22 @@ _Append-only log. New entries go at the top. One entry per completed task or mil
 
 ---
 
+## 2026-04-15 — Durable gh token loading + BRAID refine loop + unresolved-review workflow on lvc main
+
+**Summary:** Standardized GitHub CLI auth on a file-backed `config/gh-token`
+path loaded by the orchestrator Python entrypoints, added `bin/gh_env.sh` plus
+`config/gh-token.example` for interactive/bootstrap use, and documented the
+shared PAT flow in `README.md` and `DECISIONS.md`. In parallel, `bin/worker.py`
+and `bin/orchestrator.py` now support a one-round `BRAID_REFINE: <node-id>:
+<missing-edge-condition>` loop that blocks the original codex task, asks claude
+for a minimal full-template rewrite, lint-writes the refreshed `.mmd`, and
+re-queues the blocked task once the template hash changes. Also copied
+`.github/workflows/unresolved-bot-review.yml` onto `lvc-standard/main`; the
+remaining step there is manual required-check wiring in GitHub branch
+protection.
+
+---
+
 ## 2026-04-14 — post-canary fixes: pre-review auto-commit + review-feedback loop + depends_on + feature auto-abandon
 
 **Summary:** Closed the four post-canary gaps without touching `feature-20260414-045850-b7d47e` or its failed task files. `bin/worker.py` now auto-commits codex output before `awaiting-review`, reviewer `request_change` verdicts loop through a new `review-address-feedback` codex slice on the existing worktree instead of dead-ending, planner-emitted sibling ordering now flows through `depends_on` and is enforced by `atomic_claim`, and `feature_finalize` now abandons features whose children all ended in `failed/` or `abandoned/` with no retry left in flight.

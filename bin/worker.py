@@ -1029,6 +1029,8 @@ def run_claude_slot(task, cfg):
 
     if is_template_gen:
         return run_claude_template_gen(task, cfg, bt, timeout, log_path)
+    if mode == "template-refine":
+        return run_claude_template_refine(task, cfg, bt, timeout, log_path)
     if mode == "memory-synthesis":
         return run_claude_memory_synthesis(task, cfg, timeout, log_path)
     if task.get("role") == "reviewer":
@@ -1254,6 +1256,120 @@ def run_claude_template_gen(task, cfg, task_type, timeout, log_path):
         t["artifacts"] = t.get("artifacts", []) + [f"braid/templates/{task_type}.mmd"]
         t["finished_at"] = o.now_iso()
     o.move_task(task_id, "running", "done", reason="template written", mutator=mut)
+
+
+def run_claude_template_refine(task, cfg, task_type, timeout, log_path):
+    task_id = task["task_id"]
+    if not task_type:
+        o.move_task(task_id, "claimed", "failed", reason="template-refine missing braid_template")
+        return
+
+    refine = (task.get("engine_args") or {}).get("refine_request") or {}
+    node_id = (refine.get("node_id") or "").strip()
+    condition = (refine.get("condition") or "").strip()
+    base_hash = (refine.get("template_hash") or "").strip()
+    if not node_id or not condition or not base_hash:
+        o.move_task(task_id, "claimed", "failed", reason="template-refine missing refine_request")
+        return
+
+    graph_body, graph_hash = o.braid_template_load(task_type)
+    if graph_body is None:
+        o.move_task(task_id, "claimed", "failed", reason=f"template-refine missing {task_type}")
+        return
+    if graph_hash != base_hash:
+        def mut_stale(t):
+            t["finished_at"] = o.now_iso()
+            t["artifacts"] = t.get("artifacts", []) + [f"braid/templates/{task_type}.mmd"]
+        o.move_task(task_id, "claimed", "done", reason="template already changed", mutator=mut_stale)
+        return
+
+    gen_prompt_path = o.BRAID_GENERATORS / f"{task_type}.prompt.md"
+    if not gen_prompt_path.exists():
+        o.move_task(task_id, "claimed", "failed", reason=f"no generator prompt for {task_type}")
+        return
+
+    project_name = task.get("project")
+    memory_ctx = ""
+    if project_name and project_name != "manual":
+        try:
+            project = o.get_project(cfg, project_name)
+            memory_ctx = read_memory_context(project["path"])
+        except KeyError:
+            memory_ctx = "(unknown project)"
+
+    user_prompt = (
+        f"TASK TYPE: {task_type}\n\n"
+        f"PROJECT MEMORY:\n{memory_ctx}\n\n"
+        "Current Mermaid template:\n"
+        f"```mermaid\n{graph_body}\n```\n\n"
+        "Refinement request:\n"
+        f"- node_id: {node_id}\n"
+        f"- missing_edge_condition: {condition}\n\n"
+        "Return ONLY the full replacement Mermaid flowchart. "
+        "Make the smallest valid change that adds the missing traversal or gate around the named node. "
+        "Preserve unrelated nodes, edges, and names unless the template is invalid without a small rename."
+    )
+
+    gen_system = gen_prompt_path.read_text()
+    cmd = [
+        "claude",
+        "-p", user_prompt,
+        "--dangerously-skip-permissions",
+        "--system-prompt", gen_system,
+        "--output-format", "text",
+        "--model", "opus",
+        "--max-budget-usd", "1.00",
+        "--no-session-persistence",
+    ]
+
+    def mut_running(t):
+        t["started_at"] = o.now_iso()
+        t["log_path"] = str(log_path)
+        t["braid_template_hash"] = graph_hash
+    o.move_task(task_id, "claimed", "running", reason="claude template-refine", mutator=mut_running)
+
+    with log_path.open("w") as logf:
+        logf.write(f"# claude template-refine task={task_id} task_type={task_type}\n")
+        logf.write(f"# base_hash: {graph_hash}\n")
+        logf.write(f"# refine node: {node_id}\n")
+        logf.write(f"# refine condition: {condition}\n\n")
+        try:
+            proc = subprocess.run(
+                cmd, stdout=subprocess.PIPE, stderr=logf, text=True, timeout=timeout,
+                cwd="/tmp",
+            )
+        except subprocess.TimeoutExpired:
+            o.move_task(task_id, "running", "failed", reason=f"claude timeout {timeout}s")
+            return
+        logf.write(f"\n# exit: {proc.returncode}\n# stdout:\n{proc.stdout or ''}\n")
+
+    if proc.returncode != 0:
+        o.move_task(task_id, "running", "failed", reason=f"claude exit {proc.returncode}")
+        return
+
+    candidate = extract_mermaid(proc.stdout or "")
+    if not candidate:
+        o.move_task(task_id, "running", "failed", reason="no mermaid block in refine output")
+        return
+
+    _, latest_hash = o.braid_template_load(task_type)
+    if latest_hash != base_hash:
+        def mut_stale(t):
+            t["finished_at"] = o.now_iso()
+            t["artifacts"] = t.get("artifacts", []) + [f"braid/templates/{task_type}.mmd"]
+        o.move_task(task_id, "running", "done", reason="template already changed", mutator=mut_stale)
+        return
+
+    try:
+        o.braid_template_write(task_type, candidate, generator_model="claude-opus-refine")
+    except ValueError as exc:
+        o.move_task(task_id, "running", "failed", reason=str(exc)[:200])
+        return
+
+    def mut_done(t):
+        t["artifacts"] = t.get("artifacts", []) + [f"braid/templates/{task_type}.mmd"]
+        t["finished_at"] = o.now_iso()
+    o.move_task(task_id, "running", "done", reason="template refined", mutator=mut_done)
 
 
 # Post-validation on planner-emitted slices. The prompt already tells claude
@@ -1542,6 +1658,122 @@ def topology_reason_is_valid(trailer):
     if not rest:
         return False
     return any(code in rest for code in VALID_TOPOLOGY_REASONS)
+
+
+_BRAID_REFINE_NODE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+
+
+def parse_braid_refine(trailer):
+    """Parse `BRAID_REFINE: <node-id>: <missing-edge-condition>`.
+
+    >>> parse_braid_refine("BRAID_REFINE: CheckBaseline: add baseline_red edge to End")
+    {'node_id': 'CheckBaseline', 'condition': 'add baseline_red edge to End'}
+    >>> parse_braid_refine("BRAID_REFINE: bad-node: something") is None
+    True
+    >>> parse_braid_refine("BRAID_REFINE: CheckBaseline") is None
+    True
+    """
+    prefix = "BRAID_REFINE:"
+    if not trailer.startswith(prefix):
+        return None
+    rest = trailer[len(prefix):].strip()
+    node_id, sep, condition = rest.partition(":")
+    node_id = node_id.strip()
+    condition = condition.strip()
+    if not sep or not _BRAID_REFINE_NODE_RE.fullmatch(node_id):
+        return None
+    if not condition or len(condition) > 240:
+        return None
+    if any(ch in condition for ch in "\r\n`"):
+        return None
+    return {"node_id": node_id, "condition": condition}
+
+
+def _find_braid_trailer(lines):
+    for line in reversed(lines[-20:]):
+        if line.startswith("BRAID_OK") or line.startswith("BRAID_TOPOLOGY_ERROR") or line.startswith("BRAID_REFINE"):
+            return line
+    return ""
+
+
+def enqueue_braid_refine(task, project_name, trailer, *, from_state):
+    refine = parse_braid_refine(trailer)
+    if not refine:
+        def mut_fail(t):
+            t["finished_at"] = o.now_iso()
+            t["false_blocker_claim"] = trailer
+        o.move_task(
+            task["task_id"],
+            from_state,
+            "failed",
+            reason=f"invalid BRAID_REFINE: {trailer[:80]}",
+            mutator=mut_fail,
+        )
+        return
+
+    bt = task.get("braid_template")
+    template_hash = task.get("braid_template_hash")
+    if not bt or not template_hash:
+        def mut_fail(t):
+            t["finished_at"] = o.now_iso()
+            t["false_blocker_claim"] = trailer
+        o.move_task(
+            task["task_id"],
+            from_state,
+            "failed",
+            reason="BRAID_REFINE without active template context",
+            mutator=mut_fail,
+        )
+        return
+
+    rounds = int(task.get("refine_round", 0))
+    if rounds >= 1:
+        o.braid_template_record_use(bt, topology_error=True)
+        regen = o.new_task(
+            role="planner",
+            engine="claude",
+            project=project_name,
+            summary=f"Generate BRAID template for {bt}",
+            source=f"regen-for:{task['task_id']}",
+            braid_template=bt,
+            engine_args={"mode": "template-gen"},
+        )
+        o.enqueue_task(regen)
+
+        def mut_block(t):
+            t["finished_at"] = o.now_iso()
+            t["topology_error"] = f"BRAID_TOPOLOGY_ERROR: refine_rounds_exhausted after {trailer}"
+        o.move_task(task["task_id"], from_state, "blocked", reason="refine exhausted -> regen", mutator=mut_block)
+        return
+
+    refine_task = o.new_task(
+        role="planner",
+        engine="claude",
+        project=project_name,
+        summary=f"Refine BRAID template for {bt} around {refine['node_id']}",
+        source=f"refine-for:{task['task_id']}",
+        braid_template=bt,
+        engine_args={
+            "mode": "template-refine",
+            "refine_request": {
+                **refine,
+                "template_hash": template_hash,
+                "origin_task_id": task["task_id"],
+            },
+        },
+    )
+    o.enqueue_task(refine_task)
+
+    def mut_block(t):
+        t["finished_at"] = o.now_iso()
+        t["topology_error"] = trailer
+        t["refine_round"] = rounds + 1
+        t["refine_request"] = {
+            **refine,
+            "template_hash": template_hash,
+            "refine_task_id": refine_task["task_id"],
+        }
+    o.move_task(task["task_id"], from_state, "blocked", reason=trailer[:80], mutator=mut_block)
 
 
 def run_claude_planner(task, cfg, timeout, log_path):
@@ -1975,7 +2207,9 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
             diff_text = diff_text[:30000] + "\n\n[...diff truncated at 30k chars...]\n"
         prompt = (
             "[BRAID REASONING GRAPH — traverse deterministically. If you cannot, "
-            "emit exactly one line `BRAID_TOPOLOGY_ERROR: <reason>` as the final line and stop.]\n\n"
+            "emit exactly one line `BRAID_TOPOLOGY_ERROR: <reason>` as the final line and stop. "
+            "If traversal is locally underspecified but salvageable, emit "
+            "`BRAID_REFINE: <node-id>: <missing-edge-condition>` as the final line and stop.]\n\n"
             f"{graph_body}\n\n"
             "[END BRAID GRAPH]\n\n"
             f"[TARGET TASK]\n{target_id}\n\n"
@@ -1985,6 +2219,7 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
             "[OUTPUT CONTRACT]\n"
             "Emit exactly one of these as the final line of your response:\n"
             "  BRAID_OK: <one-line summary of what you changed>\n"
+            "  BRAID_REFINE: <node-id>: <missing-edge-condition>\n"
             "  BRAID_TOPOLOGY_ERROR: <reason the graph could not be traversed>\n"
         )
 
@@ -2029,10 +2264,11 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
         trailer = ""
         if last_msg_path.exists():
             lines = [l.strip() for l in last_msg_path.read_text().splitlines() if l.strip()]
-            for line in reversed(lines[-20:]):
-                if line.startswith("BRAID_OK") or line.startswith("BRAID_TOPOLOGY_ERROR"):
-                    trailer = line
-                    break
+            trailer = _find_braid_trailer(lines)
+
+        if trailer.startswith("BRAID_REFINE"):
+            enqueue_braid_refine(task, project["name"], trailer, from_state="running")
+            return
 
         if trailer.startswith("BRAID_TOPOLOGY_ERROR"):
             o.braid_template_record_use(bt, topology_error=True)
@@ -2174,7 +2410,9 @@ def build_pr_feedback_prompt(*, target, graph_body, base_branch, conflicts, comm
 
     return (
         "[BRAID REASONING GRAPH — traverse deterministically. If you cannot, "
-        "emit exactly one line `BRAID_TOPOLOGY_ERROR: <reason>` as the final line and stop.]\n\n"
+        "emit exactly one line `BRAID_TOPOLOGY_ERROR: <reason>` as the final line and stop. "
+        "If traversal is locally underspecified but salvageable, emit "
+        "`BRAID_REFINE: <node-id>: <missing-edge-condition>` as the final line and stop.]\n\n"
         f"{graph_body}\n\n"
         "[END BRAID GRAPH]\n\n"
         f"[PR FEEDBACK CONTEXT]\n{header}\n\n"
@@ -2195,6 +2433,7 @@ def build_pr_feedback_prompt(*, target, graph_body, base_branch, conflicts, comm
         "[OUTPUT CONTRACT]\n"
         "Emit exactly one of these as the final line of your response:\n"
         "  BRAID_OK: <one-line summary of what you did>\n"
+        "  BRAID_REFINE: <node-id>: <missing-edge-condition>\n"
         "  BRAID_TOPOLOGY_ERROR: <reason the graph could not be traversed>\n"
     )
 
@@ -2222,7 +2461,9 @@ def build_feature_pr_feedback_prompt(*, task, graph_body, comments, pr_number, c
     checks_text = "\n\n".join(check_blocks) or "(no failed checks captured)"
     return (
         "[BRAID REASONING GRAPH — traverse deterministically. If you cannot, "
-        "emit exactly one line `BRAID_TOPOLOGY_ERROR: <reason>` as the final line and stop.]\n\n"
+        "emit exactly one line `BRAID_TOPOLOGY_ERROR: <reason>` as the final line and stop. "
+        "If traversal is locally underspecified but salvageable, emit "
+        "`BRAID_REFINE: <node-id>: <missing-edge-condition>` as the final line and stop.]\n\n"
         f"{graph_body}\n\n"
         "[END BRAID GRAPH]\n\n"
         f"[FEATURE PR FEEDBACK CONTEXT]\n"
@@ -2245,6 +2486,7 @@ def build_feature_pr_feedback_prompt(*, task, graph_body, comments, pr_number, c
         "[OUTPUT CONTRACT]\n"
         "Emit exactly one of these as the final line of your response:\n"
         "  BRAID_OK: <one-line summary of what you did>\n"
+        "  BRAID_REFINE: <node-id>: <missing-edge-condition>\n"
         "  BRAID_TOPOLOGY_ERROR: <reason the graph could not be traversed>\n"
     )
 
@@ -2373,10 +2615,11 @@ def run_pr_feedback_task(task, cfg):
         trailer = ""
         if last_msg_path.exists():
             lines = [l.strip() for l in last_msg_path.read_text().splitlines() if l.strip()]
-            for line in reversed(lines[-20:]):
-                if line.startswith("BRAID_OK") or line.startswith("BRAID_TOPOLOGY_ERROR"):
-                    trailer = line
-                    break
+            trailer = _find_braid_trailer(lines)
+
+        if trailer.startswith("BRAID_REFINE"):
+            enqueue_braid_refine(task, project["name"], trailer, from_state="running")
+            return
 
         if trailer.startswith("BRAID_TOPOLOGY_ERROR"):
             if not topology_reason_is_valid(trailer):
@@ -2672,15 +2915,16 @@ def run_codex_slot(task, cfg):
         if last_msg_path.exists():
             lines = [l.strip() for l in last_msg_path.read_text().splitlines() if l.strip()]
             # Paper's guidance: scan the last few non-empty lines.
-            for line in reversed(lines[-20:]):
-                if line.startswith("BRAID_OK") or line.startswith("BRAID_TOPOLOGY_ERROR"):
-                    trailer = line
-                    break
+            trailer = _find_braid_trailer(lines)
 
         if proc.returncode != 0 and not trailer:
             def mut_fail(t):
                 t["finished_at"] = o.now_iso()
             o.move_task(task_id, "running", "failed", reason=f"codex exit {proc.returncode}", mutator=mut_fail)
+            return
+
+        if trailer.startswith("BRAID_REFINE"):
+            enqueue_braid_refine(task, project["name"], trailer, from_state="running")
             return
 
         if trailer.startswith("BRAID_TOPOLOGY_ERROR"):
@@ -2758,7 +3002,9 @@ def run_codex_slot(task, cfg):
 def build_codex_prompt(task, graph_body, memory_ctx):
     return (
         "[BRAID REASONING GRAPH — traverse deterministically. If you cannot, "
-        "emit exactly one line `BRAID_TOPOLOGY_ERROR: <reason>` as the final line and stop.]\n\n"
+        "emit exactly one line `BRAID_TOPOLOGY_ERROR: <reason>` as the final line and stop. "
+        "If traversal is locally underspecified but salvageable, emit "
+        "`BRAID_REFINE: <node-id>: <missing-edge-condition>` as the final line and stop.]\n\n"
         f"{graph_body}\n\n"
         "[END BRAID GRAPH]\n\n"
         "[TASK]\n"
@@ -2774,6 +3020,7 @@ def build_codex_prompt(task, graph_body, memory_ctx):
         "[OUTPUT CONTRACT]\n"
         "Emit exactly one of these as the final line of your response:\n"
         "  BRAID_OK: <one-line summary of what you did>\n"
+        "  BRAID_REFINE: <node-id>: <missing-edge-condition>\n"
         "  BRAID_TOPOLOGY_ERROR: <reason the graph could not be traversed>\n"
     )
 

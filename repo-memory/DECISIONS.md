@@ -11,6 +11,13 @@ _Architectural decisions with enough context that a future agent can tell whethe
 
 ---
 
+## 2026-04-15 — BRAID refine uses a bounded full-template rewrite, not in-place graph patching
+**Context:** `R-012` needed a way for codex solvers to request targeted topology repair mid-task without dropping straight into the heavyweight `BRAID_TOPOLOGY_ERROR -> full regen` loop. The original roadmap wording suggested patching the existing Mermaid file in place, but the repo already had a reliable generator + lint + atomic write path and no patch-format contract for Mermaid graphs.
+
+**Decision:** Add a new codex trailer contract `BRAID_REFINE: <node-id>: <missing-edge-condition>` on implementer / review-feedback / pr-feedback passes. A `BRAID_REFINE` trailer blocks the current task, enqueues a claude `template-refine` task carrying the current template hash and refine request, asks claude for a minimal full replacement Mermaid graph, then lint-writes that full body through `braid_template_write()`. The reaper re-queues the blocked original task once it detects the template hash changed. The first version is intentionally bounded to one refine round per task; a second refine request falls back to the existing full regeneration path.
+
+**Consequences:** This reuses the existing template validation and atomic-write machinery and avoids introducing a Mermaid patch DSL. It also means `R-012` is only a partial realization of the BRAID paper’s dynamic replanning idea: it is hash-based, one-round, and text-template-driven rather than a richer architect loop.
+
 ## 2026-04-13 — Feature-branch delivery model + 6-slot codex fleet
 
 **Context:** Pattern C shipped tiny PRs one task at a time. Planner bundles logically-related tasks into a feature. Execution fanout was 1 codex slot.
@@ -161,3 +168,25 @@ Config: `"auto_push": false` explicitly set on all three projects (`lvc-standard
 **Decision:** Replaced the stub with a real `python-telegram-bot` long-polling process at `bin/telegram_bot.py`. Never a webhook. Allowlist-gated at the chat-id level. Unknown commands return help, never execute shell.
 
 **Consequences:** Mobile control is instant and ergonomic. Rules out any path from Telegram to arbitrary shell — the handler dispatch table is the only entry point. The legacy file-stub poller plist (`com.devmini.orchestrator.telegram.plist`) is removed.
+
+---
+
+## 2026-04-15 — Orchestrator gh auth reads a file-backed GH_TOKEN
+
+**Context:** The autonomous runtime was relying on a `gho_*` keychain-backed
+OAuth token that behaved differently under launchd and interactive shells.
+That path was fragile against token expiry, reboot/session drift, and operator
+recovery.
+
+**Decision:** Standardize on `config/gh-token` as the durable token source.
+`bin/orchestrator.py` loads `GH_TOKEN` from that file at process start when the
+environment does not already provide it; `bin/gh_env.sh` exposes the same file
+for interactive shells and optional `launchctl setenv GH_TOKEN ...` bootstrap.
+
+**Consequences:**
+- `gh` calls from orchestrator/worker/telegram entrypoints no longer depend on
+  the opaque macOS keychain state.
+- The rebuild path is explicit: repopulate `config/gh-token`, `chmod 600`, and
+  optionally `launchctl setenv GH_TOKEN "$GH_TOKEN"`.
+- PAT lifecycle management is now an operator concern, but the credential
+  source is visible, documented, and shared across launchd and shell usage.

@@ -153,6 +153,8 @@ config/
   orchestrator.json         # slots, projects, timeouts (tracked)
   telegram.example.json     # template for operators to copy (tracked)
   telegram.json             # real bot token + allowed chat ids (gitignored, chmod 600)
+  gh-token.example          # template for GitHub PAT file (tracked)
+  gh-token                  # real GitHub token, single-line, gitignored, chmod 600
   claude.env                # claude credentials (gitignored, chmod 600)
 roles/                      # role-specific prompt fragments per slot
 repo-memory/                # this repo's own engineering memory
@@ -215,6 +217,35 @@ for p in ~/Library/LaunchAgents/com.devmini.orchestrator.*.plist; do
   launchctl load "$p"
 done
 launchctl list | grep devmini
+```
+
+### Durable gh auth
+
+The orchestrator now loads `GH_TOKEN` from `config/gh-token` automatically in
+its Python entrypoints before any `gh` invocation. Use a classic PAT or a
+fine-grained PAT with the repository scopes your workflows need.
+
+Setup:
+
+```bash
+cp config/gh-token.example config/gh-token
+chmod 600 config/gh-token
+$EDITOR config/gh-token
+```
+
+Interactive shell:
+
+```bash
+source bin/gh_env.sh
+gh auth status
+```
+
+Optional launchd-wide export for tools that do not go through the orchestrator
+Python entrypoints:
+
+```bash
+source bin/gh_env.sh
+launchctl setenv GH_TOKEN "$GH_TOKEN"
 ```
 
 ## Mobile control (Telegram)

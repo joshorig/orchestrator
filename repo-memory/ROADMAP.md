@@ -109,14 +109,14 @@ _Append-only. Top-to-bottom is priority order. Status mutates in place; entries 
 - **Notes:** The 6-slot fleet was provisioned in plan pass-1 §3 but intentionally held back pending first successful vertical slice. This entry is the gate.
 
 ### [R-012] Dynamic mid-task refinement — `BRAID_REFINE` contract
-- **Status:** TODO
+- **Status:** DONE
 - **Feature id:** null
 - **Goal:** Codex solvers can signal "graph insufficient, request a targeted refinement" mid-task and receive a patched template without aborting — replacing the current all-or-nothing `BRAID_TOPOLOGY_ERROR → full regen` loop.
-- **Scope:** New solver output contract `BRAID_REFINE: <node-id>: <missing-edge-condition>`; partial-template-edit path (apply a diff to the existing `.mmd`, not a full regen); lint gate on the patch; re-dispatch the original task with the refreshed template as system context.
+- **Scope:** New solver output contract `BRAID_REFINE: <node-id>: <missing-edge-condition>`; targeted template-refine path that asks claude for a minimal full replacement `.mmd` keyed to the current template hash; lint gate on the rewritten template; re-dispatch the original task with the refreshed template as system context.
 - **Out of scope:** Full BRAID paper §7 Architect-model fine-tune, multi-round refinement in a single task, visual graph ingestion (R-013).
 - **Acceptance:** Synthetic drill where a solver hits a missing-condition edge mid-traversal emits a `BRAID_REFINE` trailer; within one claude round-trip the patched template is linted, written, and the original task is re-dispatched and completes with `BRAID_OK`.
 - **Depends on:** [R-006], [R-007].
-- **Notes:** BRAID paper §7 "dynamic re-planning" future work, partially addressed here without requiring a new model.
+- **Notes:** Implemented in `bin/worker.py` / `bin/orchestrator.py` as a bounded one-round refine loop. The current version intentionally rewrites the full Mermaid body through `braid_template_write()` instead of applying an in-place graph patch.
 
 ### [R-013] Visual graph ingestion (BRAID paper §7)
 - **Status:** TODO
@@ -129,24 +129,24 @@ _Append-only. Top-to-bottom is priority order. Status mutates in place; entries 
 - **Notes:** BRAID paper §7 explicit future-work item. Value hinges on downstream model support — not all codex variants accept image prompts.
 
 ### [R-015] Durable gh auth — replace keychain OAuth token with long-lived PAT
-- **Status:** TODO
+- **Status:** IN_PROGRESS
 - **Feature id:** null
 - **Goal:** The orchestrator's gh auth must survive token expiry without requiring an interactive `gh auth login` on the autonomous dev box.
 - **Scope:** Audit the current auth path — launchd-spawned `gh` reads a `gho_*` OAuth token from the macOS Login Keychain (service `gh:github.com`, account `joshorig`, scopes `admin:public_key, gist, read:org, repo`, created 2026-04-11) and succeeds, while the interactive shell gets `(default) invalid` on the same binary and same `$HOME`. The divergence is undiagnosed (best theory: keychain partition-list or Mach session inheritance that launchd has but interactive zsh doesn't) and fragile against rotation or reboot. Replace with a durable token path: classic PAT (no expiry) or fine-grained PAT (max 1y) written to `config/gh-token` (chmod 600, gitignored), exported via `launchctl setenv GH_TOKEN` so both launchd and interactive shell read the same credential, with a load step in the orchestrator launchd bootstrap and a documented rebuild path in `DECISIONS.md`.
 - **Out of scope:** GitHub App installation token minting (defer until PAT is insufficient), automatic token rotation, per-workflow scoping.
 - **Acceptance:** `gh auth status` succeeds from both `launchctl kickstart pr-sweep` and the interactive shell reading the same source; no production path depends on the opaque keychain entry; the token source is visible in `config/` and documented so a reboot or user migration can rebuild it in one step.
 - **Depends on:** none.
-- **Notes:** Raised by the user during PR #14 self-heal investigation ("on an autonomous dev box we can't rely on token expiry gh login"). The current keychain path works today — this is risk reduction, not a live outage fix. Diagnosis captured in `RECENT_WORK.md` and referenced by [R-014] as the auth substrate both pr-sweep paths depend on.
+- **Notes:** Raised by the user during PR #14 self-heal investigation ("on an autonomous dev box we can't rely on token expiry gh login"). The current keychain path works today — this is risk reduction, not a live outage fix. Diagnosis captured in `RECENT_WORK.md` and referenced by [R-014] as the auth substrate both pr-sweep paths depend on. Code/docs landed: `config/gh-token.example`, `bin/gh_env.sh`, orchestrator-side `GH_TOKEN` file loading, and README/DECISIONS updates. Remaining step is operational: provision the real token file and export it into launchd.
 
 ### [R-016] Cherry-pick `unresolved-bot-review.yml` GH workflow to lvc-standard main
-- **Status:** TODO
+- **Status:** IN_PROGRESS
 - **Feature id:** null
 - **Goal:** The GH-side merge backstop `.github/workflows/unresolved-bot-review.yml` (lvc-standard commit `2a187bf`, currently only on a feature branch) must exist on `main` so feature→main PRs are gated on unresolved allowlisted-bot review threads even if the orchestrator's Case 2.5 path regresses.
 - **Scope:** Cherry-pick the single workflow file to lvc-standard `main` as its own commit; add job name `unresolved-review-threads` to the required status check list in repo Settings → Branches for `main` and `feature/*`; verify with a dry-run feature→main PR containing a deliberately unresolved allowlisted-bot thread.
 - **Out of scope:** Widening the allowlist beyond `chatgpt-codex-connector`, paginating past 100 review threads, flipping the workflow from blocking to advisory, adding the workflow to dag-framework or trade-research-platform.
 - **Acceptance:** A feature→main PR with an unresolved allowlisted-bot thread fails the `unresolved-review-threads` check; resolving the thread (manually or via Case 2.5 self-heal) flips it green; the orchestrator's Case 2.5 path continues as the primary self-heal with this workflow as the backstop.
 - **Depends on:** none.
-- **Notes:** Held out of the 211e153 push on explicit user instruction. Effective only after the required-check wiring in repo settings lands.
+- **Notes:** The workflow file is now present on local `lvc-standard/main`; the remaining step is to commit/push it there and wire `unresolved-review-threads` as a required check in GitHub branch protection.
 
 ## Completed
 

@@ -1,5 +1,6 @@
 # Secrets — never commit
 config/telegram.json
+config/gh-token
 config/*.env
 
 # Live BRAID stats — mutates per task claim, regenerable from logs

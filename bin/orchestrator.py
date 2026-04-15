@@ -35,6 +35,7 @@ import uuid
 DEV_ROOT = pathlib.Path(os.environ.get("DEV_ROOT", "/Volumes/devssd"))
 STATE_ROOT = DEV_ROOT / "orchestrator"
 CONFIG_PATH = STATE_ROOT / "config" / "orchestrator.json"
+GH_TOKEN_PATH = STATE_ROOT / "config" / "gh-token"
 QUEUE_ROOT = STATE_ROOT / "queue"
 AGENT_STATE_DIR = STATE_ROOT / "state" / "agents"
 RUNTIME_DIR = STATE_ROOT / "state" / "runtime"
@@ -105,6 +106,24 @@ class LintError:
 
 def now_iso():
     return dt.datetime.now().isoformat(timespec="seconds")
+
+
+def load_gh_token_env():
+    """Load GH_TOKEN from config/gh-token if the process environment lacks it."""
+    token = os.environ.get("GH_TOKEN", "").strip()
+    if token:
+        return True
+    try:
+        token = GH_TOKEN_PATH.read_text().splitlines()[0].strip()
+    except (OSError, IndexError):
+        return False
+    if not token:
+        return False
+    os.environ["GH_TOKEN"] = token
+    return True
+
+
+load_gh_token_env()
 
 
 def load_config():
@@ -703,6 +722,25 @@ def reap():
                     mutator=lambda t: t.update(
                         braid_template_hash=None,
                         topology_error=None,
+                    ),
+                )
+                reaped += 1
+                continue
+        refine = task.get("refine_request") or {}
+        tmpl = task.get("braid_template")
+        old_hash = refine.get("template_hash")
+        if tmpl and old_hash:
+            _, current_hash = braid_template_load(tmpl)
+            if current_hash and current_hash != old_hash:
+                move_task(
+                    task["task_id"],
+                    "blocked",
+                    "queued",
+                    reason="reaper: template refined",
+                    mutator=lambda t: t.update(
+                        braid_template_hash=None,
+                        topology_error=None,
+                        refine_request=None,
                     ),
                 )
                 reaped += 1
@@ -1501,6 +1539,59 @@ def pr_sweep(dry_run=False):
     ...     features_dir.mkdir(parents=True, exist_ok=True)
     ...     wt = root / "wt"
     ...     wt.mkdir()
+    ...     task = {
+    ...         "task_id": "task-checks-escalated",
+    ...         "project": "demo",
+    ...         "pr_number": 17,
+    ...         "summary": "demo",
+    ...         "feature_id": "f1",
+    ...         "worktree": str(wt),
+    ...         "pr_sweep": {"feedback_rounds": 3, "escalated_checks": True},
+    ...     }
+    ...     task_path = queue_root / "done" / "task-checks-escalated.json"
+    ...     _ = task_path.write_text(json.dumps(task))
+    ...     alerts = []
+    ...     original = {k: pr_sweep.__globals__[k] for k in ("QUEUE_ROOT", "FEATURES_DIR", "load_config", "get_project", "_extract_actionable_comments", "_extract_failed_checks", "_enqueue_pr_feedback", "_write_pr_alert", "_unresolved_bot_review_threads", "now_iso", "subprocess")}
+    ...     class FakeSubprocess:
+    ...         TimeoutExpired = subprocess.TimeoutExpired
+    ...         def run(self, cmd, **kwargs):
+    ...             if cmd[:3] == ["gh", "pr", "view"]:
+    ...                 payload = {"state": "OPEN", "mergeable": "MERGEABLE", "mergeStateStatus": "UNSTABLE", "reviewDecision": "", "baseRefName": "feature/demo", "url": "https://example/pr/17", "comments": [], "statusCheckRollup": [{"name": "unresolved-review-threads", "conclusion": "FAILURE"}]}
+    ...                 return types.SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+    ...             if cmd[:4] == ["git", "-C", str(wt), "fetch"]:
+    ...                 return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    ...             if cmd[:5] == ["git", "-C", str(wt), "rev-list", "--count"]:
+    ...                 return types.SimpleNamespace(returncode=0, stdout="0\\n", stderr="")
+    ...             raise AssertionError(cmd)
+    ...     pr_sweep.__globals__["QUEUE_ROOT"] = queue_root
+    ...     pr_sweep.__globals__["FEATURES_DIR"] = features_dir
+    ...     pr_sweep.__globals__["load_config"] = lambda: {"projects": [{"name": "demo", "path": str(root)}], "drift_threshold": 5}
+    ...     pr_sweep.__globals__["get_project"] = lambda config, name: config["projects"][0]
+    ...     pr_sweep.__globals__["_extract_actionable_comments"] = lambda info, handled: []
+    ...     pr_sweep.__globals__["_extract_failed_checks"] = lambda info: [{"name": "unresolved-review-threads", "conclusion": "FAILURE", "details_url": "https://example/check"}]
+    ...     pr_sweep.__globals__["_enqueue_pr_feedback"] = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not enqueue"))
+    ...     pr_sweep.__globals__["_write_pr_alert"] = lambda *args, **kwargs: alerts.append(args) or None
+    ...     pr_sweep.__globals__["_unresolved_bot_review_threads"] = lambda *args, **kwargs: []
+    ...     pr_sweep.__globals__["now_iso"] = lambda: "2026-04-14T22:46:35"
+    ...     pr_sweep.__globals__["subprocess"] = FakeSubprocess()
+    ...     result = pr_sweep()
+    ...     saved = json.loads(task_path.read_text())
+    ...     observed = (result, alerts, saved["pr_sweep"]["failing_checks"], saved["pr_sweep"]["last_merge_state"])
+    ...     for key, value in original.items():
+    ...         pr_sweep.__globals__[key] = value
+    >>> observed
+    ((1, 0, 0, 0, 1), [], ['unresolved-review-threads'], 'UNSTABLE')
+
+    >>> import json, pathlib, tempfile, types
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     queue_root = root / "queue"
+    ...     features_dir = root / "features"
+    ...     for state in STATES:
+    ...         (queue_root / state).mkdir(parents=True, exist_ok=True)
+    ...     features_dir.mkdir(parents=True, exist_ok=True)
+    ...     wt = root / "wt"
+    ...     wt.mkdir()
     ...     _ = (queue_root / "running" / "task-fb.json").write_text(json.dumps({"task_id": "task-fb"}))
     ...     task = {
     ...         "task_id": "task-comments-guard",
@@ -1655,6 +1746,50 @@ def pr_sweep(dry_run=False):
     ...     for state in STATES:
     ...         (queue_root / state).mkdir(parents=True, exist_ok=True)
     ...     features_dir.mkdir(parents=True, exist_ok=True)
+    ...     feature_path = features_dir / "feature-escalated.json"
+    ...     _ = feature_path.write_text(json.dumps({
+    ...         "feature_id": "feature-escalated",
+    ...         "project": "demo",
+    ...         "status": "finalizing",
+    ...         "final_pr_number": 18,
+    ...         "final_pr_sweep": {"feedback_rounds": 3, "escalated_checks": True},
+    ...     }))
+    ...     alerts = []
+    ...     original = {k: pr_sweep.__globals__[k] for k in ("QUEUE_ROOT", "FEATURES_DIR", "load_config", "get_project", "_extract_actionable_comments", "_extract_failed_checks", "_enqueue_feature_pr_feedback", "_write_pr_alert", "_unresolved_bot_review_threads", "now_iso", "subprocess")}
+    ...     class FakeSubprocess:
+    ...         TimeoutExpired = subprocess.TimeoutExpired
+    ...         def run(self, cmd, **kwargs):
+    ...             if cmd[:3] == ["gh", "pr", "view"]:
+    ...                 payload = {"state": "OPEN", "mergeable": "MERGEABLE", "mergeStateStatus": "UNSTABLE", "reviewDecision": "", "baseRefName": "main", "url": "https://example/pr/18", "comments": [], "statusCheckRollup": [{"workflowName": "unresolved-bot-review", "conclusion": "FAILURE"}]}
+    ...                 return types.SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+    ...             raise AssertionError(cmd)
+    ...     pr_sweep.__globals__["QUEUE_ROOT"] = queue_root
+    ...     pr_sweep.__globals__["FEATURES_DIR"] = features_dir
+    ...     pr_sweep.__globals__["load_config"] = lambda: {"projects": [{"name": "demo", "path": str(root)}], "drift_threshold": 5}
+    ...     pr_sweep.__globals__["get_project"] = lambda config, name: config["projects"][0]
+    ...     pr_sweep.__globals__["_extract_actionable_comments"] = lambda info, handled: []
+    ...     pr_sweep.__globals__["_extract_failed_checks"] = lambda info: [{"name": "unresolved-bot-review", "conclusion": "FAILURE", "details_url": "https://example/check"}]
+    ...     pr_sweep.__globals__["_enqueue_feature_pr_feedback"] = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not enqueue"))
+    ...     pr_sweep.__globals__["_write_pr_alert"] = lambda *args, **kwargs: alerts.append(args) or None
+    ...     pr_sweep.__globals__["_unresolved_bot_review_threads"] = lambda *args, **kwargs: []
+    ...     pr_sweep.__globals__["now_iso"] = lambda: "2026-04-14T22:46:35"
+    ...     pr_sweep.__globals__["subprocess"] = FakeSubprocess()
+    ...     result = pr_sweep()
+    ...     saved = json.loads(feature_path.read_text())
+    ...     observed = (result, alerts, saved["final_pr_sweep"]["failing_checks"], saved["final_pr_sweep"]["last_merge_state"])
+    ...     for key, value in original.items():
+    ...         pr_sweep.__globals__[key] = value
+    >>> observed
+    ((1, 0, 0, 0, 1), [], ['unresolved-bot-review'], 'UNSTABLE')
+
+    >>> import json, pathlib, tempfile, types
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     queue_root = root / "queue"
+    ...     features_dir = root / "features"
+    ...     for state in STATES:
+    ...         (queue_root / state).mkdir(parents=True, exist_ok=True)
+    ...     features_dir.mkdir(parents=True, exist_ok=True)
     ...     _ = (queue_root / "running" / "task-child-repair.json").write_text(json.dumps({
     ...         "task_id": "task-child-repair",
     ...         "feature_id": "feature-4",
@@ -1799,6 +1934,13 @@ def pr_sweep(dry_run=False):
                 alerted += 1
                 continue
             if rounds >= PR_SWEEP_MAX_FEEDBACK_ROUNDS:
+                if sweep.get("escalated_conflict"):
+                    task = update_task_in_place(task_file, stamp_sweep({
+                        "last_mergeable": mergeable,
+                        "last_merge_state": merge_state,
+                    }))
+                    skipped += 1
+                    continue
                 alert = _write_pr_alert(
                     project_name, task.get("task_id"), pr_number,
                     f"exhausted {rounds} pr-feedback rounds, still CONFLICTING",
@@ -1836,6 +1978,13 @@ def pr_sweep(dry_run=False):
         # Case 2: actionable unhandled comments — dispatch pr-feedback.
         if actionable:
             if rounds >= PR_SWEEP_MAX_FEEDBACK_ROUNDS:
+                if sweep.get("escalated_comments"):
+                    task = update_task_in_place(task_file, stamp_sweep({
+                        "last_mergeable": mergeable,
+                        "last_merge_state": merge_state,
+                    }))
+                    skipped += 1
+                    continue
                 alert = _write_pr_alert(
                     project_name, task.get("task_id"), pr_number,
                     f"exhausted {rounds} pr-feedback rounds, {len(actionable)} comments still unresolved",
@@ -1901,6 +2050,14 @@ def pr_sweep(dry_run=False):
             ]
             if new_thread_comments:
                 if rounds >= PR_SWEEP_MAX_FEEDBACK_ROUNDS:
+                    if sweep.get("escalated_comments"):
+                        task = update_task_in_place(task_file, stamp_sweep({
+                            "last_mergeable": mergeable,
+                            "last_merge_state": merge_state,
+                            "unresolved_bot_threads": count,
+                        }))
+                        skipped += 1
+                        continue
                     _write_pr_alert(
                         project_name, task.get("task_id"), pr_number,
                         f"exhausted {rounds} pr-feedback rounds, "
@@ -1963,6 +2120,14 @@ def pr_sweep(dry_run=False):
             continue
         if merge_state in ("BLOCKED", "UNSTABLE") and failed_checks:
             if rounds >= PR_SWEEP_MAX_FEEDBACK_ROUNDS:
+                if sweep.get("escalated_checks"):
+                    task = update_task_in_place(task_file, stamp_sweep({
+                        "last_mergeable": mergeable,
+                        "last_merge_state": merge_state,
+                        "failing_checks": [c["name"] for c in failed_checks],
+                    }))
+                    skipped += 1
+                    continue
                 _write_pr_alert(
                     project_name, task.get("task_id"), pr_number,
                     f"exhausted {rounds} pr-feedback rounds, failed checks still blocking",
@@ -2118,6 +2283,14 @@ def pr_sweep(dry_run=False):
         conflict_feedback = mergeable == "CONFLICTING" or merge_state in ("DIRTY", "BEHIND")
         if conflict_feedback:
             if rounds >= PR_SWEEP_MAX_FEEDBACK_ROUNDS:
+                if sweep.get("escalated_conflict"):
+                    update_feature(feature_id, stamp_feature_sweep({
+                        "last_mergeable": mergeable,
+                        "last_merge_state": merge_state,
+                        "unresolved_bot_threads": len(unresolved_bot_threads),
+                    }))
+                    skipped += 1
+                    continue
                 _write_pr_alert(
                     project_name, feature_id, pr_number,
                     f"exhausted {rounds} feature-pr feedback rounds, still {merge_state or mergeable}",
@@ -2170,6 +2343,14 @@ def pr_sweep(dry_run=False):
         feedback_comments = actionable + new_thread_comments
         if feedback_comments:
             if rounds >= PR_SWEEP_MAX_FEEDBACK_ROUNDS:
+                if sweep.get("escalated_comments"):
+                    update_feature(feature_id, stamp_feature_sweep({
+                        "last_mergeable": info.get("mergeable", "UNKNOWN"),
+                        "last_merge_state": info.get("mergeStateStatus", ""),
+                        "unresolved_bot_threads": len(unresolved_bot_threads),
+                    }))
+                    skipped += 1
+                    continue
                 _write_pr_alert(
                     project_name, feature_id, pr_number,
                     f"exhausted {rounds} feature-pr feedback rounds, "
@@ -2220,6 +2401,14 @@ def pr_sweep(dry_run=False):
             continue
         if merge_state in ("BLOCKED", "UNSTABLE") and failed_checks:
             if rounds >= PR_SWEEP_MAX_FEEDBACK_ROUNDS:
+                if sweep.get("escalated_checks"):
+                    update_feature(feature_id, stamp_feature_sweep({
+                        "last_mergeable": info.get("mergeable", "UNKNOWN"),
+                        "last_merge_state": info.get("mergeStateStatus", ""),
+                        "failing_checks": [c["name"] for c in failed_checks],
+                    }))
+                    skipped += 1
+                    continue
                 _write_pr_alert(
                     project_name, feature_id, pr_number,
                     f"exhausted {rounds} feature-pr feedback rounds, failed checks still blocking",
