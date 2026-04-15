@@ -67,6 +67,11 @@ CLAUDE_CANDIDATE_PATHS = (
     str(pathlib.Path.home() / "Library/Application Support/Claude/claude-code-vm/current/claude"),
     str(pathlib.Path.home() / "Library/Application Support/Claude/claude-code/claude.app/Contents/MacOS/claude"),
 )
+CODEX_CANDIDATE_PATHS = (
+    os.environ.get("CODEX_BIN", "").strip(),
+    shutil.which("codex") or "",
+    "/opt/homebrew/bin/codex",
+)
 
 STATES = (
     "queued",
@@ -4600,6 +4605,85 @@ def _feature_context_text(project_name=None, limit=5):
     return json.dumps(rows, indent=2, sort_keys=True) if rows else "[]"
 
 
+def _workflow_snapshot():
+    counts = queue_counts()
+    open_features = {}
+    for feature in list_features(status="open"):
+        project = feature.get("project") or "unknown"
+        open_features[project] = open_features.get(project, 0) + 1
+    hard_stopped = [
+        p["name"] for p in load_config().get("projects", [])
+        if project_hard_stopped(p["name"])
+    ]
+    return json.dumps(
+        {
+            "captured_at": now_iso(),
+            "queue_counts": {state: counts[state] for state in STATES if counts[state]},
+            "open_features_by_project": open_features,
+            "hard_stopped_projects": hard_stopped,
+            "pr_sweep_metrics": read_pr_sweep_metrics(),
+        },
+        indent=2,
+        sort_keys=True,
+    )
+
+
+def _agent_status_snapshot():
+    today = dt.datetime.now().date().isoformat()
+    rows = []
+    for status in agent_statuses():
+        updated_at = status.get("updated_at") or ""
+        rows.append(
+            {
+                "role": status.get("role"),
+                "status": status.get("status"),
+                "detail": status.get("detail", ""),
+                "updated_at": updated_at,
+                "same_day": updated_at.startswith(today),
+            }
+        )
+    return json.dumps(rows, indent=2, sort_keys=True)
+
+
+def _regression_schedule_snapshot(project_name=None):
+    today = dt.datetime.now()
+    today_code = today.strftime("%a").lower()[:3]
+    rows = []
+    for project in load_config().get("projects", []):
+        name = project["name"]
+        if project_name is not None and name != project_name:
+            continue
+        qa_cfg = project.get("qa") or {}
+        days = [d.lower()[:3] for d in qa_cfg.get("regression_days", [])]
+        rows.append(
+            {
+                "project": name,
+                "today_date": today.date().isoformat(),
+                "today_weekday": today.strftime("%A"),
+                "today_code": today_code,
+                "configured_days": days,
+                "scheduled_today": today_code in days,
+                "agent_status": read_json(AGENT_STATE_DIR / "regression.json", {}),
+            }
+        )
+    return json.dumps(rows, indent=2, sort_keys=True)
+
+
+def _parse_investigation_request(question):
+    raw = (question or "").strip()
+    if not raw:
+        return "claude", ""
+    lower = raw.lower()
+    for target in ("claude", "codex", "both"):
+        prefix = f"{target}:"
+        if lower.startswith(prefix):
+            return target, raw[len(prefix):].strip()
+    m = re.match(r"^(claude|codex|both)\s+(.+)$", raw, re.IGNORECASE | re.DOTALL)
+    if m:
+        return m.group(1).lower(), m.group(2).strip()
+    return "claude", raw
+
+
 def _gh_pr_snapshot(repo_path, pr_number):
     if shutil.which("gh") is None:
         return {"error": "gh CLI not installed"}
@@ -4630,7 +4714,10 @@ def _build_investigation_context(question):
 
     sections = [
         ("QUESTION", question.strip()),
-        ("ORCHESTRATOR_STATUS", status_text()),
+        ("CURRENT_DATE", dt.datetime.now().strftime("%Y-%m-%d %A %H:%M:%S %Z")),
+        ("WORKFLOW_SNAPSHOT", _workflow_snapshot()),
+        ("AGENT_STATUSES", _agent_status_snapshot()),
+        ("REGRESSION_SCHEDULE", _regression_schedule_snapshot(project["name"] if project else None)),
     ]
 
     if project:
@@ -4691,27 +4778,36 @@ def _build_investigation_context(question):
             _recent_text_lines(pathlib.Path.home() / "Library/Logs/devmini/telegram-bot.stderr.log", limit=40),
         )
     )
-    sections.append(
-        (
-            "PR_SWEEP_METRICS",
-            json.dumps(read_pr_sweep_metrics(), indent=2, sort_keys=True),
-        )
-    )
     return "\n\n".join(f"[{title}]\n{body}" for title, body in sections)
 
 
-def _llm_investigation_answer(question, context_text):
-    claude_bin = next((p for p in CLAUDE_CANDIDATE_PATHS if p and pathlib.Path(p).exists()), None)
-    if not claude_bin:
-        return None
-    system_prompt = (
+def _investigation_system_prompt():
+    return (
         "You are a read-only workflow investigator for the devmini orchestrator.\n"
         "Answer ONLY from the supplied evidence. Do not invent facts. Do not suggest commands unless clearly marked as a next step.\n"
         "Be concise and structured with exactly three sections titled: Answer, Evidence, Next step.\n"
         "Cite exact task ids, feature ids, PR numbers, or file paths when relevant.\n"
         "This answer will be sent over Telegram. Return no more than 2500 characters total, including headings.\n"
-        "Keep Evidence to at most 4 short lines. Prefer the highest-signal facts only."
+        "Keep Evidence to at most 4 short lines. Prefer the highest-signal facts only.\n"
+        "Use the CURRENT_DATE and REGRESSION_SCHEDULE sections for any statement about 'today' or weekday. "
+        "Do not treat stale agent-status text containing 'today=' as current truth unless its updated_at matches CURRENT_DATE."
     )
+
+
+def _fit_investigation_answer(answer):
+    answer = (answer or "").strip()
+    if not answer:
+        return None
+    if len(answer) > 2500:
+        answer = answer[:2450].rstrip() + "\n\nNext step\nReply was truncated to fit Telegram."
+    return answer
+
+
+def _claude_investigation_answer(question, context_text):
+    claude_bin = next((p for p in CLAUDE_CANDIDATE_PATHS if p and pathlib.Path(p).exists()), None)
+    if not claude_bin:
+        return None
+    system_prompt = _investigation_system_prompt()
     user_prompt = (
         f"Question:\n{question.strip()}\n\n"
         "Evidence follows. Answer strictly from it.\n\n"
@@ -4739,29 +4835,95 @@ def _llm_investigation_answer(question, context_text):
         return None
     if proc.returncode != 0:
         return None
-    answer = (proc.stdout or "").strip()
-    if not answer:
+    return _fit_investigation_answer(proc.stdout or "")
+
+
+def _codex_investigation_answer(question, context_text):
+    codex_bin = next((p for p in CODEX_CANDIDATE_PATHS if p and pathlib.Path(p).exists()), None)
+    if not codex_bin:
         return None
-    if len(answer) > 2500:
-        answer = answer[:2450].rstrip() + "\n\nNext step\nReply was truncated to fit Telegram."
-    return answer
+    prompt = (
+        f"{_investigation_system_prompt()}\n\n"
+        f"Question:\n{question.strip()}\n\n"
+        "Evidence follows. Answer strictly from it.\n\n"
+        f"{context_text}"
+    )
+    with tempfile.TemporaryDirectory(prefix="codex-investigate-") as tmp:
+        out_path = pathlib.Path(tmp) / "answer.txt"
+        try:
+            proc = subprocess.run(
+                [
+                    codex_bin,
+                    "exec",
+                    "-m", "gpt-5.4-mini",
+                    "--skip-git-repo-check",
+                    "--cd", "/tmp",
+                    "--sandbox", "read-only",
+                    "--output-last-message", str(out_path),
+                    prompt,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=90,
+                cwd="/tmp",
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if proc.returncode != 0 or not out_path.exists():
+            return None
+        return _fit_investigation_answer(out_path.read_text(errors="replace"))
 
 
-def investigate_question(question):
-    question = (question or "").strip()
+def _synthesize_investigation_answers(question, context_text, claude_answer, codex_answer):
+    synthesizer = _claude_investigation_answer if next((p for p in CLAUDE_CANDIDATE_PATHS if p and pathlib.Path(p).exists()), None) else _codex_investigation_answer
+    synthesis_question = (
+        f"{question.strip()}\n\n"
+        "You are synthesizing two investigator answers over the same evidence. "
+        "Produce one final answer, using the evidence and preferring the more precise claims when they differ."
+    )
+    synth_context = (
+        f"{context_text}\n\n"
+        "[CLAUDE_DRAFT]\n"
+        f"{claude_answer or '(missing)'}\n\n"
+        "[CODEX_DRAFT]\n"
+        f"{codex_answer or '(missing)'}"
+    )
+    return synthesizer(synthesis_question, synth_context)
+
+
+def investigate_question(question, engine=None):
+    parsed_engine, clean_question = _parse_investigation_request(question)
+    engine = (engine or parsed_engine or "claude").lower()
+    question = (clean_question or "").strip()
     if not question:
         return "usage: /ask <question>"
     context_text = _build_investigation_context(question)
-    answer = _llm_investigation_answer(question, context_text)
-    if answer:
-        return answer
+    if engine == "claude":
+        answer = _claude_investigation_answer(question, context_text)
+        if answer:
+            return answer
+    elif engine == "codex":
+        answer = _codex_investigation_answer(question, context_text)
+        if answer:
+            return answer
+    elif engine == "both":
+        claude_answer = _claude_investigation_answer(question, context_text)
+        codex_answer = _codex_investigation_answer(question, context_text)
+        if claude_answer and codex_answer:
+            synthesized = _synthesize_investigation_answers(question, context_text, claude_answer, codex_answer)
+            if synthesized:
+                return synthesized
+        if claude_answer:
+            return claude_answer
+        if codex_answer:
+            return codex_answer
     return (
         "Answer\n"
-        "LLM investigator unavailable; returning gathered evidence only.\n\n"
+        f"LLM investigator unavailable for engine={engine}; returning gathered evidence only.\n\n"
         "Evidence\n"
         f"{context_text[:2200]}\n\n"
         "Next step\n"
-        "Retry once the local `claude` CLI is available in the bot/runtime environment."
+        "Retry once the requested local LLM CLI is available in the bot/runtime environment."
     )
 
 
@@ -4913,6 +5075,7 @@ def main(argv=None):
 
     p_inv = sub.add_parser("investigate")
     p_inv.add_argument("--question", required=True)
+    p_inv.add_argument("--engine", choices=("claude", "codex", "both"), default=None)
 
     p_trans = sub.add_parser("transition")
     p_trans.add_argument("--task", required=True)
@@ -5007,7 +5170,7 @@ def main(argv=None):
     elif args.cmd == "process-telegram":
         process_telegram()
     elif args.cmd == "investigate":
-        print(investigate_question(args.question))
+        print(investigate_question(args.question, engine=args.engine))
     elif args.cmd == "transition":
         move_task(args.task, args.from_state, args.to_state, reason=args.reason)
         print(f"{args.task}: {args.from_state} -> {args.to_state}")

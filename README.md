@@ -252,9 +252,9 @@ launchctl setenv GH_TOKEN "$GH_TOKEN"
 
 Long-polling bot at `bin/telegram_bot.py`. No public ports, no webhook. Config at `config/telegram.json` (chmod 600, gitignored) holds the bot token and an allowlist of chat IDs. Unknown chats are logged to `logs/telegram-reject.log` and never see a response. Reports written to `reports/` are auto-pushed every 60s.
 
-Commands: `/status`, `/queue`, `/planner`, `/reviewer`, `/qa`, `/cleanup`, `/ask <question>`, `/regression <project>`, `/report morning|evening`, `/enqueue <summary>`. Unknown commands return the help string — no arbitrary shell.
+Commands: `/status`, `/queue`, `/planner`, `/reviewer`, `/qa`, `/cleanup`, `/ask <question>`, `/ask codex: <question>`, `/ask both: <question>`, `/regression <project>`, `/report morning|evening`, `/enqueue <summary>`. Unknown commands return the help string — no arbitrary shell.
 
-`/ask` is read-only. It gathers live orchestrator state, selected logs, roadmap context, and PR metadata when a PR number is mentioned, then asks the local LLM to answer from that evidence. It does not execute arbitrary shell or mutate runtime state.
+`/ask` is read-only. It gathers live orchestrator state, selected logs, roadmap context, explicit current-date / regression-schedule facts, and PR metadata when a PR number is mentioned. `/ask` defaults to Claude, `/ask codex:` targets Codex, and `/ask both:` queries both then synthesizes one answer. It does not execute arbitrary shell or mutate runtime state.
 
 ## Agent guidance
 

@@ -165,7 +165,7 @@ def build_handlers(cfg):
     async def cmd_ask(update, ctx, text):
         parts = text.split(maxsplit=1)
         if len(parts) < 2 or not parts[1].strip():
-            await send_html(update, "❌ usage: <code>/ask &lt;question&gt;</code>")
+            await send_html(update, "❌ usage: <code>/ask [claude|codex|both:] &lt;question&gt;</code>")
             return
         body = o.investigate_question(parts[1].strip())
         await send_block_chunked(update, "🧭", "ask", body, body_limit=2800)
@@ -267,7 +267,9 @@ def build_handlers(cfg):
             "/reviewer       fire reviewer tick\n"
             "/qa             fire qa smoke tick\n"
             "/cleanup        run cleanup-worktrees now\n"
-            "/ask <q>        investigate workflow status question\n"
+            "/ask <q>        investigate via claude\n"
+            "/ask codex: <q> investigate via codex\n"
+            "/ask both: <q>  query both then synthesize\n"
             "/regression <p> queue full regression sweep for project\n"
             "/report <kind>  write morning|evening status report\n"
             "/enqueue <sum>  manual codex task with summary"
