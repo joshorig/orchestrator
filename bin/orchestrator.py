@@ -4521,6 +4521,236 @@ def planner_status_text(project_filter=None):
     return "\n".join(lines)
 
 
+def _telegram_guess_project(question):
+    lower = question.lower()
+    aliases = {
+        "lvc": "lvc-standard",
+        "lvc-standard": "lvc-standard",
+        "dag": "dag-framework",
+        "dag-framework": "dag-framework",
+        "trp": "trade-research-platform",
+        "trade-research-platform": "trade-research-platform",
+    }
+    for needle, project_name in aliases.items():
+        if needle in lower:
+            for project in load_config().get("projects", []):
+                if project["name"] == project_name:
+                    return project
+    return None
+
+
+def _telegram_find_pr_number(question):
+    m = re.search(r"\bPR\s*#?(\d+)\b", question, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"(?<![A-Za-z0-9])#(\d+)\b", question)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _telegram_find_task_id(question):
+    m = re.search(r"\btask-\d{8}-\d{6}-[a-f0-9]+\b", question)
+    return m.group(0) if m else None
+
+
+def _telegram_find_feature_id(question):
+    m = re.search(r"\bfeature-\d{8}-\d{6}-[a-f0-9]+\b", question)
+    return m.group(0) if m else None
+
+
+def _recent_text_lines(path, limit=40):
+    p = pathlib.Path(path)
+    if not p.exists():
+        return "(missing)"
+    try:
+        lines = p.read_text(errors="replace").splitlines()
+    except OSError as exc:
+        return f"(unreadable: {exc})"
+    return "\n".join(lines[-limit:]) if lines else "(empty)"
+
+
+def _feature_context_text(project_name=None, limit=5):
+    feats = list_features()
+    if project_name:
+        feats = [f for f in feats if f.get("project") == project_name]
+    feats.sort(key=lambda f: f.get("created_at", ""), reverse=True)
+    rows = []
+    for feature in feats[:limit]:
+        rows.append(
+            {
+                "feature_id": feature.get("feature_id"),
+                "project": feature.get("project"),
+                "status": feature.get("status"),
+                "roadmap_entry_id": feature.get("roadmap_entry_id"),
+                "summary": feature.get("summary"),
+                "created_at": feature.get("created_at"),
+                "merged_at": feature.get("merged_at"),
+                "final_pr_number": feature.get("final_pr_number"),
+                "abandoned_reason": feature.get("abandoned_reason"),
+            }
+        )
+    return json.dumps(rows, indent=2, sort_keys=True) if rows else "[]"
+
+
+def _gh_pr_snapshot(repo_path, pr_number):
+    if shutil.which("gh") is None:
+        return {"error": "gh CLI not installed"}
+    proc = subprocess.run(
+        [
+            "gh", "pr", "view", str(pr_number),
+            "--json",
+            "number,title,state,isDraft,mergeable,mergeStateStatus,reviewDecision,baseRefName,headRefName,statusCheckRollup,url",
+        ],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if proc.returncode != 0:
+        return {"error": (proc.stderr or proc.stdout or "gh pr view failed").strip()[:240]}
+    try:
+        return json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        return {"error": f"bad gh pr json: {exc}"}
+
+
+def _build_investigation_context(question):
+    project = _telegram_guess_project(question)
+    pr_number = _telegram_find_pr_number(question)
+    task_id = _telegram_find_task_id(question)
+    feature_id = _telegram_find_feature_id(question)
+
+    sections = [
+        ("QUESTION", question.strip()),
+        ("ORCHESTRATOR_STATUS", status_text()),
+    ]
+
+    if project:
+        sections.append(("PROJECT", project["name"]))
+        sections.append(("PLANNER_STATUS", planner_status_text(project_filter=project["name"])))
+        next_entry = parse_roadmap_next_todo(
+            project["path"],
+            skip_ids=assigned_roadmap_entries(project["name"]),
+        )
+        sections.append(
+            ("NEXT_ROADMAP_ENTRY", json.dumps(next_entry, indent=2, sort_keys=True) if next_entry else "null")
+        )
+        sections.append(("FEATURES", _feature_context_text(project["name"], limit=8)))
+        sections.append(
+            (
+                "PROJECT_ROADMAP_HEAD",
+                _recent_text_lines(pathlib.Path(project["path"]) / "repo-memory" / "ROADMAP.md", limit=80),
+            )
+        )
+
+    if task_id:
+        sections.append((f"TASK_{task_id}", task_text(task_id)))
+
+    if feature_id:
+        feature = read_json(feature_path(feature_id), None)
+        sections.append(
+            (
+                f"FEATURE_{feature_id}",
+                json.dumps(feature, indent=2, sort_keys=True) if feature else "(missing feature file)",
+            )
+        )
+
+    if pr_number is not None:
+        repo_path = project["path"] if project else None
+        if repo_path is None:
+            for cand in load_config().get("projects", []):
+                snap = _gh_pr_snapshot(cand["path"], pr_number)
+                if "error" not in snap:
+                    repo_path = cand["path"]
+                    project = cand
+                    sections.append(("PR_PROJECT", cand["name"]))
+                    sections.append((f"PR_{pr_number}", json.dumps(snap, indent=2, sort_keys=True)))
+                    break
+            if repo_path is None:
+                sections.append((f"PR_{pr_number}", json.dumps({"error": "unable to resolve project for PR"}, indent=2)))
+        else:
+            sections.append((f"PR_{pr_number}", json.dumps(_gh_pr_snapshot(repo_path, pr_number), indent=2, sort_keys=True)))
+
+    sections.append(
+        (
+            "CLEANUP_LOG_TAIL",
+            _recent_text_lines(pathlib.Path.home() / "Library/Logs/devmini/cleanup-worktrees.stdout.log", limit=40),
+        )
+    )
+    sections.append(
+        (
+            "TELEGRAM_BOT_LOG_TAIL",
+            _recent_text_lines(pathlib.Path.home() / "Library/Logs/devmini/telegram-bot.stderr.log", limit=40),
+        )
+    )
+    sections.append(
+        (
+            "PR_SWEEP_METRICS",
+            json.dumps(read_pr_sweep_metrics(), indent=2, sort_keys=True),
+        )
+    )
+    return "\n\n".join(f"[{title}]\n{body}" for title, body in sections)
+
+
+def _llm_investigation_answer(question, context_text):
+    if shutil.which("claude") is None:
+        return None
+    system_prompt = (
+        "You are a read-only workflow investigator for the devmini orchestrator.\n"
+        "Answer ONLY from the supplied evidence. Do not invent facts. Do not suggest commands unless clearly marked as a next step.\n"
+        "Be concise and structured with exactly three sections titled: Answer, Evidence, Next step.\n"
+        "Cite exact task ids, feature ids, PR numbers, or file paths when relevant."
+    )
+    user_prompt = (
+        f"Question:\n{question.strip()}\n\n"
+        "Evidence follows. Answer strictly from it.\n\n"
+        f"{context_text}"
+    )
+    try:
+        proc = subprocess.run(
+            [
+                "claude",
+                "-p", user_prompt,
+                "--dangerously-skip-permissions",
+                "--system-prompt", system_prompt,
+                "--output-format", "text",
+                "--model", "sonnet",
+                "--max-budget-usd", "0.50",
+                "--disallowedTools", "Bash,Read,Write,Edit,Grep,Glob,Agent,WebFetch,WebSearch",
+                "--no-session-persistence",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            cwd="/tmp",
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    answer = (proc.stdout or "").strip()
+    return answer or None
+
+
+def investigate_question(question):
+    question = (question or "").strip()
+    if not question:
+        return "usage: /ask <question>"
+    context_text = _build_investigation_context(question)
+    answer = _llm_investigation_answer(question, context_text)
+    if answer:
+        return answer
+    return (
+        "Answer\n"
+        "LLM investigator unavailable; returning gathered evidence only.\n\n"
+        "Evidence\n"
+        f"{context_text[:6000]}\n\n"
+        "Next step\n"
+        "Retry once the local `claude` CLI is available in the bot/runtime environment."
+    )
+
+
 # --- Telegram file-stub (legacy bridge, kept for CLI compat) -----------------
 
 def process_telegram():
@@ -4568,6 +4798,14 @@ def dispatch_telegram_command(text):
     if text in ("/qa", "qa"):
         tick_qa()
         return "qa tick complete"
+    if text in ("/cleanup", "cleanup"):
+        checked, cleaned, skipped = cleanup_worktrees()
+        return f"cleanup: checked={checked} cleaned={cleaned} skipped={skipped}"
+    if text == "/ask" or text == "ask":
+        return "usage: /ask <question>"
+    if text.startswith("/ask ") or text.startswith("ask "):
+        question = text.split(" ", 1)[1].strip()
+        return investigate_question(question)
     if text.startswith("/regression "):
         project = text.split(" ", 1)[1].strip()
         tick_regression(project)
@@ -4588,7 +4826,7 @@ def dispatch_telegram_command(text):
         return f"enqueued: {task['task_id']}"
     return (
         "unknown command. allowed: /status /tasks /task <task_id> /queue /planner /reviewer /qa "
-        "/regression <project> /report morning|evening /enqueue <summary>"
+        "/cleanup /ask <question> /regression <project> /report morning|evening /enqueue <summary>"
     )
 
 
@@ -4658,6 +4896,9 @@ def main(argv=None):
     p_rep.add_argument("kind", default="morning", nargs="?")
 
     sub.add_parser("process-telegram")
+
+    p_inv = sub.add_parser("investigate")
+    p_inv.add_argument("--question", required=True)
 
     p_trans = sub.add_parser("transition")
     p_trans.add_argument("--task", required=True)
@@ -4751,6 +4992,8 @@ def main(argv=None):
         print(report(args.kind))
     elif args.cmd == "process-telegram":
         process_telegram()
+    elif args.cmd == "investigate":
+        print(investigate_question(args.question))
     elif args.cmd == "transition":
         move_task(args.task, args.from_state, args.to_state, reason=args.reason)
         print(f"{args.task}: {args.from_state} -> {args.to_state}")
