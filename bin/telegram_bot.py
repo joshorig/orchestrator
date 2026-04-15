@@ -117,6 +117,14 @@ def build_handlers(cfg):
         """Multi-line structured response: bold header + monospace body."""
         return f"<b>{emoji} {html_escape(title)}</b>\n<pre>{html_escape(body)}</pre>"
 
+    async def send_block_chunked(update, emoji, title, body, body_limit=3000):
+        body = body or ""
+        parts = list(chunks(body, body_limit)) or [""]
+        total = len(parts)
+        for idx, part in enumerate(parts, start=1):
+            chunk_title = title if total == 1 else f"{title} ({idx}/{total})"
+            await send_html(update, block(emoji, chunk_title, part))
+
     async def cmd_status(update, ctx, text):
         await send_html(update, block("📊", "status", o.status_text()))
 
@@ -160,7 +168,7 @@ def build_handlers(cfg):
             await send_html(update, "❌ usage: <code>/ask &lt;question&gt;</code>")
             return
         body = o.investigate_question(parts[1].strip())
-        await send_html(update, block("🧭", "ask", body))
+        await send_block_chunked(update, "🧭", "ask", body, body_limit=2800)
 
     async def cmd_regression(update, ctx, text):
         parts = text.split(maxsplit=1)

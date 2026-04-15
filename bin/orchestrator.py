@@ -4700,7 +4700,9 @@ def _llm_investigation_answer(question, context_text):
         "You are a read-only workflow investigator for the devmini orchestrator.\n"
         "Answer ONLY from the supplied evidence. Do not invent facts. Do not suggest commands unless clearly marked as a next step.\n"
         "Be concise and structured with exactly three sections titled: Answer, Evidence, Next step.\n"
-        "Cite exact task ids, feature ids, PR numbers, or file paths when relevant."
+        "Cite exact task ids, feature ids, PR numbers, or file paths when relevant.\n"
+        "This answer will be sent over Telegram. Return no more than 2500 characters total, including headings.\n"
+        "Keep Evidence to at most 4 short lines. Prefer the highest-signal facts only."
     )
     user_prompt = (
         f"Question:\n{question.strip()}\n\n"
@@ -4730,7 +4732,11 @@ def _llm_investigation_answer(question, context_text):
     if proc.returncode != 0:
         return None
     answer = (proc.stdout or "").strip()
-    return answer or None
+    if not answer:
+        return None
+    if len(answer) > 2500:
+        answer = answer[:2450].rstrip() + "\n\nNext step\nReply was truncated to fit Telegram."
+    return answer
 
 
 def investigate_question(question):
@@ -4745,7 +4751,7 @@ def investigate_question(question):
         "Answer\n"
         "LLM investigator unavailable; returning gathered evidence only.\n\n"
         "Evidence\n"
-        f"{context_text[:6000]}\n\n"
+        f"{context_text[:2200]}\n\n"
         "Next step\n"
         "Retry once the local `claude` CLI is available in the bot/runtime environment."
     )
