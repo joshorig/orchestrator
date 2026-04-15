@@ -4605,6 +4605,70 @@ def _feature_context_text(project_name=None, limit=5):
     return json.dumps(rows, indent=2, sort_keys=True) if rows else "[]"
 
 
+def _recent_project_task_context(project_name, limit=8):
+    tasks = []
+    for state in STATES:
+        for path in queue_dir(state).glob("*.json"):
+            task = read_json(path, None)
+            if not task or task.get("project") != project_name:
+                continue
+            tasks.append(task)
+    tasks.sort(key=lambda t: t.get("created_at", ""), reverse=True)
+    rows = []
+    for task in tasks[:limit]:
+        row = {
+            "task_id": task.get("task_id"),
+            "state": task.get("state"),
+            "role": task.get("role"),
+            "summary": task.get("summary"),
+            "feature_id": task.get("feature_id"),
+            "created_at": task.get("created_at"),
+            "finished_at": task.get("finished_at"),
+        }
+        log_path = task.get("log_path")
+        if log_path:
+            log_text = _recent_text_lines(log_path, limit=30)
+            if "# dropped " in log_text or "decomposed into 0" in log_text or "worker crashed" in log_text:
+                row["log_excerpt"] = log_text[-1200:]
+        rows.append(row)
+    return json.dumps(rows, indent=2, sort_keys=True) if rows else "[]"
+
+
+def _recent_feature_diagnosis(project_name, limit=5):
+    items = []
+    features = [f for f in list_features() if f.get("project") == project_name]
+    features.sort(key=lambda f: f.get("created_at", ""), reverse=True)
+    for feature in features[:limit]:
+        item = {
+            "feature_id": feature.get("feature_id"),
+            "status": feature.get("status"),
+            "roadmap_entry_id": feature.get("roadmap_entry_id"),
+            "created_at": feature.get("created_at"),
+            "child_task_count": len(feature.get("child_task_ids", [])),
+            "abandoned_reason": feature.get("abandoned_reason"),
+        }
+        planner_tasks = []
+        for state in STATES:
+            for path in queue_dir(state).glob("*.json"):
+                task = read_json(path, None)
+                if not task:
+                    continue
+                if task.get("feature_id") != feature.get("feature_id") or task.get("role") != "planner":
+                    continue
+                planner_tasks.append(task)
+        planner_tasks.sort(key=lambda t: t.get("created_at", ""), reverse=True)
+        if planner_tasks:
+            planner = planner_tasks[0]
+            item["planner_task_id"] = planner.get("task_id")
+            item["planner_task_state"] = planner.get("state")
+            item["planner_finished_at"] = planner.get("finished_at")
+            log_text = _recent_text_lines(planner.get("log_path"), limit=40) if planner.get("log_path") else ""
+            if "# dropped " in log_text or "decomposed into 0" in log_text:
+                item["planner_log_excerpt"] = log_text[-1500:]
+        items.append(item)
+    return json.dumps(items, indent=2, sort_keys=True) if items else "[]"
+
+
 def _workflow_snapshot():
     counts = queue_counts()
     open_features = {}
@@ -4731,6 +4795,8 @@ def _build_investigation_context(question):
             ("NEXT_ROADMAP_ENTRY", json.dumps(next_entry, indent=2, sort_keys=True) if next_entry else "null")
         )
         sections.append(("FEATURES", _feature_context_text(project["name"], limit=8)))
+        sections.append(("FEATURE_DIAGNOSIS", _recent_feature_diagnosis(project["name"], limit=6)))
+        sections.append(("RECENT_PROJECT_TASKS", _recent_project_task_context(project["name"], limit=8)))
         sections.append(
             (
                 "PROJECT_ROADMAP_HEAD",
@@ -4790,7 +4856,9 @@ def _investigation_system_prompt():
         "This answer will be sent over Telegram. Return no more than 2500 characters total, including headings.\n"
         "Keep Evidence to at most 4 short lines. Prefer the highest-signal facts only.\n"
         "Use the CURRENT_DATE and REGRESSION_SCHEDULE sections for any statement about 'today' or weekday. "
-        "Do not treat stale agent-status text containing 'today=' as current truth unless its updated_at matches CURRENT_DATE."
+        "Do not treat stale agent-status text containing 'today=' as current truth unless its updated_at matches CURRENT_DATE.\n"
+        "If the evidence already includes task ids, feature ids, log excerpts, or dropped-slice reasons explaining the issue, state that diagnosis directly.\n"
+        "Do not use Next step to tell the user to inspect logs, tasks, or PR state that is already present in the evidence; only recommend follow-on action that remains after your diagnosis."
     )
 
 
