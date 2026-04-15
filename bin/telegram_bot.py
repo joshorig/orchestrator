@@ -144,6 +144,16 @@ def build_handlers(cfg):
         o.tick_qa()
         await send_html(update, "✅ <b>qa</b> tick complete")
 
+    async def cmd_cleanup(update, ctx, text):
+        checked, cleaned, skipped = o.cleanup_worktrees()
+        await send_html(
+            update,
+            (
+                "✅ <b>cleanup</b> complete\n"
+                f"<pre>checked={checked}\ncleaned={cleaned}\nskipped={skipped}</pre>"
+            ),
+        )
+
     async def cmd_regression(update, ctx, text):
         parts = text.split(maxsplit=1)
         if len(parts) < 2:
@@ -240,6 +250,7 @@ def build_handlers(cfg):
             "/planner_disable <p> [reason] disable planner for project\n"
             "/reviewer       fire reviewer tick\n"
             "/qa             fire qa smoke tick\n"
+            "/cleanup        run cleanup-worktrees now\n"
             "/regression <p> queue full regression sweep for project\n"
             "/report <kind>  write morning|evening status report\n"
             "/enqueue <sum>  manual codex task with summary"
@@ -289,6 +300,7 @@ def build_handlers(cfg):
     app.add_handler(CommandHandler("planner_disable", gate(cmd_planner_disable)))
     app.add_handler(CommandHandler("reviewer", gate(cmd_reviewer)))
     app.add_handler(CommandHandler("qa", gate(cmd_qa)))
+    app.add_handler(CommandHandler("cleanup", gate(cmd_cleanup)))
     app.add_handler(CommandHandler("regression", gate(cmd_regression)))
     app.add_handler(CommandHandler("report", gate(cmd_report)))
     app.add_handler(CommandHandler("enqueue", gate(cmd_enqueue)))

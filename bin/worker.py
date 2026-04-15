@@ -1855,10 +1855,12 @@ def run_claude_planner(task, cfg, timeout, log_path):
         summ = s.get("summary", "")
         if raw_tpl not in TEMPLATE_ROLE:
             dropped.append((raw_tpl, summ[:80], "unknown template"))
+            sibling_task_ids.append(None)
             continue
         ok, reason = classify_slice(raw_tpl, summ)
         if not ok:
             dropped.append((raw_tpl, summ[:80], reason))
+            sibling_task_ids.append(None)
             continue
         child = o.new_task(
             role=TEMPLATE_ROLE[raw_tpl],
@@ -1883,8 +1885,14 @@ def run_claude_planner(task, cfg, timeout, log_path):
                     dropped.append((raw_tpl, summ[:80], f"depends_on index out of range: {dep}"))
                     resolved = None
                     break
-                resolved.append(sibling_task_ids[dep])
+                dep_task_id = sibling_task_ids[dep]
+                if dep_task_id is None:
+                    dropped.append((raw_tpl, summ[:80], f"depends_on refers to dropped slice: {dep}"))
+                    resolved = None
+                    break
+                resolved.append(dep_task_id)
         if resolved is None:
+            sibling_task_ids.append(None)
             continue
         child["depends_on"] = resolved
         o.enqueue_task(child)
