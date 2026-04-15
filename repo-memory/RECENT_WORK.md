@@ -4,6 +4,28 @@ _Append-only log. New entries go at the top. One entry per completed task or mil
 
 ---
 
+## 2026-04-15 — Policy coverage: every blocker code now has an explicit repair policy
+
+**Summary:** Completed the declarative repair-policy table so every blocker code in the typed workflow contract now has an explicit policy outcome. Transient runtime failures are auto-retried within the bounded attempt budget, while structural/configuration blockers now resolve deterministically to report-only or wait states instead of falling through as uncovered cases.
+
+**Changed:**
+- `bin/orchestrator.py` — added explicit `WORKFLOW_REPAIR_POLICY` coverage for the remaining blocker codes, including `llm_exit_error`, `model_output_invalid`, `invalid_braid_refine`, `auto_commit_failed`, `delivery_push_failed`, `qa_smoke_failed`, `template_refine_exhausted`, `delivery_auth_expired`, `false_blocker_claim`, `qa_contract_error`, `qa_target_missing`, `runtime_env_dirty`, `runtime_precondition_failed`, `runtime_unknown_project`, `missing_child`, and the workflow-level codes already surfaced by `workflow-check`.
+- `bin/orchestrator.py` — aligned policy `kind` matching for environment and missing-child issues so the new coverage is live rather than nominal.
+
+**Validation:** `python3 -m py_compile bin/orchestrator.py bin/worker.py bin/telegram_bot.py`, `python3 bin/orchestrator.py workflow-check`, and a policy audit confirming zero uncovered `BLOCKER_CODES`.
+
+## 2026-04-15 — Timeout policy: codex 60m + auto-retry on `llm_timeout`
+
+**Summary:** Increased the codex slot timeout from 30 minutes to 60 minutes and taught `workflow-check` to auto-retry `llm_timeout` frontier blockers within the existing bounded attempt budget.
+
+**Changed:**
+- `config/orchestrator.json` — `slots.codex.timeout_sec` raised from `1800` to `3600`.
+- `bin/worker.py` — updated the codex default timeout fallback to `3600` seconds.
+- `bin/orchestrator.py` — added `llm_timeout_retry` to `WORKFLOW_REPAIR_POLICY`, mapping `frontier_task_blocked + llm_timeout` to `retry_task`.
+- `README.md` — updated the codex slot documentation to reflect the new 60-minute wall clock.
+
+**Validation:** `python3 -m py_compile bin/orchestrator.py bin/worker.py bin/telegram_bot.py` and `python3 bin/orchestrator.py workflow-check`.
+
 ## 2026-04-15 — R-017 completion: typed blockers cover QA and feedback loops
 
 **Summary:** Finished `R-017` by extending typed blocker coverage through the remaining execution paths that still mattered for autonomous recovery: QA driver failures, QA target failures, review-feedback loops, and PR-feedback loops. The runtime can now classify those blockers explicitly instead of falling back to brittle log-string inference.

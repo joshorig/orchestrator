@@ -63,7 +63,7 @@ Environment normalization is now part of the runtime. `env-health` checks requir
 | Slot | Role | Timeout | What it runs |
 |---|---|---|---|
 | `claude` | BRAID **generator** | 1800s | Decomposes parent tasks into codex slices; generates Mermaid reasoning graphs for new task types. Runs rarely — templates amortize across N executions. |
-| `codex` | BRAID **solver** | 1800s | Executes bounded implementation slices inside an assigned worktree, traversing a cached Mermaid graph received as system context. Signals `BRAID_OK` or `BRAID_TOPOLOGY_ERROR` via output trailer. |
+| `codex` | BRAID **solver** | 3600s | Executes bounded implementation slices inside an assigned worktree, traversing a cached Mermaid graph received as system context. Signals `BRAID_OK` or `BRAID_TOPOLOGY_ERROR` via output trailer. |
 | `qa` | Contract runner | 900s | Executes `<repo>/qa/smoke.sh` or `<repo>/qa/regression.sh`. No LLM involved. |
 
 Concurrency is enforced in `config/orchestrator.json`: one active task per slot at a time. Workers follow the one-task-then-exit model — launchd handles throttling via `ThrottleInterval`.

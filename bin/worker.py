@@ -40,7 +40,7 @@ QA_ARTIFACTS_ROOT = o.DEV_ROOT / "qa-artifacts"
 
 # Default per-slot timeouts in seconds. Overridable via
 # config["slots"][<slot>]["timeout_sec"] or task["engine_args"]["timeout_sec"].
-DEFAULT_TIMEOUTS = {"claude": 1800, "codex": 1800, "qa": 900}
+DEFAULT_TIMEOUTS = {"claude": 1800, "codex": 3600, "qa": 900}
 
 
 def log(msg):

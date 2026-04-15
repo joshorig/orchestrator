@@ -1,7 +1,7 @@
 {
   "slots": {
     "claude": { "timeout_sec": 1800, "max_budget_usd": 0.50 },
-    "codex":  { "timeout_sec": 1800 },
+    "codex":  { "timeout_sec": 3600 },
     "qa":     { "timeout_sec": 900 }
   },
   "concurrency": {
