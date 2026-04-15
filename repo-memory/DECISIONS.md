@@ -11,6 +11,13 @@ _Architectural decisions with enough context that a future agent can tell whethe
 
 ---
 
+## 2026-04-15 — Roadmap priority shifts from throughput/features to control-plane correctness
+**Context:** Live operation exposed that the main blockers to autonomous development were not lack of slots or missing surface features, but orchestration brittleness: advisory checks blocking progress, free-text failure parsing, stale retry state, and workflow bugs requiring manual interpretation. The previous roadmap emphasized vertical-slice proof, fleet widening, and BRAID future-work before fully hardening the runtime contract.
+
+**Decision:** Reprioritize the roadmap so typed workflow contracts, deterministic retry/reset semantics, event-sourced diagnosis, declarative repair policy, synthetic canaries, environment normalization, and a guarded orchestrator self-repair lane take precedence over parallelism expansion, visual graph ingestion, and other throughput/future-work items. Existing entries stay in the roadmap for history, but they are no longer the critical path.
+
+**Consequences:** The next engineering phase is about making the orchestrator less heuristic and more deterministic. Throughput work like the 6-slot fleet and model-surface work like visual BRAID ingestion remain valid, but they are explicitly downstream of control-plane hardening.
+
 ## 2026-04-15 — BRAID refine uses a bounded full-template rewrite, not in-place graph patching
 **Context:** `R-012` needed a way for codex solvers to request targeted topology repair mid-task without dropping straight into the heavyweight `BRAID_TOPOLOGY_ERROR -> full regen` loop. The original roadmap wording suggested patching the existing Mermaid file in place, but the repo already had a reliable generator + lint + atomic write path and no patch-format contract for Mermaid graphs.
 
@@ -75,7 +82,7 @@ Task state mutations on smoke pass:
 
 Config: `"auto_push": false` explicitly set on all three projects (`lvc-standard`, `dag-framework`, `trade-research-platform`). Opt-in per project; default is always off.
 
-**Consequences:** The orchestrator now has a deliverable contract — every smoke-green worktree produces a pr-body.md a human can paste into `gh pr create --body-file`, and with one config flip, the branch is pre-pushed. The `@codex` mention in the body means codex's GitHub reviewer fires automatically when the PR opens, so code review and QA evidence land together without a separate step. Rules out unattended PR creation (pattern C) and auto-merge (pattern D) until we have more observation time — both are future work. The distinct commit identity prevents co-mingling agent commits with human commits in `git blame` / `git log --author` queries. Secret scan is now split by risk surface: `repo-memory/*.md` writes still hard-block on the built-in detector, but generic code pushes only hard-block when `detect-secrets-hook` and a repo `.secrets.baseline` are present. The "driver done even on push failure" split preserves the invariant that QA slot state reflects what the script did; delivery failures are attached to the target, not the driver.
+**Consequences:** The orchestrator now has a deliverable contract — every smoke-green worktree produces a pr-body.md a human can paste into `gh pr create --body-file`, and with one config flip, the branch is pre-pushed. The `@codex` mention in the body means codex's GitHub reviewer fires automatically when the PR opens, so code review and QA evidence land together without a separate step. Rules out unattended PR creation (pattern C) and auto-merge (pattern D) until we have more observation time — both are future work. The distinct commit identity prevents co-mingling agent commits with human commits in `git blame` / `git log --author` queries. Secret scan findings are logged for operator awareness, but they no longer block `repo-memory` writes, auto-commit, or generic code pushes. The "driver done even on push failure" split preserves the invariant that QA slot state reflects what the script did; delivery failures are attached to the target, not the driver.
 
 ---
 

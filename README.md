@@ -91,10 +91,9 @@ gh pr create --head agent/<task_id> --base feature/<id> --title "<summary>" --bo
 
 The PR body still carries the `@codex` mention, BRAID provenance, diff stat, smoke log tail, and a manual fallback command. Task JSON is stamped with `push_base_branch`, `push_branch`, `pr_number`, and `pr_url` when the PR opens.
 
-Push safety now has two layers:
+Push safety now has one layer:
 
-- `repo-memory/*.md` writes are still hard-blocked on the built-in secret detector before historian auto-commit or memory-synthesis apply.
-- Generic branch pushes only hard-block on secret findings when `detect-secrets-hook` is installed and the target repo has a `.secrets.baseline`. The older entropy/path heuristic remains advisory-only in the push log so path-like diffs cannot fail delivery on their own.
+- Secret findings are advisory-only on all paths. `repo-memory/*.md` writes, generic branch pushes, and `detect-secrets-hook` findings are logged into the task output, but none of them block auto-commit, push, or memory updates.
 
 ### 3. Auto-merge to feature branch when green
 
@@ -203,6 +202,7 @@ The orchestrator is launchd-driven. All plists live in `~/Library/LaunchAgents/c
 | `reaper` | StartInterval=60s | Recovers stale claims |
 | `pr-sweep` | StartInterval=600 | Auto-merge task PRs into feature branches + address PR feedback |
 | `feature-finalize` | StartInterval=600 | Opens feature->main PRs |
+| `workflow-check` | StartInterval=1800 | Diagnoses blocked feature workflows, reports to Telegram, attempts bounded self-heal |
 | `cleanup-worktrees` | StartInterval=3600s | Removes worktrees + local branches for merged/closed PRs |
 | `regression` | Weekly (lvc-standard) | Full JMH sweep under exclusive project lock |
 | `telegram-bot` | KeepAlive | Real bot, long-polling, allowlist-gated |

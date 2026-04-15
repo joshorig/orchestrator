@@ -6,6 +6,20 @@ _This is the orchestrator's own engineering memory. Updated incrementally; never
 
 An always-on, launchd-driven task orchestrator that runs on a 16GB Mac mini and coordinates agent-driven engineering work across a small set of canonical repos. It pairs a claude "generator" slot with a codex "solver" slot following the BRAID architecture, plus a non-LLM QA slot for contract verification. Workers are short-lived: each one claims a single task, executes it inside an isolated worktree, and exits so launchd can respawn a fresh process.
 
+## Current priority reset (2026-04-15)
+
+The roadmap has been reprioritized around autonomous-runtime correctness rather than more throughput or more BRAID surface area. The immediate priorities are now:
+
+- typed blocker/reason contracts
+- deterministic task reset and retry semantics
+- event-sourced workflow diagnosis
+- declarative self-heal policy
+- synthetic canary workflows
+- environment normalization
+- a guarded self-repair lane for orchestrator bugs
+
+Parallelism, visual graph ingestion, and broader fleet rollout stay secondary until these land.
+
 ## What exists today (pass 1+2 — three-repo slice + feature-branch delivery)
 
 - Full state machine in `bin/orchestrator.py` with all nine task states, atomic rename-based claim, append-only `transitions.log`, and dead-pid reaper.
@@ -21,8 +35,8 @@ An always-on, launchd-driven task orchestrator that runs on a 16GB Mac mini and 
 - **Automated BRAID lint gate** (`orchestrator.py:lint_template`) wired into `braid_template_write` so no regenerated template can land if it violates any of 7 rules (R1 atomicity, R2 labeled edges, R3 terminal `Check:` before `End`, R4 distinct Revise per gate, R5 reachability, R6 syntax, R7 repo-literal heuristic). CLI: `orchestrator.py lint-templates [--template <name> | --all]`. Known-bad `lvc-implement-operator` fails R4 as expected; all other live templates pass.
 - **BRAID hardening pass** (2026-04-14 worktree): `pr-sweep` now persists running-guard telemetry to `state/runtime/pr-sweep-metrics.json`, ignores non-actionable bot summary comments, and dispatches repair slices for failed required checks; `tick-template-audit` writes `reports/template-audit-<date>.md`; `reap()` can auto-enqueue template regeneration when recent topology-error rate stays high; codex dispatch pauses for that template until a new hash lands.
 - **Runtime event stream + log rotation** (2026-04-14 worktree): task transitions and agent-status changes append structured rows to `state/runtime/events.jsonl`; `rotate_logs()` gzips stale `logs/*.log` after 7 days and evicts oldest archives to keep retained bytes under the 1GB cap, with `cleanup-worktrees` invoking the sweep on its normal cadence.
-- **repo-memory secrets gate** (2026-04-14 worktree): historian/memory-synthesis writes to `repo-memory/*.md` are blocked on secret-like content before commit/apply, and failures emit Telegram-pushable markdown alerts under `reports/`.
-- **Generic push secret scan softened** (2026-04-14 worktree): the old entropy-based diff scan is now advisory-only for normal code pushes after it falsely flagged git pathnames as secrets; hard blocking for generic branch pushes now requires `detect-secrets-hook` plus a repo `.secrets.baseline`.
+- **Secret scan advisory-only** (runtime updated 2026-04-15): entropy hits, repo-memory findings, and `detect-secrets-hook` output are all logged for operator awareness, but none of them block historian/memory-synthesis writes, auto-commit, or generic branch pushes.
+- **Workflow checker** (2026-04-15 worktree): `workflow-check` runs every 30 minutes, diagnoses blocked feature workflows, reports to Telegram, and performs bounded self-heal actions for known classes. It is useful operationally, but still relies on hand-coded repair signatures rather than typed blocker contracts.
 - **Per-repo memory + qa contracts on all three canonical repos**:
   - `lvc-standard` — `qa/smoke.sh` (unit tests + `:benchmarks:jmhSmokeCheck` alloc gate, <4 min) + `qa/regression.sh` (full JMH sweep under exclusive per-project lock).
   - `dag_framework` — `qa/smoke.sh` + `qa/regression.sh` + `qa/jmh_diff.py`; memory files seeded.
@@ -49,6 +63,10 @@ An always-on, launchd-driven task orchestrator that runs on a 16GB Mac mini and 
 
 ## Known concerns (active, not yet deferred)
 
+- **Control-plane contract is still too implicit**: task/feature/blocker semantics are split across mutable JSON fields, free-text logs, prompt trailers, and code-path-specific heuristics. This is the largest blocker to reliable autonomous operation.
+- **Retry semantics are lossy/stale**: requeued tasks can carry historical terminal metadata into a new live attempt. That is survivable for humans but dangerous for automation and reporting.
+- **Workflow repair is still signature-based**: the new workflow-checker can restart workers and retry known cases, but it does not yet operate from a typed repair policy or event-backed causal model.
+- **Environment drift remains a first-class risk**: launchd env, GH auth, dirty canonical repos, stale worktrees, and host-local assumptions can still stall real work before the system names them cleanly.
 - **`lvc-implement-operator` legacy error count**: the 14 topology errors in `braid/index.json` were accumulated under the old R4-violating subgraph shape. The template was regenerated in commit `74d50e0` into a flat shape with distinct `ReviseCheck<N>` per gate and is lint-clean. Counter is not reset by design (append-only stat); watch for the counter to **stop growing** on the next operator task rather than expecting a drop. If it grows, the generator prompt fix did not fully take and further investigation is needed.
 - **TRP regression does not exercise the real stack**: Playwright webServer is the Vite dev server, not a compose-started backend. JVM test + JMH are run but not integrated with a live UI. A hand-off prompt has been drafted to add a `compose-stack` Playwright project + EXIT-trapped compose lifecycle stage to `qa/regression.sh`. Not yet executed.
 - **Documentation drift on task-PR merge policy**: the implementation auto-merges clean feature-branch task PRs without requiring a formal `APPROVED` review decision; the human review gate is the final feature PR to `main`. README + repo-memory should describe that contract explicitly to avoid future "fixes" that add an approval gate the runtime never intended.

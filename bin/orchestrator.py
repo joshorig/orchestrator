@@ -92,6 +92,7 @@ CONFIG_DEFAULTS = {
     "topology_error_regen_threshold": 0.10,
     "topology_error_regen_window": 20,
     "topology_error_regen_min_samples": 5,
+    "workflow_check_max_attempts": 3,
 }
 
 BRAID_RECENT_OUTCOMES_MAX = 50
@@ -4770,6 +4771,380 @@ def _gh_pr_snapshot(repo_path, pr_number):
         return {"error": f"bad gh pr json: {exc}"}
 
 
+def _latest_feature_planner_task(feature_id):
+    latest = None
+    latest_state = None
+    for state in STATES:
+        for path in queue_dir(state).glob("*.json"):
+            task = read_json(path, None)
+            if not task:
+                continue
+            if task.get("feature_id") != feature_id or task.get("role") != "planner":
+                continue
+            if latest is None or task.get("created_at", "") > latest.get("created_at", ""):
+                latest = task
+                latest_state = state
+    if latest is None:
+        return None
+    return latest_state, latest
+
+
+def _feature_ready_for_finalize(feature):
+    children = _load_feature_children(feature)
+    if children is None:
+        return False
+    if not children:
+        return False
+    return all(
+        child.get("state") == "done"
+        and child.get("cleaned_at") is not None
+        and child.get("pr_final_state") == "MERGED"
+        for child in children
+    )
+
+
+def _workflow_check_attempts(feature, issue_key):
+    wc = feature.get("workflow_check") or {}
+    attempts = wc.get("attempts") or {}
+    try:
+        return int(attempts.get(issue_key, 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _workflow_check_record_attempt(feature_id, issue_key, action, note):
+    def mut(feature):
+        wc = feature.setdefault("workflow_check", {})
+        attempts = wc.setdefault("attempts", {})
+        attempts[issue_key] = int(attempts.get(issue_key, 0)) + 1
+        wc["last_issue_key"] = issue_key
+        wc["last_action"] = action
+        wc["last_note"] = note
+        wc["updated_at"] = now_iso()
+    update_feature(feature_id, mut)
+
+
+def _workflow_check_worker_plists():
+    home = pathlib.Path.home() / "Library" / "LaunchAgents"
+    names = (
+        "worker.claude",
+        "worker.codex",
+        "worker.codex-2",
+        "worker.codex-3",
+        "worker.codex-4",
+        "worker.codex-5",
+        "worker.codex-6",
+        "worker.qa",
+    )
+    return [home / f"com.devmini.orchestrator.{name}.plist" for name in names]
+
+
+def _workflow_check_restart_workers():
+    restarted = []
+    failed = []
+    for plist in _workflow_check_worker_plists():
+        if not plist.exists():
+            continue
+        subprocess.run(["launchctl", "unload", str(plist)], capture_output=True, text=True, check=False)
+        proc = subprocess.run(["launchctl", "load", str(plist)], capture_output=True, text=True, check=False)
+        if proc.returncode == 0:
+            restarted.append(plist.name)
+        else:
+            failed.append(f"{plist.name}: {(proc.stderr or proc.stdout or 'load failed').strip()[:160]}")
+    return restarted, failed
+
+
+def _workflow_check_retry_task(task, state, reason):
+    def mut(t):
+        t["claimed_at"] = None
+        t["started_at"] = None
+        t["finished_at"] = None
+        t["log_path"] = None
+    move_task(task["task_id"], state, "queued", reason=reason, mutator=mut)
+    found = find_task(task["task_id"])
+    return bool(found and found[0] in ("queued", "claimed", "running"))
+
+
+def _workflow_check_known_task_action(task, state, project):
+    topo = str(task.get("topology_error") or "")
+    failure = str(task.get("failure") or "")
+    detail = " ".join(part for part in (failure, topo) if part).strip()
+    detail_lower = detail.lower()
+
+    if topo == "regression-failure":
+        return None, "hard-stopped by regression failure"
+    if state == "blocked" and topo == "template_missing":
+        tmpl = task.get("braid_template")
+        if tmpl and (BRAID_TEMPLATES / f"{tmpl}.mmd").exists():
+            return "retry_task", "template now exists"
+        return None, "waiting for template regeneration"
+    if "main_dirty_or_ahead" in topo:
+        repo = repo_status(project["path"])
+        if repo.get("exists") and not repo.get("dirty"):
+            return "retry_task", "project main checkout is clean again"
+        return None, "project main checkout still dirty"
+    if "repo-memory secret-scan hit" in detail_lower or "detect-secrets findings" in detail_lower:
+        return "restart_workers_then_retry", "workflow runtime changed; reload workers then retry"
+    if "worker crash" in detail_lower:
+        return "retry_task", "worker crashed; task is retryable"
+    if "git', 'worktree', 'add'" in failure and "255" in failure:
+        return "retry_task", "worktree creation failed; retry after cleanup"
+    if state in ("failed", "blocked"):
+        return None, detail or "task is blocked without a known automatic fix"
+    return None, detail or f"task is in state {state}"
+
+
+def _diagnose_feature_workflow_issue(feature, config):
+    project = get_project(config, feature["project"])
+    feature_id = feature.get("feature_id")
+
+    if feature.get("status") == "open":
+        if not feature.get("child_task_ids"):
+            planner = _latest_feature_planner_task(feature_id)
+            if planner:
+                state, task = planner
+                if state in ("failed", "blocked"):
+                    action, diagnosis = _workflow_check_known_task_action(task, state, project)
+                    return {
+                        "feature_id": feature_id,
+                        "project": project["name"],
+                        "summary": feature.get("summary") or feature_id,
+                        "issue_key": f"planner:{task['task_id']}:{state}:{task.get('failure') or task.get('topology_error') or ''}",
+                        "kind": "planner_blocked",
+                        "task_id": task["task_id"],
+                        "task_state": state,
+                        "diagnosis": diagnosis,
+                        "action": action,
+                        "task": task,
+                    }
+                if state == "done":
+                    log_excerpt = _recent_text_lines(task.get("log_path"), limit=40) if task.get("log_path") else ""
+                    if "decomposed into 0" in log_excerpt or "# dropped " in log_excerpt:
+                        return {
+                            "feature_id": feature_id,
+                            "project": project["name"],
+                            "summary": feature.get("summary") or feature_id,
+                            "issue_key": f"planner-empty:{task['task_id']}",
+                            "kind": "planner_emitted_no_children",
+                            "task_id": task["task_id"],
+                            "task_state": state,
+                            "diagnosis": "planner completed without emitting any runnable slices",
+                            "action": "retry_task",
+                            "task": task,
+                        }
+            return {
+                "feature_id": feature_id,
+                "project": project["name"],
+                "summary": feature.get("summary") or feature_id,
+                "issue_key": f"feature-no-children:{feature_id}",
+                "kind": "feature_has_no_children",
+                "task_id": None,
+                "task_state": "open",
+                "diagnosis": "feature is open but has no child tasks to make progress",
+                "action": None,
+                "task": None,
+            }
+
+        for child_id in feature.get("child_task_ids", []):
+            found = find_task(child_id)
+            if not found:
+                return {
+                    "feature_id": feature_id,
+                    "project": project["name"],
+                    "summary": feature.get("summary") or feature_id,
+                    "issue_key": f"missing-child:{child_id}",
+                    "kind": "missing_child",
+                    "task_id": child_id,
+                    "task_state": "missing",
+                    "diagnosis": "feature child task file is missing from the queue state tree",
+                    "action": None,
+                    "task": None,
+                }
+            state, task = found
+            if state == "done":
+                continue
+            if state in ("failed", "blocked", "abandoned"):
+                action, diagnosis = _workflow_check_known_task_action(task, state, project)
+                return {
+                    "feature_id": feature_id,
+                    "project": project["name"],
+                    "summary": feature.get("summary") or feature_id,
+                    "issue_key": f"task:{task['task_id']}:{state}:{task.get('failure') or task.get('topology_error') or ''}",
+                    "kind": "frontier_task_blocked",
+                    "task_id": task["task_id"],
+                    "task_state": state,
+                    "diagnosis": diagnosis,
+                    "action": action,
+                    "task": task,
+                }
+            return None
+
+        if _feature_ready_for_finalize(feature):
+            return {
+                "feature_id": feature_id,
+                "project": project["name"],
+                "summary": feature.get("summary") or feature_id,
+                "issue_key": f"ready-for-finalize:{feature_id}",
+                "kind": "ready_for_finalize",
+                "task_id": None,
+                "task_state": "done",
+                "diagnosis": "all child task PRs are merged; feature should be finalized",
+                "action": "feature_finalize",
+                "task": None,
+            }
+        return None
+
+    if feature.get("status") == "finalizing" and feature.get("final_pr_number"):
+        snap = _gh_pr_snapshot(project["path"], feature["final_pr_number"])
+        merge_state = snap.get("mergeStateStatus", "")
+        mergeable = snap.get("mergeable", "")
+        review_decision = snap.get("reviewDecision", "")
+        if snap.get("state") == "OPEN" and (
+            merge_state in ("BLOCKED", "UNSTABLE", "DIRTY", "BEHIND")
+            or mergeable == "CONFLICTING"
+            or review_decision == "CHANGES_REQUESTED"
+        ):
+            return {
+                "feature_id": feature_id,
+                "project": project["name"],
+                "summary": feature.get("summary") or feature_id,
+                "issue_key": f"final-pr:{feature.get('final_pr_number')}:{merge_state}:{review_decision}",
+                "kind": "final_pr_blocked",
+                "task_id": None,
+                "task_state": "finalizing",
+                "diagnosis": (
+                    f"final PR #{feature.get('final_pr_number')} is blocked "
+                    f"(mergeStateStatus={merge_state or '-'}, mergeable={mergeable or '-'}, reviewDecision={review_decision or '-'})"
+                ),
+                "action": "pr_sweep",
+                "task": None,
+            }
+    return None
+
+
+def _write_workflow_check_report(issues, *, reaped=0):
+    ts = dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    out = REPORT_DIR / f"workflow-check_{ts}.md"
+    lines = [
+        "# Workflow Check Report",
+        "",
+        f"Generated: {now_iso()}",
+        f"Issues found: {len(issues)}",
+        f"Reaper recoveries run first: {reaped}",
+        "",
+    ]
+    for issue in issues:
+        lines += [
+            f"## {issue['feature_id']} — {issue['project']}",
+            "",
+            f"- summary: `{issue['summary']}`",
+            f"- kind: `{issue['kind']}`",
+            f"- diagnosis: {issue['diagnosis']}",
+        ]
+        if issue.get("task_id"):
+            lines.append(f"- task: `{issue['task_id']}` ({issue.get('task_state')})")
+        if issue.get("action"):
+            lines.append(f"- action: `{issue['action']}`")
+        lines.append(f"- attempts: {issue.get('attempts', 0)}/{issue.get('max_attempts', 0)}")
+        lines.append(f"- outcome: {issue.get('outcome', 'no action recorded')}")
+        lines.append("")
+    out.write_text("\n".join(lines))
+    append_event("workflow-check", "report_written", details={"path": str(out), "issues": len(issues)})
+    return out
+
+
+def tick_workflow_check():
+    cfg = load_config()
+    max_attempts = int(cfg.get("workflow_check_max_attempts", 3))
+    write_agent_status("workflow-check", "running", "Scanning feature workflows for blockers.")
+
+    reaped = reap()
+    issues = []
+    action_cache = {}
+
+    def cached_action(name, fn):
+        if name not in action_cache:
+            action_cache[name] = fn()
+        return action_cache[name]
+
+    for feature in list_features():
+        if feature.get("status") not in ("open", "finalizing"):
+            continue
+        issue = _diagnose_feature_workflow_issue(feature, cfg)
+        if not issue:
+            continue
+        attempts = _workflow_check_attempts(feature, issue["issue_key"])
+        issue["attempts"] = attempts
+        issue["max_attempts"] = max_attempts
+        outcome = "diagnosed only"
+
+        if issue.get("action") and attempts < max_attempts:
+            action = issue["action"]
+            if action == "retry_task":
+                ok = _workflow_check_retry_task(
+                    issue["task"],
+                    issue["task_state"],
+                    reason=f"workflow-check: {issue['diagnosis'][:120]}",
+                )
+                outcome = "task requeued" if ok else "retry failed"
+            elif action == "restart_workers_then_retry":
+                restarted, failed = cached_action(
+                    "restart_workers",
+                    _workflow_check_restart_workers,
+                )
+                ok = _workflow_check_retry_task(
+                    issue["task"],
+                    issue["task_state"],
+                    reason="workflow-check: worker runtime reloaded, retrying task",
+                )
+                outcome = (
+                    f"workers restarted={len(restarted)} failed={len(failed)}; "
+                    f"{'task requeued' if ok else 'retry failed'}"
+                )
+            elif action == "feature_finalize":
+                checked, opened, abandoned, skipped = cached_action(
+                    "feature_finalize",
+                    lambda: feature_finalize(dry_run=False),
+                )
+                refreshed = read_feature(feature["feature_id"]) or feature
+                if refreshed.get("status") != "open":
+                    outcome = (
+                        f"feature-finalize ran: checked={checked} opened={opened} "
+                        f"abandoned={abandoned} skipped={skipped}; feature now {refreshed.get('status')}"
+                    )
+                else:
+                    outcome = (
+                        f"feature-finalize ran: checked={checked} opened={opened} "
+                        f"abandoned={abandoned} skipped={skipped}; feature still open"
+                    )
+            elif action == "pr_sweep":
+                checked, merged, fb, alerted, skipped = cached_action(
+                    "pr_sweep",
+                    lambda: pr_sweep(dry_run=False),
+                )
+                outcome = (
+                    f"pr-sweep ran: checked={checked} merged={merged} "
+                    f"feedback={fb} alerted={alerted} skipped={skipped}"
+                )
+            else:
+                outcome = f"unknown action {action}"
+
+            _workflow_check_record_attempt(feature["feature_id"], issue["issue_key"], action, outcome)
+            issue["attempts"] = attempts + 1
+
+        elif issue.get("action"):
+            outcome = "automatic attempts exhausted"
+
+        issue["outcome"] = outcome
+        issues.append(issue)
+
+    report_path = _write_workflow_check_report(issues, reaped=reaped) if issues else None
+    detail = f"issues={len(issues)} reaped={reaped} report={report_path.name if report_path else '-'}"
+    write_agent_status("workflow-check", "idle", detail)
+    return {"issues": len(issues), "reaped": reaped, "report": str(report_path) if report_path else None}
+
+
 def _build_investigation_context(question):
     project = _telegram_guess_project(question)
     pr_number = _telegram_find_pr_number(question)
@@ -5116,6 +5491,8 @@ def main(argv=None):
     p_audit = sub.add_parser("tick-template-audit")
     p_audit.add_argument("--today", default=None)
 
+    sub.add_parser("workflow-check")
+
     sub.add_parser("reap")
     sub.add_parser("rotate-logs")
 
@@ -5196,6 +5573,9 @@ def main(argv=None):
         print("enqueued:" + (",".join(out) if out else "(none)"))
     elif args.cmd == "tick-template-audit":
         print(tick_template_audit(today=args.today))
+    elif args.cmd == "workflow-check":
+        out = tick_workflow_check()
+        print(json.dumps(out, sort_keys=True))
     elif args.cmd == "reap":
         n = reap()
         print(f"reaped {n}")

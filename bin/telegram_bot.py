@@ -345,6 +345,8 @@ def classify_report(name):
     """Return (emoji, human_title) for a report filename."""
     if name.startswith("regression-failure_"):
         return "🚨", "REGRESSION FAILURE"
+    if name.startswith("workflow-check_"):
+        return "🛠️", "Workflow Check"
     if name.startswith("morning_"):
         return "📊", "Morning Report"
     if name.startswith("evening_"):

@@ -20,24 +20,41 @@
     "generator_model": "claude-opus",
     "hash": "sha256:93e4dc4a077e25c0ebb35a7365403692063b102a72b0ad6af62244ea379409d0",
     "path": "braid/templates/lvc-historian-update.mmd",
+    "recent_outcomes": [
+      "ok"
+    ],
     "topology_errors": 0,
-    "uses": 116
+    "uses": 117
   },
   "lvc-implement-operator": {
     "created_at": "2026-04-13T21:27:01",
     "generator_model": "claude-opus",
     "hash": "sha256:a513adbfc98884a74a05308752ae611085e17546f6a4e458aaabbce6908a7872",
     "path": "braid/templates/lvc-implement-operator.mmd",
+    "recent_outcomes": [
+      "ok",
+      "ok",
+      "ok"
+    ],
     "topology_errors": 14,
-    "uses": 32
+    "uses": 35
   },
   "lvc-reviewer-pass": {
     "created_at": "2026-04-13T03:11:41",
     "generator_model": "claude-opus",
     "hash": "sha256:658bce98cc8eaf6df4fbc368245c37026c82bdfbd67710095d6370d6ee2cbb88",
     "path": "braid/templates/lvc-reviewer-pass.mmd",
+    "recent_outcomes": [
+      "ok",
+      "ok",
+      "ok",
+      "ok",
+      "ok",
+      "ok",
+      "ok"
+    ],
     "topology_errors": 1,
-    "uses": 161
+    "uses": 172
   },
   "memory-synthesis": {
     "created_at": "2026-04-14T00:30:00",
@@ -52,16 +69,29 @@
     "generator_model": "hand-authored",
     "hash": "sha256:35bbfe1a966bab208466781f2cedde53407386dd1e1f1d9d98c7080b2c87e5e6",
     "path": "braid/templates/pr-address-feedback.mmd",
+    "recent_outcomes": [
+      "ok",
+      "ok",
+      "ok",
+      "ok",
+      "ok",
+      "ok",
+      "ok"
+    ],
     "topology_errors": 0,
-    "uses": 0
+    "uses": 9
   },
   "review-address-feedback": {
     "created_at": "2026-04-14T07:20:00",
     "generator_model": "hand-authored",
     "hash": "sha256:80ae72841a6ccc055b6d8900dfe116470b227de58d088512b2c9bbc245970a87",
     "path": "braid/templates/review-address-feedback.mmd",
+    "recent_outcomes": [
+      "ok",
+      "ok"
+    ],
     "topology_errors": 0,
-    "uses": 0
+    "uses": 3
   },
   "trp-implement-pipeline-stage": {
     "created_at": "2026-04-14T00:30:00",

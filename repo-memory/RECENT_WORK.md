@@ -103,6 +103,20 @@ protection.
 
 ---
 
+## 2026-04-15 — Roadmap reprioritized around autonomous-runtime correctness
+
+**Summary:** Updated the orchestrator's own roadmap and memory to make control-plane reliability the top priority. The trigger was live evidence that the biggest blockers were orchestration failures rather than solver capability: secret-scan false blockers, `BRAID_REFINE` parser brittleness, stale retry state, and workflow bugs that required manual diagnosis.
+
+**Changed:**
+
+- `repo-memory/ROADMAP.md` — inserted a new top-priority sequence `[R-017]..[R-023]` covering typed blocker taxonomy, deterministic retry/reset semantics, event-sourced workflow diagnosis, declarative repair policy, synthetic canaries, environment normalization, and a guarded self-repair lane. Marked parallelism / visual BRAID work as secondary until those land.
+- `repo-memory/CURRENT_STATE.md` — added a priority-reset section and new active concerns describing implicit contracts, stale retry state, signature-based repair, and environment drift as the present autonomy blockers.
+- `repo-memory/DECISIONS.md` — recorded the architectural decision that control-plane correctness now takes precedence over throughput expansion and future-work features.
+
+**Why:** The system is already a credible autonomous operator prototype, but the next gains come from making it more deterministic, typed, and self-healing rather than making it broader or faster.
+
+---
+
 ## 2026-04-13 — Feature-branch delivery model + 6-slot codex fleet (commit `cc23abd`)
 
 **Summary:** Upgrade from pattern C (per-task PRs opened against `main`) to feature-branch delivery. Planner bundles logically-related tasks into a feature; codex tasks inherit `feature_id` and are serialized per feature by `atomic_claim`; task PRs target `feature/<id>` and auto-merge when green; a separate `feature-finalize` tick opens the single feature→main PR for human review.

@@ -2,11 +2,81 @@
 
 _Append-only. Top-to-bottom is priority order. Status mutates in place; entries are never deleted. DONE/ABANDONED stay for history and are skipped by the planner._
 
-**Theme:** Harden the orchestrator from "working vertical slice" into a trusted autonomous runtime — enforce scoping controls before enabling the workflow, close the observability gaps around BRAID template health, prove one feature end-to-end on lvc-standard, then widen fleet parallelism and start on the BRAID paper §7 futures.
+**Theme:** Harden the orchestrator from "working vertical slice" into a trusted autonomous runtime. As of 2026-04-15, autonomy hardening takes precedence over throughput expansion, visual BRAID futures, and fleet widening. The next phase is to make the control plane typed, deterministic, and self-healing before we ask it to do more.
 
-**Critical path:** R-001 → R-002 → R-003 (vertical-slice canary) → R-004/R-005 (hardening the new pr-sweep surface) → R-006/R-007 (closing the generator-quality loop) → R-011 (parallelism) → R-012/R-013 (paper §7 futures).
+**Critical path:** R-017/R-018 (typed workflow contracts + task reset semantics) → R-019/R-020 (event-sourced diagnosis + repair policy) → R-021 (synthetic canary workflows) → R-022 (environment normalization) → R-023 (guarded orchestrator self-repair lane) → revisit R-003/R-011/R-013 once the runtime is trustworthy.
 
 ## Active
+
+### [R-017] Typed blocker taxonomy + workflow contracts
+- **Status:** TODO
+- **Feature id:** null
+- **Goal:** Replace free-text failure interpretation with explicit machine-checked blocker classes so planner, checker, reaper, and Telegram reports reason over the same contract.
+- **Scope:** Introduce canonical reason codes for task failure/block (`planner_contract_error`, `template_missing_edge`, `runtime_env_dirty`, `delivery_auth_expired`, `qa_baseline_red`, `task_state_corruption`, etc.); stamp them on task/feature records at transition time; make `workflow-check`, `pr-sweep`, and retry logic consume these codes instead of string matching; add transition/doctest coverage for every code path.
+- **Out of scope:** Model-side ontology learning, cross-repo shared taxonomies outside this orchestrator, human-friendly root-cause prose generation beyond a short summary layer.
+- **Acceptance:** No repair path depends on parsing arbitrary stderr/log prose; `workflow-check` reports exact blocker classes with confidence; Telegram output names the blocker code and attempted repair action deterministically.
+- **Depends on:** none.
+- **Notes:** This is the highest-leverage fix for the recent secret-scan, `BRAID_REFINE`, and planner crash incidents. Without typed contracts, autonomy remains prompt-driven rather than runtime-driven.
+
+### [R-018] Deterministic task reset / retry API
+- **Status:** TODO
+- **Feature id:** null
+- **Goal:** Retrying a task must produce a clean new attempt state instead of carrying stale terminal fields that can mislead later automation.
+- **Scope:** Add a first-class reset/retry path that archives prior terminal metadata (`finished_at`, `failure_reason`, `false_blocker_claim`, stale blocker fields, prior repair attempt stamps) into attempt history and clears the live task record before requeue; thread the same semantics through manual transitions, workflow-check retries, and template-refine re-dispatch.
+- **Out of scope:** Database migration, per-field historical diff rendering, multi-host idempotency tokens.
+- **Acceptance:** A retried task in `queued/` or `running/` contains only live-attempt fields plus archived attempt history; downstream tools never have to guess whether a field is stale.
+- **Depends on:** [R-017].
+- **Notes:** This removes the current "cosmetic but dangerous" stale-state debt visible on retried tasks.
+
+### [R-019] Event-sourced workflow diagnosis
+- **Status:** TODO
+- **Feature id:** null
+- **Goal:** Workflow health and frontier computation should be reconstructed from the append-only event stream and transition ledger, not inferred from mutable JSON blobs with partial state.
+- **Scope:** Promote `state/runtime/events.jsonl` + `transitions.log` into the canonical diagnostic substrate; add an event-backed workflow summarizer that computes frontier task, blocker ancestry, repair history, and stuckness duration; make `workflow-check` and status/report paths consume that summary.
+- **Out of scope:** Full external event store, remote log shipping, BI dashboards.
+- **Acceptance:** For any open feature, one command can explain "what is blocked, since when, by which event chain, after which repairs" without reading per-task JSON directly.
+- **Depends on:** [R-017], [R-018].
+- **Notes:** The current file-backed state machine is fine; the weakness is using mutable task files as both execution substrate and forensic truth.
+
+### [R-020] Declarative repair policy engine
+- **Status:** TODO
+- **Feature id:** null
+- **Goal:** Self-heal behavior should be configured as explicit repair classes with bounded actions, cooldowns, and escalation rules instead of being embedded as ad-hoc if/else logic in the checker.
+- **Scope:** Introduce a repair-policy table mapping blocker classes to allowed actions (`retry_task`, `restart_workers_then_retry`, `feature_finalize`, `pr_sweep`, `template_refine`, `escalate_only`), cooldown windows, max attempts, and confidence thresholds; have `workflow-check` execute policy rather than custom branching.
+- **Out of scope:** General-purpose rule engine, self-modifying policy, ML-learned repair selection.
+- **Acceptance:** Adding or disabling a repair path does not require editing the main diagnostic logic; repeated failures obey cooldowns and bounded retry budgets automatically.
+- **Depends on:** [R-017], [R-019].
+- **Notes:** This is the path from "known signatures" to a controlled autonomous repair loop.
+
+### [R-021] Synthetic canary workflows
+- **Status:** TODO
+- **Feature id:** null
+- **Goal:** The orchestrator should continuously prove that its own plan -> implement -> review -> QA -> finalize path still works by running tiny known-safe canary workflows on a schedule.
+- **Scope:** Add a synthetic repo or dedicated canary lane inside an existing low-risk repo; schedule end-to-end canary features every few hours; assert key invariants (planner emits children, retry works, template-refine works, PR opens, finalization path stays healthy); surface failures as first-class runtime incidents.
+- **Out of scope:** Expensive full-stack regressions, load/perf benchmarking, cross-host chaos tests.
+- **Acceptance:** A broken workflow path is detected by a canary failure before a user-facing feature stalls on the same class of bug.
+- **Depends on:** [R-019], [R-020].
+- **Notes:** This should become the runtime's equivalent of CI for the orchestrator itself.
+
+### [R-022] Environment normalization for autonomous operation
+- **Status:** TODO
+- **Feature id:** null
+- **Goal:** Local machine drift should stop being a major blocker class for autonomous work.
+- **Scope:** Normalize and validate launchd env, GH auth, required binaries, repo cleanliness preconditions, worktree root state, and per-project health before slots claim work; add an explicit environment health report and preflight gates with typed failure codes.
+- **Out of scope:** Full containerization of the orchestrator, multi-host scheduling, replacing launchd.
+- **Acceptance:** The system can explain "workflow blocked because host env is degraded" in one typed status, and routine auth/path/worktree drift is caught before a live task is burned on it.
+- **Depends on:** [R-017].
+- **Notes:** This is the operational half of autonomy. Without it, the control plane remains too dependent on host folklore.
+
+### [R-023] Guarded orchestrator self-repair lane
+- **Status:** TODO
+- **Feature id:** null
+- **Goal:** Unknown orchestrator bugs should have a controlled path to generate, review, and land fixes against the orchestrator repo itself instead of only escalating to humans.
+- **Scope:** Create a separate self-repair workflow class that can open an orchestrator feature branch/PR from a diagnosed runtime bug, run the orchestrator self-test suite plus synthetic canaries, and require explicit human approval before merge to `main`.
+- **Out of scope:** Fully autonomous self-merge to `main`, unreviewed hot patching of the live control plane, recursive self-modification without tests.
+- **Acceptance:** A diagnosed orchestrator bug can be turned into a bounded repair branch with evidence, without mixing that work into normal project delivery lanes.
+- **Depends on:** [R-017], [R-020], [R-021], [R-022].
+- **Notes:** This is how the system eventually handles "issue requires a fix to the workflow" safely instead of treating it as out-of-band operator work.
 
 ### [R-001] Planner cap + planner_enabled toggle + telegram controls
 - **Status:** DONE (commit `b63b6c4`, 2026-04-14)
@@ -29,14 +99,14 @@ _Append-only. Top-to-bottom is priority order. Status mutates in place; entries 
 - **Notes:** Runtime activation, not code. telegram.json was seeded in the pass-1 bootstrap (commit `5900d4d`) and is gitignored; no population step is needed. The stale-sweep is a pre-flight runtime step kept out of the R-001 commit by design.
 
 ### [R-003] Vertical-slice canary run on lvc-standard
-- **Status:** IN_PROGRESS (feature canary live, 2026-04-14)
+- **Status:** IN_PROGRESS (deprioritized behind R-017..R-023, 2026-04-15)
 - **Feature id:** null
 - **Goal:** First end-to-end feature runs planner → codex → reviewer → qa → pr-sweep → feature-finalize on lvc-standard without human intervention beyond the feature→main merge click, with the BRAID health canary green.
 - **Scope:** Let the planner pick the top TODO from lvc `ROADMAP.md` — currently `[R-001] Prometheus/OTel metrics exporter module`; let the planner enqueue one feature for it; observe the pass through every state; capture the full transition trace in `repo-memory/RECENT_WORK.md`; compute first live BRAID PPD numbers for `lvc-implement-operator`. Pinned pre-run baselines: `lvc-implement-operator` uses=30 topology_errors=14, `lvc-historian-update` uses=116, `lvc-reviewer-pass` uses=159.
 - **Out of scope:** dag-framework / trp runs (still disabled by R-001 flags); parallel features; deliberate regression-failure drills (separate pass-2 entry).
 - **Acceptance:** One task PR auto-merged to `feature/<id>` without human review beyond auto-handle authors; feature-finalize opens the feature→main PR; `braid/index.json[lvc-implement-operator].topology_errors` **does not grow** from its pinned 14 (the canary gate in CURRENT_STATE "Known concerns"); `braid/index.json[lvc-implement-operator].uses` increments by 1+; no reaper-salvaged stale claims in `transitions.log`.
 - **Depends on:** [R-001], [R-002].
-- **Notes:** This is the forcing function for every preceding pass-1/pass-2 claim. Failure modes are the interesting output — catalog them as `repo-memory/FAILURES.md` entries and promote any blocker to an R-XXX of its own.
+- **Notes:** This remains useful as a real-world proving ground, but it is no longer the top priority. Current failures are feeding the autonomy-hardening roadmap above; do not widen scope from this canary until R-017..R-022 materially land.
 
 ### [R-004] drift_threshold per-project override
 - **Status:** DONE (commit pending in orchestrator worktree, 2026-04-14)
@@ -91,22 +161,22 @@ _Append-only. Top-to-bottom is priority order. Status mutates in place; entries 
 ### [R-010] Secrets scanning on repo-memory writes
 - **Status:** DONE (commit pending in orchestrator worktree, 2026-04-14)
 - **Feature id:** null
-- **Goal:** Every historian-enqueued write to `repo-memory/*.md` passes through a secrets detector before commit, blocking on any hit.
-- **Scope:** Lightweight regex + entropy detector invoked from the historian worker path; rejection list for known benign patterns (e.g. example hashes in docs); abort commit on hit with a Telegram alert so the human can inspect the offending diff.
+- **Goal:** Every historian-enqueued write to `repo-memory/*.md` passes through a secrets detector before commit, surfacing suspicious content without blocking delivery.
+- **Scope:** Lightweight regex + entropy detector invoked from the historian worker path; findings logged for operator review, with optional Telegram/report surfacing for human inspection.
 - **Out of scope:** Full TruffleHog integration, historical log scanning, credential rotation workflow.
-- **Acceptance:** Landed in worktree: repo-memory markdown writes are scanned before historian auto-commit and during memory-synthesis candidate application, synthetic AWS-key content is rejected with a clear `repo-memory secret-scan hit` failure, and a Telegram-pushable report is written for human inspection.
+- **Acceptance:** Landed in worktree: repo-memory markdown writes are scanned before historian auto-commit and during memory-synthesis candidate application, synthetic AWS-key content is surfaced clearly in logs/reports, and task delivery continues without a hard stop.
 - **Depends on:** none.
 - **Notes:** Deferred from pass-1 plan §5. Becomes first-class once `repo-memory` is the system of record and the historian is appending on every task completion.
 
 ### [R-011] 6-slot codex fleet activation + cross-feature parallelism
-- **Status:** TODO
+- **Status:** TODO (explicitly blocked on R-017..R-022)
 - **Feature id:** null
 - **Goal:** Unblock the dormant `worker.codex-2..6.plist` slots and let the orchestrator run multiple features in parallel across projects without deadlock or VM-resource contention.
 - **Scope:** Load the 5 extra codex plists; lift the R-001 one-active-feature-per-project cap to a configurable `max_active_features` (default 1, override per project); add cross-repo advisory locks to prevent simultaneous compose-heavy regression sweeps from colliding on the colima VM; 3-to-6 concurrent-feature soak test with memory pressure monitoring.
 - **Out of scope:** Dynamic auto-scaling, cross-host orchestration, budget-based worker throttling.
 - **Acceptance:** Six codex workers claim six distinct `feature_id`s concurrently without deadlock or duplicate claims; memory pressure stays under 14GB on the 16GB M4 throughout the soak; no repo ends up with corrupt feature state; `transitions.log` shows the intended interleaving.
 - **Depends on:** [R-003], [R-005], [R-008] (observability must land before unleashing parallelism).
-- **Notes:** The 6-slot fleet was provisioned in plan pass-1 §3 but intentionally held back pending first successful vertical slice. This entry is the gate.
+- **Notes:** Parallelism is no longer the next move. Throughput expansion stays gated behind typed workflow contracts, deterministic recovery, canary coverage, and environment normalization.
 
 ### [R-012] Dynamic mid-task refinement — `BRAID_REFINE` contract
 - **Status:** DONE
@@ -119,14 +189,14 @@ _Append-only. Top-to-bottom is priority order. Status mutates in place; entries 
 - **Notes:** Implemented in `bin/worker.py` / `bin/orchestrator.py` as a bounded one-round refine loop. The current version intentionally rewrites the full Mermaid body through `braid_template_write()` instead of applying an in-place graph patch.
 
 ### [R-013] Visual graph ingestion (BRAID paper §7)
-- **Status:** TODO
+- **Status:** TODO (deferred until control-plane hardening lands)
 - **Feature id:** null
 - **Goal:** Solvers receive a rendered PNG of the Mermaid graph alongside the source, letting vision-capable engine variants reason over topology visually instead of parsing Mermaid text.
 - **Scope:** Add `mermaid-cli` to the worker harness; render template → PNG at dispatch time; attach the image to the codex prompt when the active engine variant supports image inputs; fall back to source-only for non-vision engines; cache renders keyed on template hash so regens invalidate automatically.
 - **Out of scope:** Interactive graph editing, live topology visualisation, animated traversal replays.
 - **Acceptance:** A codex run with an image-enabled engine traverses the visual graph and emits `BRAID_OK` on a task where the Mermaid source has been deliberately stripped from the prompt (image only).
 - **Depends on:** [R-012].
-- **Notes:** BRAID paper §7 explicit future-work item. Value hinges on downstream model support — not all codex variants accept image prompts.
+- **Notes:** Interesting, but not on the critical path to autonomous operation. Do not spend runtime complexity budget here before the orchestrator itself is more deterministic.
 
 ### [R-015] Durable gh auth — replace keychain OAuth token with long-lived PAT
 - **Status:** IN_PROGRESS

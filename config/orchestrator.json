@@ -9,6 +9,7 @@
     "review_workers": 1,
     "qa_workers": 1
   },
+  "workflow_check_max_attempts": 3,
   "projects": [
     {
       "name": "lvc-standard",
