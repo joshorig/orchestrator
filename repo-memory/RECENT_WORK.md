@@ -4,6 +4,44 @@ _Append-only log. New entries go at the top. One entry per completed task or mil
 
 ---
 
+## 2026-04-15 — R-022 / R-023 completion: environment health gates + guarded self-repair lane
+
+**Summary:** Closed out `R-022` and `R-023`. The runtime now has a first-class environment health model that names host/project drift before work is burned on it, and a guarded self-repair lane that can open bounded orchestrator-repo fixes through the normal feature/PR flow without allowing unattended self-merge.
+
+**Changed:**
+- `bin/orchestrator.py` — added cached `environment_health()` / `environment_health_text()` with typed issues for missing binaries, missing `GH_TOKEN`, unloaded launchd jobs, missing worktree root, canonical repo fetch/cleanliness failures, and missing QA scripts.
+- `bin/orchestrator.py` — planner dispatch, canary dispatch, and `atomic_claim()` now gate on blocking environment issues instead of claiming work that cannot run safely.
+- `bin/orchestrator.py` — `status`, `report`, `workflow-check`, Telegram `/env`, and investigation context now surface environment degradation explicitly.
+- `bin/orchestrator.py` — added `enqueue-self-repair` plus Telegram `/self_repair`, `self_repair` feature metadata, and direct codex task creation for the orchestrator repo using the new `orchestrator-self-repair` BRAID template.
+- `config/orchestrator.json` — added `environment_health`, `self_repair`, and a manual-only `devmini-orchestrator` project entry with orchestrator-local QA scripts.
+- `qa/{smoke,regression}.sh` — added orchestrator self-test scripts that run py-compile, doctests, `workflow-check`, canary tick, and report generation.
+- `braid/templates/orchestrator-self-repair.mmd` and `braid/generators/orchestrator-self-repair.prompt.md` — added the dedicated self-repair graph/template pair.
+- `README.md`, `bin/telegram_bot.py`, and `repo-memory/CURRENT_STATE.md` — documented the new env-health and self-repair surfaces and updated current-state descriptions.
+
+**Validation:** `python3 -m py_compile bin/orchestrator.py bin/worker.py bin/telegram_bot.py`, `python3 -m doctest bin/orchestrator.py`, `python3 bin/orchestrator.py env-health --refresh`, `python3 bin/orchestrator.py workflow-check`, and `python3 bin/orchestrator.py enqueue-self-repair --summary 'Test self-repair lane' --evidence 'verification only'` all ran successfully. In the live dirty worktree, `env-health` correctly reports `project_main_dirty devmini-orchestrator`, `workflow-check` surfaces that alongside the real `lvc` blocker, and `enqueue-self-repair` fails safely with `{"reason": "environment_degraded"}` rather than opening a repair branch from an already-dirty canonical checkout.
+
+**Follow-on:** The guarded lane is intentionally manual-triggered. The next step, if wanted later, is teaching `workflow-check` to recommend or pre-fill self-repair evidence for specific orchestrator bug classes without auto-enqueuing them.
+
+---
+
+## 2026-04-15 — R-021 completion: synthetic canary lane scheduled, surfaced, and freshness-checked
+
+**Summary:** Closed out `R-021` with a real synthetic canary lane that reuses the normal planner/feature path, is scheduled by launchd, and is visible as first-class runtime health. The orchestrator can now queue bounded canary features on a cadence, stamp them explicitly on feature records, surface them in status/report/workflow-check, and detect stale/missing canary coverage separately from ordinary feature blockers.
+
+**Changed:**
+- `bin/orchestrator.py` — added `synthetic_canary` config defaults, dict-aware `load_config()` merging, `create_feature(..., canary=...)`, `is_canary_feature()`, `list_canary_features()`, `_latest_canary_feature()`, `_canary_interval_due()`, and `tick_canary_workflows(force=False)`.
+- `bin/orchestrator.py` — canary features now flow through the normal planner task path (`tick-canary` creates a feature + planner task with synthetic roadmap payload), and feature/workflow summaries now carry `canary` metadata.
+- `bin/orchestrator.py` — `status`, `report`, `features`, and `workflow-check` reports now mark canary features explicitly; `workflow-check` also has canary-specific freshness/staleness issue classes (`canary_missing_recent_success`, `canary_stale`) plus an `enqueue_canary` repair action.
+- `config/orchestrator.json` — enabled the first synthetic canary lane on `lvc-standard` with a 6-hour interval, 24-hour success SLA, 2-hour max frontier age, and a bounded safety-oriented roadmap body.
+- `README.md` — documented `tick-canary-workflows` and the new `canary-workflows` launchd scheduler role.
+- `~/Library/LaunchAgents/com.devmini.orchestrator.canary-workflows.plist` — installed and loaded a 6-hour launchd job that runs `python3 bin/orchestrator.py tick-canary-workflows`.
+
+**Validation:** `python3 -m py_compile bin/orchestrator.py bin/worker.py bin/telegram_bot.py`, `python3 -m doctest bin/orchestrator.py`, `python3 bin/orchestrator.py workflow-check`, and `python3 bin/orchestrator.py report morning` all pass. `launchctl list | rg com.devmini.orchestrator.canary-workflows` shows the scheduler loaded. A live `python3 bin/orchestrator.py tick-canary-workflows` call returned `{"enqueued": 0, "reason": "project_busy"}`, which is the intended safety gate while `lvc-standard` still has an open real feature.
+
+**Follow-on:** The main remaining improvement is quality of the canary payload itself. The lane is operational now, but a later pass should make the synthetic roadmap body assert specific repair/refine invariants more directly instead of only driving a bounded end-to-end feature through the existing pipeline.
+
+---
+
 ## 2026-04-15 — Durable gh token loading + BRAID refine loop + unresolved-review workflow on lvc main
 
 **Summary:** Standardized GitHub CLI auth on a file-backed `config/gh-token`
@@ -114,6 +152,161 @@ protection.
 - `repo-memory/DECISIONS.md` — recorded the architectural decision that control-plane correctness now takes precedence over throughput expansion and future-work features.
 
 **Why:** The system is already a credible autonomous operator prototype, but the next gains come from making it more deterministic, typed, and self-healing rather than making it broader or faster.
+
+---
+
+## 2026-04-15 — R-017 first pass: typed blocker metadata + workflow-check consumption
+
+**Summary:** Added the first typed blocker layer to the orchestrator so new task failures can carry a machine-readable blocker contract instead of forcing `workflow-check` to infer everything from free-text `topology_error` / `failure` strings.
+
+**Changed:**
+
+- `bin/orchestrator.py` — added canonical `BLOCKER_CODES`, blocker helpers (`make_blocker`, `set_task_blocker`, `clear_task_blocker`, `task_blocker`), stored `blocker` on new tasks, cleared blockers automatically when tasks re-enter active/non-terminal flow, and threaded blocker codes into transition events.
+- `bin/orchestrator.py` — updated `workflow-check` to prefer typed blocker metadata, use blocker codes in issue keys, and include blocker details in the markdown report. Legacy blocker inference remains as a compatibility shim for existing tasks already sitting in the queue.
+- `bin/worker.py` — stamped explicit blocker codes for the live blocker classes we have actually hit in production so far: `template_missing`, `template_missing_edge`, `template_refine_exhausted`, `project_main_dirty`, `false_blocker_claim`, `invalid_braid_refine`, and `template_graph_error`.
+- `repo-memory/ROADMAP.md` — marked `[R-017]` as in progress.
+
+**Why:** This is the minimum useful step toward deterministic workflow diagnosis. The checker can now reason over a shared blocker taxonomy, while older tasks remain readable through the inference fallback.
+
+---
+
+## 2026-04-15 — R-018 first pass: deterministic attempt reset for retries
+
+**Summary:** Replaced the ad-hoc retry path that only nulled a few fields with a shared attempt-reset API. Retries now archive the prior attempt snapshot before a task goes back to `queued`.
+
+**Changed:**
+
+- `bin/orchestrator.py` — new task fields `attempt` and `attempt_history`.
+- `bin/orchestrator.py` — added `reset_task_for_retry(...)`, which archives the previous attempt state (`failure`, `topology_error`, `false_blocker_claim`, `blocker`, timestamps, log path, refine request, etc.), clears transient live-attempt fields, stamps retry metadata, increments `attempt`, and requeues the task.
+- `bin/orchestrator.py` — switched `workflow-check` retries and reaper-driven retries (dead pid recovery, template regenerated, template refined) over to the shared reset API.
+- `bin/orchestrator.py` — added `retry-task --task <id> --reason ... [--from <state>] [--source <tag>]` so manual operator recovery uses the same semantics instead of raw state moves.
+- `repo-memory/ROADMAP.md` — marked `[R-018]` as in progress.
+
+**Why:** This removes the stale-state leak where retried tasks kept old terminal metadata in the live record. The queue now preserves history without forcing diagnostics to guess whether a blocker/failure field is current.
+
+---
+
+## 2026-04-15 — R-018 second pass: retry lineage visible in task/status/report output
+
+**Summary:** Finished the operator-facing half of the retry work. Attempt lineage is now visible in the standard inspection surfaces, and the checker fallback no longer crashes when it encounters older tasks without typed blocker metadata.
+
+**Changed:**
+
+- `bin/orchestrator.py` — queue samples now annotate retried tasks with `a<attempt>`.
+- `bin/orchestrator.py` — `task_text()` now shows current attempt, blocker metadata, last retry metadata, and the last three archived attempt entries.
+- `bin/orchestrator.py` — `status_text()` now reports how many tasks in the queue tree are on attempt `>1`.
+- `bin/orchestrator.py` — `report()` now includes a `## Retries` section listing the most recent retried tasks and their last retry source/timestamp.
+- `bin/orchestrator.py` — hardened `_workflow_check_known_task_action()` so tasks lacking both typed blocker metadata and legacy-inferable blocker fields degrade to "diagnosed only" instead of crashing `workflow-check`.
+
+**Validation:** `python3 -m py_compile bin/orchestrator.py bin/worker.py bin/telegram_bot.py` passed. `python3 bin/orchestrator.py workflow-check` now completes and reports one genuine unresolved frontier issue instead of raising an exception.
+
+**Why:** Retry semantics are not useful if attempt history is invisible. This makes retry lineage inspectable in the default operational surfaces and closes the null-blocker crash path found during validation.
+
+---
+
+## 2026-04-15 — R-019 first pass: transition-backed workflow summary
+
+**Summary:** Started the event-sourced diagnosis work by parsing `transitions.log` into structured rows and using that event history to compute per-feature frontier timing for workflow diagnosis and investigation context.
+
+**Changed:**
+
+- `bin/orchestrator.py` — added `read_transitions(...)` and `task_state_entered_at(...)` to turn the append-only transition log into structured runtime evidence.
+- `bin/orchestrator.py` — added `feature_workflow_summary(feature)` which computes planner/frontier state, the frontier's current-state entry timestamp, transition reason, attempt number, and blocker metadata.
+- `bin/orchestrator.py` — `workflow-check` now attaches that workflow summary to issues and includes frontier timing/reason in `workflow-check_*.md` reports.
+- `bin/orchestrator.py` — `_build_investigation_context()` now includes `FEATURE_WORKFLOWS`, so `/ask` gets the same event-backed workflow view instead of rebuilding diagnosis from mutable task files alone.
+- `README.md` — documented the new `retry-task` command as the operator-facing retry path now that raw requeues are no longer the intended recovery mechanism.
+- `repo-memory/ROADMAP.md` — marked `[R-018]` done and `[R-019]` in progress.
+
+**Validation:** `workflow-check` now completes and reports the real unresolved frontier task (`task-20260415-101139-786d4a`) with its current-state timing instead of failing inside the checker.
+
+**Why:** This is the first step toward making workflow diagnosis event-backed rather than JSON-blob-centric. It is not full event sourcing yet, but it moves the reporting/checker path onto the transition ledger for causal timing.
+
+---
+
+## 2026-04-15 — R-019 second pass: feature workflow summary reused in status/report
+
+**Summary:** Extended the transition-backed workflow summary so it is no longer only a `workflow-check` internal. The normal operator surfaces now show live frontier state for open features.
+
+**Changed:**
+
+- `bin/orchestrator.py` — `feature_workflow_summary(feature)` now carries `project` and feature `summary`, and `open_feature_workflow_summaries()` returns the active set.
+- `bin/orchestrator.py` — `status_text()` now lists the current frontier task/state for open features instead of only per-project feature counts.
+- `bin/orchestrator.py` — `report()` now adds an `## Open Feature Workflows` section showing each feature's frontier task, frontier state, attempt, and event-backed `entered_at` timestamp.
+- `bin/orchestrator.py` — investigation context now includes `FEATURE_WORKFLOWS`, sourced from the same shared summary helper rather than a bespoke diagnosis path.
+
+**Validation:** `python3 bin/orchestrator.py status`, `python3 bin/orchestrator.py report morning`, and `python3 bin/orchestrator.py workflow-check` all run cleanly. The current open feature now shows up in both `status` and the morning report as `task-20260415-101139-786d4a` in `failed` since `2026-04-15T21:27:32`.
+
+**Why:** This reduces duplication in feature diagnosis and moves the operator-facing surfaces onto the same workflow summary that powers the checker.
+
+---
+
+## 2026-04-15 — R-019 third pass: recent event activity folded into feature workflow summary
+
+**Summary:** Extended the shared feature workflow summary beyond `transitions.log` by pulling in recent `events.jsonl` rows, then replaced the older bespoke feature-diagnosis helper with a view derived from the shared summary.
+
+**Changed:**
+
+- `bin/orchestrator.py` — added `read_events(...)` for structured reads from `state/runtime/events.jsonl`.
+- `bin/orchestrator.py` — `feature_workflow_summary(feature)` now includes `recent_events`, capturing the last feature-scoped runtime events.
+- `bin/orchestrator.py` — `_recent_feature_diagnosis()` now derives its output from `open_feature_workflow_summaries(...)` instead of rebuilding planner/frontier state independently.
+- `bin/orchestrator.py` — `status_text()` and `report()` now show the last feature-scoped event alongside frontier state, so the open-feature view carries both "when did the frontier enter this state?" and "what most recently happened in this workflow?".
+
+**Validation:** `python3 bin/orchestrator.py status`, `python3 bin/orchestrator.py report morning`, and `python3 bin/orchestrator.py workflow-check` all still run cleanly. The live open feature now shows `last_event=2026-04-15T21:38:44 implementer:task_transition` in both `status` and the report.
+
+**Why:** This is the first point where the shared workflow summary combines both transition timing and recent event activity, which is materially closer to the event-backed diagnosis target than the earlier state-only views.
+
+---
+
+## 2026-04-15 — R-019 fourth pass: open-feature aggregation now uses shared workflow summary
+
+**Summary:** Removed more of the remaining ad-hoc feature counting logic. Open-feature aggregation in status-style surfaces now reads from `open_feature_workflow_summaries(...)` instead of separately scanning feature files and rebuilding counts.
+
+**Changed:**
+
+- `bin/orchestrator.py` — `status_text()` now uses the shared workflow summaries as its source for open-feature counts and per-project rollups.
+- `bin/orchestrator.py` — `planner_status_text()` now computes `open-features` from the shared workflow summaries instead of re-scanning `state/features/` directly.
+- `bin/orchestrator.py` — `_workflow_snapshot()` now derives `open_features_by_project` from `open_feature_workflow_summaries(...)` instead of from a separate `list_features(status=\"open\")` path.
+
+**Validation:** `python3 bin/orchestrator.py status`, `python3 - <<'PY' ... planner_status_text(); _workflow_snapshot() ... PY`, and `python3 bin/orchestrator.py workflow-check` all still run cleanly. The outputs agree on the same single open `lvc-standard` feature.
+
+**Why:** This further reduces duplication around open-feature diagnosis and gets more of the runtime’s read paths onto the same shared workflow summary.
+
+---
+
+## 2026-04-15 — R-019 completion: workflow-check now diagnoses from the shared event-backed summary
+
+**Summary:** Closed out `R-019`. The shared workflow summary now carries frontier timing, recent feature-scoped events, repair activity, and diagnosis inputs, and `workflow-check` consumes that summary directly instead of re-deriving workflow state on its own.
+
+**Changed:**
+
+- `bin/orchestrator.py` — added `read_events(...)` for structured reads from `events.jsonl`.
+- `bin/orchestrator.py` — `reset_task_for_retry(...)` now emits `retry_reset` events, and `_workflow_check_record_attempt(...)` emits `repair_attempt` events, so repair history is visible in the runtime event stream.
+- `bin/orchestrator.py` — `feature_workflow_summary(feature)` now includes frontier age, recent events, repair history, and workflow-check metadata.
+- `bin/orchestrator.py` — `tick_workflow_check()` now calls `_workflow_issue_from_summary(feature, workflow, cfg)` so diagnosis runs off the shared workflow summary rather than a separate bespoke feature walk.
+- `bin/orchestrator.py` — workflow-check reports now include frontier age and recent repair activity where available.
+- `repo-memory/ROADMAP.md` — marked `[R-019]` done.
+
+**Validation:** `python3 -m py_compile bin/orchestrator.py bin/worker.py bin/telegram_bot.py` passed. `python3 bin/orchestrator.py workflow-check` now emits a report showing the live unresolved frontier with event-backed timing (`frontier entered current state`, `frontier age`) from the shared summary.
+
+**Why:** This is sufficient to call `R-019` complete: the main diagnosis surfaces and the checker now share one workflow-summary model backed by both transitions and recent runtime events, rather than maintaining separate feature-diagnosis logic.
+
+---
+
+## 2026-04-15 — R-020 completion: workflow-check repair selection moved to a declarative policy table
+
+**Summary:** Closed out `R-020` by replacing the remaining hard-coded workflow-check repair selection with an explicit repair-policy table and shared policy matcher.
+
+**Changed:**
+
+- `bin/orchestrator.py` — added `WORKFLOW_REPAIR_POLICY`, a central table describing repair behavior by issue kind / blocker code / task state, including `retry_task`, `restart_workers_then_retry`, `feature_finalize`, `pr_sweep`, and advisory-only cases.
+- `bin/orchestrator.py` — added `_workflow_policy_matches(...)` and `_workflow_policy_decision(...)` so repair choice is data-driven instead of being embedded in the diagnostic flow.
+- `bin/orchestrator.py` — task repair selection in workflow-check now runs through the policy engine, and planner-empty / ready-for-finalize / final-PR-blocked issue kinds also resolve through that same path.
+- `bin/orchestrator.py` — retry resets and workflow-check repair attempts emit explicit runtime events (`retry_reset`, `repair_attempt`), which are folded into the shared workflow summary.
+- `config/orchestrator.json` — added `workflow_repair_policy: \"default\"` so the selected repair-policy set is explicit in config.
+
+**Validation:** `python3 -m py_compile bin/orchestrator.py bin/worker.py bin/telegram_bot.py` passed and `python3 bin/orchestrator.py workflow-check` still completes cleanly. The current unresolved frontier on `feature-20260415-101058-14d56c` correctly stays advisory-only because no policy rule matches its timeout/failure shape yet.
+
+**Why:** Repair selection is now centralized and inspectable. Adding, removing, or changing a known repair path no longer requires editing the main workflow diagnosis flow.
 
 ---
 

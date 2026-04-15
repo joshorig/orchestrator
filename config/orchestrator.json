@@ -10,6 +10,36 @@
     "qa_workers": 1
   },
   "workflow_check_max_attempts": 3,
+  "workflow_repair_policy": "default",
+  "synthetic_canary": {
+    "enabled": true,
+    "project": "lvc-standard",
+    "interval_hours": 6,
+    "success_sla_hours": 24,
+    "max_frontier_age_hours": 2,
+    "summary": "Synthetic workflow canary",
+    "roadmap_entry_id": "R-021-CANARY",
+    "roadmap_title": "Synthetic workflow canary",
+    "roadmap_body": "Goal: validate the orchestrator end-to-end path with one tiny, safe slice.\n- Emit at most one bounded implementation slice that fits an existing project template.\n- Prefer a no-op or documentation-safe touch if nothing clearly safe fits.\n- Do not widen scope or pick a risky refactor.\n- The value of this run is proving planner -> implementer -> reviewer -> qa -> pr-sweep -> feature-finalize still works."
+  },
+  "environment_health": {
+    "cache_sec": 60,
+    "required_launchd_labels": [
+      "planner",
+      "reviewer",
+      "qa-scheduler",
+      "reaper",
+      "pr-sweep",
+      "feature-finalize",
+      "workflow-check",
+      "telegram-bot",
+      "canary-workflows"
+    ]
+  },
+  "self_repair": {
+    "enabled": true,
+    "project": "devmini-orchestrator"
+  },
   "projects": [
     {
       "name": "lvc-standard",
@@ -48,6 +78,20 @@
         "regression": "qa/regression.sh",
         "regression_days": ["sun"],
         "regression_threshold_pct": 3
+      }
+    },
+    {
+      "name": "devmini-orchestrator",
+      "path": "/Volumes/devssd/orchestrator",
+      "type": "infra",
+      "playwright": false,
+      "auto_push": true,
+      "planner_managed": false,
+      "qa": {
+        "smoke": "qa/smoke.sh",
+        "regression": "qa/regression.sh",
+        "regression_days": ["sat"],
+        "regression_threshold_pct": 0
       }
     }
   ]

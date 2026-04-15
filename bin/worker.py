@@ -1730,6 +1730,14 @@ def enqueue_braid_refine(task, project_name, trailer, *, from_state):
         def mut_fail(t):
             t["finished_at"] = o.now_iso()
             t["false_blocker_claim"] = trailer
+            o.set_task_blocker(
+                t,
+                "invalid_braid_refine",
+                summary="invalid BRAID_REFINE contract",
+                detail=trailer,
+                source="worker",
+                retryable=False,
+            )
         o.move_task(
             task["task_id"],
             from_state,
@@ -1745,6 +1753,14 @@ def enqueue_braid_refine(task, project_name, trailer, *, from_state):
         def mut_fail(t):
             t["finished_at"] = o.now_iso()
             t["false_blocker_claim"] = trailer
+            o.set_task_blocker(
+                t,
+                "invalid_braid_refine",
+                summary="BRAID_REFINE missing active template context",
+                detail=trailer,
+                source="worker",
+                retryable=False,
+            )
         o.move_task(
             task["task_id"],
             from_state,
@@ -1771,6 +1787,14 @@ def enqueue_braid_refine(task, project_name, trailer, *, from_state):
         def mut_block(t):
             t["finished_at"] = o.now_iso()
             t["topology_error"] = f"BRAID_TOPOLOGY_ERROR: refine_rounds_exhausted after {trailer}"
+            o.set_task_blocker(
+                t,
+                "template_refine_exhausted",
+                summary="template refinement exhausted",
+                detail=trailer,
+                source="worker",
+                retryable=False,
+            )
         o.move_task(task["task_id"], from_state, "blocked", reason="refine exhausted -> regen", mutator=mut_block)
         return
 
@@ -1801,6 +1825,15 @@ def enqueue_braid_refine(task, project_name, trailer, *, from_state):
             "template_hash": template_hash,
             "refine_task_id": refine_task["task_id"],
         }
+        o.set_task_blocker(
+            t,
+            "template_missing_edge",
+            summary=f"template refinement requested around {refine['node_id']}",
+            detail=refine["condition"],
+            source="worker",
+            retryable=True,
+            metadata={"node_id": refine["node_id"], "refine_task_id": refine_task["task_id"]},
+        )
     o.move_task(task["task_id"], from_state, "blocked", reason=trailer[:80], mutator=mut_block)
 
 
@@ -2837,6 +2870,14 @@ def run_codex_slot(task, cfg):
             o.enqueue_task(regen)
             def mut(t):
                 t["topology_error"] = "template_missing"
+                o.set_task_blocker(
+                    t,
+                    "template_missing",
+                    summary="BRAID template missing",
+                    detail=bt,
+                    source="worker",
+                    retryable=True,
+                )
             o.move_task(task_id, "claimed", "blocked", reason="template missing", mutator=mut)
             return
         o.move_task(task_id, "claimed", "failed", reason="template missing, regen disabled")
@@ -2866,6 +2907,14 @@ def run_codex_slot(task, cfg):
                     t["finished_at"] = o.now_iso()
                     t["topology_error"] = "main_dirty_or_ahead"
                     t["topology_error_message"] = str(exc)
+                    o.set_task_blocker(
+                        t,
+                        "project_main_dirty",
+                        summary="project main checkout dirty or ahead",
+                        detail=str(exc),
+                        source="worker",
+                        retryable=True,
+                    )
                 o.move_task(
                     task_id,
                     "claimed",
@@ -2974,6 +3023,14 @@ def run_codex_slot(task, cfg):
                     t["finished_at"] = o.now_iso()
                     t["topology_error"] = None
                     t["false_blocker_claim"] = trailer
+                    o.set_task_blocker(
+                        t,
+                        "false_blocker_claim",
+                        summary="false blocker claim",
+                        detail=trailer,
+                        source="worker",
+                        retryable=False,
+                    )
                 o.move_task(
                     task_id, "running", "failed",
                     reason=f"false blocker claim: {trailer[:80]}",
@@ -2995,6 +3052,14 @@ def run_codex_slot(task, cfg):
             def mut_block(t):
                 t["finished_at"] = o.now_iso()
                 t["topology_error"] = trailer
+                o.set_task_blocker(
+                    t,
+                    "template_graph_error",
+                    summary="template graph traversal error",
+                    detail=trailer,
+                    source="worker",
+                    retryable=True,
+                )
             o.move_task(task_id, "running", "blocked", reason=trailer[:80], mutator=mut_block)
             return
 
@@ -3036,6 +3101,8 @@ def run_codex_slot(task, cfg):
 
 
 def build_codex_prompt(task, graph_body, memory_ctx):
+    engine_args = task.get("engine_args") or {}
+    evidence = (engine_args.get("evidence") or "").strip()
     return (
         "[BRAID REASONING GRAPH — traverse deterministically. If you cannot, "
         "emit exactly one line `BRAID_TOPOLOGY_ERROR: <reason>` as the final line and stop. "
@@ -3045,6 +3112,8 @@ def build_codex_prompt(task, graph_body, memory_ctx):
         "[END BRAID GRAPH]\n\n"
         "[TASK]\n"
         f"{task.get('summary','')}\n\n"
+        + (f"[ISSUE EVIDENCE]\n{evidence}\n\n" if evidence else "")
+        +
         "[REPO LAYOUT]\n"
         "All repo-memory files live under `repo-memory/` at the worktree root:\n"
         "  repo-memory/CURRENT_STATE.md  repo-memory/RECENT_WORK.md\n"

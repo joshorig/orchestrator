@@ -1,0 +1,14 @@
+flowchart TD;
+    Start[Start] -- "issue evidence loaded" --> Inspect[Read: issue evidence and runtime context];
+    Inspect -- "affected files identified" --> Edit[Draft: implement bounded orchestrator fix];
+    Edit -- "candidate change ready" --> ValidateSmoke[Check: orchestrator smoke suite passes];
+    ValidateSmoke -- "fail" --> ReviseSmoke[Revise: tighten fix until smoke passes];
+    ReviseSmoke -- "retry" --> Edit;
+    ValidateSmoke -- "pass" --> ValidateCanary[Check: canary scheduler/checker still healthy];
+    ValidateCanary -- "fail" --> ReviseCanary[Revise: restore canary lane invariants];
+    ReviseCanary -- "retry" --> Edit;
+    ValidateCanary -- "pass" --> Memory[Draft: update orchestrator repo memory];
+    Memory -- "memory updated" --> FinalCheck[Check: final diff matches bounded repair scope];
+    FinalCheck -- "fail" --> ReviseScope[Revise: narrow repair scope and evidence];
+    ReviseScope -- "retry" --> Edit;
+    FinalCheck -- "pass" --> End[End];

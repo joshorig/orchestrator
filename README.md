@@ -24,8 +24,20 @@ python3 bin/orchestrator.py qa
 # rescue: sweep stale claims (dead pids) back to queued
 python3 bin/orchestrator.py reap
 
+# retry a failed/blocked task with attempt archival
+python3 bin/orchestrator.py retry-task \
+  --task task-20260415-101139-b2c06e \
+  --reason "manual retry after runtime fix"
+
+# inspect environment health and open a guarded orchestrator self-repair lane
+python3 bin/orchestrator.py env-health --refresh
+python3 bin/orchestrator.py enqueue-self-repair \
+  --summary "Fix workflow-check blocker classification" \
+  --evidence "workflow-check reported a runtime bug in blocker handling"
+
 # delivery ticks + hygiene
 python3 bin/orchestrator.py features [--status open]
+python3 bin/orchestrator.py tick-canary-workflows [--force]
 python3 bin/orchestrator.py pr-sweep [--dry-run]
 python3 bin/orchestrator.py feature-finalize [--dry-run]
 python3 bin/orchestrator.py cleanup-worktrees [--dry-run]
@@ -43,6 +55,8 @@ queued → claimed → running → { awaiting_review | awaiting_qa | blocked | d
 ```
 
 Transitions are recorded append-only in `state/runtime/transitions.log`. Every substate is a real directory under `queue/`; workers move tasks between directories with `os.rename`, which is atomic on APFS — whichever worker wins the rename owns the task. A pid file in `state/runtime/claims/` lets `orchestrator.py reap` detect stale claims from dead workers.
+
+Environment normalization is now part of the runtime. `env-health` checks required binaries, `GH_TOKEN`, launchd jobs, canonical repo cleanliness, `origin/main` fetchability, worktree root presence, and per-project QA script availability. Planner/canary dispatch and task claiming skip projects with blocking health issues instead of burning a live task on a degraded host.
 
 ### Slots
 
@@ -79,7 +93,7 @@ Codex still executes inside isolated `agent/<task_id>` worktrees, but delivery n
 
 ### 1. Planner emits feature sets
 
-Each planner tick creates a feature record under `state/features/<feature_id>.json` and binds emitted codex slices to that `feature_id`. The git branch itself is lazy-created by the first codex worker that needs it. Feature records track `child_task_ids`, `status`, and the eventual `final_pr_number` / `final_pr_url`.
+Each planner tick creates a feature record under `state/features/<feature_id>.json` and binds emitted codex slices to that `feature_id`. The git branch itself is lazy-created by the first codex worker that needs it. Feature records track `child_task_ids`, `status`, the eventual `final_pr_number` / `final_pr_url`, and optional `canary` metadata for synthetic workflow probes.
 
 ### 2. Codex task PRs target `feature/<id>`
 
@@ -203,6 +217,7 @@ The orchestrator is launchd-driven. All plists live in `~/Library/LaunchAgents/c
 | `pr-sweep` | StartInterval=600 | Auto-merge task PRs into feature branches + address PR feedback |
 | `feature-finalize` | StartInterval=600 | Opens feature->main PRs |
 | `workflow-check` | StartInterval=1800 | Diagnoses blocked feature workflows, reports to Telegram, attempts bounded self-heal |
+| `canary-workflows` | StartInterval=21600 | Enqueues one synthetic end-to-end canary feature when due |
 | `cleanup-worktrees` | StartInterval=3600s | Removes worktrees + local branches for merged/closed PRs |
 | `regression` | Weekly (lvc-standard) | Full JMH sweep under exclusive project lock |
 | `telegram-bot` | KeepAlive | Real bot, long-polling, allowlist-gated |
@@ -218,6 +233,10 @@ for p in ~/Library/LaunchAgents/com.devmini.orchestrator.*.plist; do
 done
 launchctl list | grep devmini
 ```
+
+### Guarded self-repair lane
+
+Use `enqueue-self-repair` (or Telegram `/self_repair`) to open a bounded feature on the orchestrator repo itself when a diagnosed runtime issue needs a code fix. These features are marked `self-repair`, run through the normal feature branch / task PR / final PR path, and use the `orchestrator-self-repair` BRAID template plus `qa/smoke.sh` and `qa/regression.sh` in this repo. They still require human review on the final feature PR to `main`.
 
 ### Durable gh auth
 

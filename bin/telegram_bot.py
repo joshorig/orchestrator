@@ -267,12 +267,14 @@ def build_handlers(cfg):
             "/reviewer       fire reviewer tick\n"
             "/qa             fire qa smoke tick\n"
             "/cleanup        run cleanup-worktrees now\n"
+            "/env           refresh environment health\n"
             "/ask <q>        investigate via claude\n"
             "/ask codex: <q> investigate via codex\n"
             "/ask both: <q>  query both then synthesize\n"
             "/regression <p> queue full regression sweep for project\n"
             "/report <kind>  write morning|evening status report\n"
-            "/enqueue <sum>  manual codex task with summary"
+            "/enqueue <sum>  manual codex task with summary\n"
+            "/self_repair <summary> | <evidence> open guarded orchestrator repair lane"
         )
         await send_html(update, block("❓", "unknown command", help_text))
 

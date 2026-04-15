@@ -64,12 +64,23 @@
     "topology_errors": 0,
     "uses": 0
   },
+  "orchestrator-self-repair": {
+    "created_at": "2026-04-15T22:23:38",
+    "generator_model": "hand-authored",
+    "hash": "sha256:c196ee195488c8ce739b4f256cc0da1e6057fcb8840941d1bc62d4f974bbc6a4",
+    "path": "braid/templates/orchestrator-self-repair.mmd",
+    "recent_outcomes": [],
+    "topology_errors": 0,
+    "uses": 0
+  },
   "pr-address-feedback": {
     "created_at": "2026-04-13T23:30:00",
     "generator_model": "hand-authored",
     "hash": "sha256:35bbfe1a966bab208466781f2cedde53407386dd1e1f1d9d98c7080b2c87e5e6",
     "path": "braid/templates/pr-address-feedback.mmd",
     "recent_outcomes": [
+      "ok",
+      "ok",
       "ok",
       "ok",
       "ok",

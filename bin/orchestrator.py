@@ -87,17 +87,215 @@ STATES = (
 
 VALID_ENGINES = ("claude", "codex", "qa")
 VALID_ROLES = ("planner", "implementer", "reviewer", "qa", "historian")
+BLOCKER_CODES = (
+    "template_missing",
+    "template_missing_edge",
+    "template_refine_exhausted",
+    "template_graph_error",
+    "invalid_braid_refine",
+    "false_blocker_claim",
+    "project_main_dirty",
+    "project_regression_failed",
+    "runtime_policy_stale",
+    "worker_crash",
+    "worktree_create_failed",
+    "planner_emitted_no_children",
+    "feature_has_no_children",
+    "missing_child",
+    "final_pr_blocked",
+    "canary_missing_recent_success",
+    "canary_stale",
+    "runtime_env_dirty",
+    "delivery_auth_expired",
+)
+WORKFLOW_REPAIR_POLICY = (
+    {
+        "name": "template_missing_wait",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "template_missing",
+        "task_state": "blocked",
+        "action": None,
+        "diagnosis": "waiting for template regeneration",
+        "when": "template_missing_blocked",
+    },
+    {
+        "name": "template_missing_retry",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "template_missing",
+        "task_state": "blocked",
+        "action": "retry_task",
+        "diagnosis": "template now exists",
+        "when": "template_missing_ready",
+    },
+    {
+        "name": "template_refine_wait",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "template_missing_edge",
+        "action": None,
+        "diagnosis": "waiting for template refinement",
+        "when": "template_refine_waiting",
+    },
+    {
+        "name": "template_refine_retry",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "template_missing_edge",
+        "action": "retry_task",
+        "diagnosis": "template refinement landed",
+        "when": "template_refine_ready",
+    },
+    {
+        "name": "project_main_dirty_wait",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "project_main_dirty",
+        "action": None,
+        "diagnosis": "project main checkout still dirty",
+        "when": "project_main_still_dirty",
+    },
+    {
+        "name": "project_main_dirty_retry",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "project_main_dirty",
+        "action": "retry_task",
+        "diagnosis": "project main checkout is clean again",
+        "when": "project_main_clean",
+    },
+    {
+        "name": "runtime_policy_reload",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "runtime_policy_stale",
+        "action": "restart_workers_then_retry",
+        "diagnosis": "workflow runtime changed; reload workers then retry",
+    },
+    {
+        "name": "worker_crash_retry",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "worker_crash",
+        "action": "retry_task",
+        "diagnosis": "worker crashed; task is retryable",
+    },
+    {
+        "name": "worktree_create_retry",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "worktree_create_failed",
+        "action": "retry_task",
+        "diagnosis": "worktree creation failed; retry after cleanup",
+    },
+    {
+        "name": "template_graph_wait",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "template_graph_error",
+        "action": None,
+        "diagnosis": "waiting for template regeneration",
+    },
+    {
+        "name": "regression_stop",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "project_regression_failed",
+        "action": None,
+        "diagnosis": "hard-stopped by regression failure",
+    },
+    {
+        "name": "planner_empty_retry",
+        "kind": "planner_emitted_no_children",
+        "action": "retry_task",
+        "diagnosis": "planner completed without emitting any runnable slices",
+    },
+    {
+        "name": "feature_finalize_ready",
+        "kind": "ready_for_finalize",
+        "action": "feature_finalize",
+        "diagnosis": "all child task PRs are merged; feature should be finalized",
+    },
+    {
+        "name": "final_pr_repair",
+        "kind": "final_pr_blocked",
+        "action": "pr_sweep",
+        "diagnosis": "final PR is blocked",
+    },
+    {
+        "name": "canary_enqueue",
+        "kind": "canary_missing_recent_success",
+        "action": "enqueue_canary",
+        "diagnosis": "recent successful canary missing",
+    },
+    {
+        "name": "canary_stale_escalate",
+        "kind": "canary_stale",
+        "action": None,
+        "diagnosis": "synthetic canary has been in-flight too long",
+    },
+)
+ATTEMPT_ARCHIVE_FIELDS = (
+    "state",
+    "claimed_at",
+    "started_at",
+    "finished_at",
+    "log_path",
+    "failure",
+    "topology_error",
+    "topology_error_message",
+    "false_blocker_claim",
+    "blocker",
+    "refine_request",
+)
+RETRY_CLEAR_FIELDS = (
+    "claimed_at",
+    "started_at",
+    "finished_at",
+    "log_path",
+    "failure",
+    "topology_error",
+    "topology_error_message",
+    "false_blocker_claim",
+    "refine_request",
+)
 CONFIG_DEFAULTS = {
     "drift_threshold": 5,
     "topology_error_regen_threshold": 0.10,
     "topology_error_regen_window": 20,
     "topology_error_regen_min_samples": 5,
     "workflow_check_max_attempts": 3,
+    "synthetic_canary": {
+        "enabled": False,
+        "project": "lvc-standard",
+        "interval_hours": 6,
+        "success_sla_hours": 24,
+        "max_frontier_age_hours": 2,
+        "summary": "Synthetic workflow canary",
+        "roadmap_entry_id": "R-021-CANARY",
+        "roadmap_title": "Synthetic workflow canary",
+        "roadmap_body": (
+            "Goal: validate the orchestrator end-to-end path with one tiny, safe slice.\n"
+            "- Emit at most one bounded implementation slice that fits an existing project template.\n"
+            "- Prefer a no-op or documentation-safe touch if nothing clearly safe fits.\n"
+            "- Do not widen scope or pick a risky refactor.\n"
+            "- The value of this run is proving planner -> implementer -> reviewer -> qa -> pr-sweep -> feature-finalize still works."
+        ),
+    },
+    "environment_health": {
+        "cache_sec": 60,
+        "required_launchd_labels": (
+            "planner",
+            "reviewer",
+            "qa-scheduler",
+            "reaper",
+            "pr-sweep",
+            "feature-finalize",
+            "workflow-check",
+            "telegram-bot",
+            "canary-workflows",
+        ),
+    },
+    "self_repair": {
+        "enabled": True,
+        "project": "devmini-orchestrator",
+    },
 }
 
 BRAID_RECENT_OUTCOMES_MAX = 50
 LOG_RETENTION_DAYS = 7
 LOG_SIZE_CAP_BYTES = 1024 * 1024 * 1024
+_ENV_HEALTH_CACHE = {"ts": 0.0, "data": None}
 R7_ALLOWED_CAPS = {
     "API", "BRAID", "CI", "CLI", "CPU", "CSS", "FIXME", "GH", "HTML", "HTTP",
     "JSON", "JVM", "OK", "PNG", "PPD", "PR", "QA", "RSA", "SHA", "TODO",
@@ -142,7 +340,12 @@ load_gh_token_env()
 def load_config():
     data = json.loads(CONFIG_PATH.read_text())
     for key, value in CONFIG_DEFAULTS.items():
-        data.setdefault(key, value)
+        if isinstance(value, dict):
+            merged = dict(value)
+            merged.update(data.get(key) or {})
+            data[key] = merged
+        else:
+            data.setdefault(key, value)
     return data
 
 
@@ -151,6 +354,243 @@ def get_project(config, name):
         if p["name"] == name:
             return p
     raise KeyError(f"unknown project: {name}")
+
+
+class EnvironmentDegraded(RuntimeError):
+    """Raised when host/project environment health blocks autonomous work."""
+
+
+def _launchctl_loaded_labels():
+    try:
+        proc = subprocess.run(
+            ["launchctl", "list"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    labels = set()
+    for line in (proc.stdout or "").splitlines():
+        parts = line.strip().split()
+        if parts:
+            labels.add(parts[-1])
+    return labels
+
+
+def _git_ok(repo_path, *args):
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo_path), *args],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, str(exc)
+    detail = (proc.stderr or proc.stdout or "").strip()
+    return proc.returncode == 0, detail
+
+
+def _project_main_preflight_issue(project):
+    repo_path = pathlib.Path(project["path"])
+    if not repo_path.exists():
+        return {
+            "code": "runtime_env_dirty",
+            "scope": "project",
+            "project": project["name"],
+            "severity": "error",
+            "summary": "project path missing",
+            "detail": str(repo_path),
+        }
+    ok, detail = _git_ok(repo_path, "rev-parse", "--is-inside-work-tree")
+    if not ok:
+        return {
+            "code": "runtime_env_dirty",
+            "scope": "project",
+            "project": project["name"],
+            "severity": "error",
+            "summary": "project path is not a git repo",
+            "detail": detail[:200],
+        }
+    ok, detail = _git_ok(repo_path, "fetch", "origin", "main")
+    if not ok:
+        return {
+            "code": "runtime_env_dirty",
+            "scope": "project",
+            "project": project["name"],
+            "severity": "error",
+            "summary": "fetch origin main failed",
+            "detail": detail[:200],
+        }
+    ok, detail = _git_ok(repo_path, "status", "--porcelain")
+    if ok and detail.strip():
+        return {
+            "code": "project_main_dirty",
+            "scope": "project",
+            "project": project["name"],
+            "severity": "error",
+            "summary": "project main checkout dirty",
+            "detail": f"{project['path']} has uncommitted changes on main",
+        }
+    ok, detail = _git_ok(repo_path, "merge-base", "--is-ancestor", "main", "origin/main")
+    if not ok:
+        return {
+            "code": "project_main_dirty",
+            "scope": "project",
+            "project": project["name"],
+            "severity": "error",
+            "summary": "project main ahead of origin/main",
+            "detail": detail[:200] or f"{project['path']} local main has commits not in origin/main",
+        }
+    return None
+
+
+def environment_health(*, refresh=False):
+    cfg = load_config()
+    cache_sec = int((cfg.get("environment_health") or {}).get("cache_sec", 60) or 60)
+    now = time.monotonic()
+    if not refresh and _ENV_HEALTH_CACHE["data"] is not None and (now - _ENV_HEALTH_CACHE["ts"]) < cache_sec:
+        return _ENV_HEALTH_CACHE["data"]
+
+    issues = []
+
+    required_bins = {
+        "git": "runtime_env_dirty",
+        "bash": "runtime_env_dirty",
+        "python3": "runtime_env_dirty",
+        "launchctl": "runtime_env_dirty",
+        "gh": "delivery_auth_expired",
+        "codex": "runtime_env_dirty",
+        "claude": "runtime_env_dirty",
+    }
+    for binary, code in required_bins.items():
+        if shutil.which(binary) is None:
+            issues.append(
+                {
+                    "code": code,
+                    "scope": "global",
+                    "project": None,
+                    "severity": "error",
+                    "summary": f"required binary missing: {binary}",
+                    "detail": f"{binary} is not on PATH",
+                }
+            )
+
+    if not os.environ.get("GH_TOKEN", "").strip() and not GH_TOKEN_PATH.exists():
+        issues.append(
+            {
+                "code": "delivery_auth_expired",
+                "scope": "global",
+                "project": None,
+                "severity": "error",
+                "summary": "GH_TOKEN unavailable",
+                "detail": f"missing environment GH_TOKEN and {GH_TOKEN_PATH}",
+            }
+        )
+
+    labels = _launchctl_loaded_labels()
+    required_labels = (cfg.get("environment_health") or {}).get("required_launchd_labels") or ()
+    if labels is None:
+        issues.append(
+            {
+                "code": "runtime_env_dirty",
+                "scope": "global",
+                "project": None,
+                "severity": "warning",
+                "summary": "launchctl status unavailable",
+                "detail": "could not read launchd job list",
+            }
+        )
+    else:
+        for name in required_labels:
+            label = f"com.devmini.orchestrator.{name}"
+            if label not in labels:
+                issues.append(
+                    {
+                        "code": "runtime_env_dirty",
+                        "scope": "global",
+                        "project": None,
+                        "severity": "warning",
+                        "summary": "required launchd job not loaded",
+                        "detail": label,
+                    }
+                )
+
+    worktrees_root = DEV_ROOT / "worktrees"
+    if not worktrees_root.exists():
+        issues.append(
+            {
+                "code": "runtime_env_dirty",
+                "scope": "global",
+                "project": None,
+                "severity": "warning",
+                "summary": "worktrees root missing",
+                "detail": str(worktrees_root),
+            }
+        )
+
+    for project in cfg.get("projects", []):
+        issue = _project_main_preflight_issue(project)
+        if issue:
+            issues.append(issue)
+        qa_cfg = project.get("qa") or {}
+        for kind in ("smoke", "regression"):
+            script_rel = qa_cfg.get(kind)
+            if script_rel and not (pathlib.Path(project["path"]) / script_rel).exists():
+                issues.append(
+                    {
+                        "code": "runtime_env_dirty",
+                        "scope": "project",
+                        "project": project["name"],
+                        "severity": "error",
+                        "summary": f"qa.{kind} script missing",
+                        "detail": str(pathlib.Path(project["path"]) / script_rel),
+                    }
+                )
+
+    out = {
+        "ok": not any(issue["severity"] == "error" for issue in issues),
+        "generated_at": now_iso(),
+        "issues": issues,
+    }
+    _ENV_HEALTH_CACHE["ts"] = now
+    _ENV_HEALTH_CACHE["data"] = out
+    return out
+
+
+def project_environment_blockers(project_name, *, refresh=False):
+    rows = []
+    for issue in environment_health(refresh=refresh).get("issues", []):
+        if issue.get("severity") != "error":
+            continue
+        if issue.get("project") in (None, project_name):
+            rows.append(issue)
+    return rows
+
+
+def project_environment_ok(project_name, *, refresh=False):
+    return not project_environment_blockers(project_name, refresh=refresh)
+
+
+def environment_health_text(*, refresh=False):
+    health = environment_health(refresh=refresh)
+    lines = [f"Environment health ({health.get('generated_at')})"]
+    if health.get("ok"):
+        lines.append("status: healthy")
+        return "\n".join(lines)
+    lines.append("status: degraded")
+    for issue in health.get("issues", []):
+        scope = issue.get("project") or issue.get("scope") or "global"
+        lines.append(
+            f"- [{issue.get('severity')}] {issue.get('code')} {scope}: "
+            f"{issue.get('summary')} ({issue.get('detail')})"
+        )
+    return "\n".join(lines)
 
 
 def project_historian_template(project_name):
@@ -183,6 +623,87 @@ def append_transition(task_id, from_state, to_state, reason=""):
         f.write(f"{now_iso()}\t{task_id}\t{from_state}\t->\t{to_state}\t{reason}\n")
 
 
+def make_blocker(code, *, summary=None, detail=None, source=None, confidence="high", retryable=None, metadata=None):
+    if code not in BLOCKER_CODES:
+        raise ValueError(f"unknown blocker code: {code}")
+    return {
+        "code": code,
+        "summary": summary or code.replace("_", " "),
+        "detail": detail or "",
+        "source": source or "runtime",
+        "confidence": confidence,
+        "retryable": retryable,
+        "updated_at": now_iso(),
+        "metadata": dict(metadata or {}),
+    }
+
+
+def set_task_blocker(task, code, *, summary=None, detail=None, source=None, confidence="high", retryable=None, metadata=None):
+    task["blocker"] = make_blocker(
+        code,
+        summary=summary,
+        detail=detail,
+        source=source,
+        confidence=confidence,
+        retryable=retryable,
+        metadata=metadata,
+    )
+    return task["blocker"]
+
+
+def clear_task_blocker(task):
+    task["blocker"] = None
+
+
+def task_blocker(task):
+    """Return explicit blocker metadata or infer it from legacy task fields.
+
+    >>> task_blocker({"blocker": {"code": "template_missing"}})["code"]
+    'template_missing'
+    >>> task_blocker({"topology_error": "template_missing"})["code"]
+    'template_missing'
+    >>> task_blocker({"topology_error": "main_dirty_or_ahead"})["code"]
+    'project_main_dirty'
+    >>> task_blocker({"false_blocker_claim": "BRAID_REFINE: Sketch: missing edge"})["code"]
+    'false_blocker_claim'
+    >>> task_blocker({"failure": "Command '['git', 'worktree', 'add']' returned non-zero exit status 255."})["code"]
+    'worktree_create_failed'
+    """
+    blocker = task.get("blocker")
+    if isinstance(blocker, dict) and blocker.get("code"):
+        return blocker
+
+    topo = str(task.get("topology_error") or "")
+    failure = str(task.get("failure") or "")
+    false_claim = str(task.get("false_blocker_claim") or "")
+    detail = " ".join(part for part in (failure, topo, false_claim) if part).strip()
+    detail_lower = detail.lower()
+
+    if topo == "template_missing":
+        return make_blocker("template_missing", summary="template missing", detail=detail, source="legacy", retryable=True)
+    if topo == "main_dirty_or_ahead":
+        return make_blocker("project_main_dirty", summary="project main checkout dirty or ahead", detail=detail, source="legacy", retryable=True)
+    if topo == "regression-failure":
+        return make_blocker("project_regression_failed", summary="project regression failed", detail=detail, source="legacy", retryable=False)
+    if topo.startswith("BRAID_REFINE:"):
+        return make_blocker("template_missing_edge", summary="template missing edge/condition", detail=detail, source="legacy", retryable=True)
+    if "refine_rounds_exhausted" in topo:
+        return make_blocker("template_refine_exhausted", summary="template refinement exhausted", detail=detail, source="legacy", retryable=False)
+    if topo.startswith("BRAID_TOPOLOGY_ERROR:"):
+        return make_blocker("template_graph_error", summary="template graph traversal error", detail=detail, source="legacy", retryable=True)
+    if failure.startswith("invalid BRAID_REFINE") or "invalid braid_refine" in detail_lower:
+        return make_blocker("invalid_braid_refine", summary="invalid BRAID_REFINE contract", detail=detail, source="legacy", retryable=False)
+    if false_claim:
+        return make_blocker("false_blocker_claim", summary="false blocker claim", detail=detail, source="legacy", retryable=False)
+    if "repo-memory secret-scan hit" in detail_lower or "detect-secrets findings" in detail_lower:
+        return make_blocker("runtime_policy_stale", summary="worker runtime policy stale", detail=detail, source="legacy", retryable=True)
+    if "worker crash" in detail_lower:
+        return make_blocker("worker_crash", summary="worker crashed mid-task", detail=detail, source="legacy", retryable=True)
+    if "git', 'worktree', 'add'" in failure and "255" in failure:
+        return make_blocker("worktree_create_failed", summary="git worktree creation failed", detail=detail, source="legacy", retryable=True)
+    return None
+
+
 def append_event(role, event, *, task_id=None, feature_id=None, details=None):
     EVENTS_LOG.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -197,12 +718,160 @@ def append_event(role, event, *, task_id=None, feature_id=None, details=None):
         f.write(json.dumps(payload, sort_keys=True) + "\n")
 
 
+def read_events(*, feature_id=None, task_id=None, role=None, limit=None):
+    """Return structured rows from the append-only event log.
+
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     old = read_events.__globals__["EVENTS_LOG"]
+    ...     read_events.__globals__["EVENTS_LOG"] = pathlib.Path(tmp) / "events.jsonl"
+    ...     rows = [
+    ...         {"ts": "2026-04-15T10:00:00", "role": "workflow-check", "event": "report_written", "task_id": None, "feature_id": "f1", "details": {"x": 1}},
+    ...         {"ts": "2026-04-15T10:01:00", "role": "planner", "event": "task_enqueued", "task_id": "task-1", "feature_id": "f1", "details": {}},
+    ...     ]
+    ...     _ = read_events.__globals__["EVENTS_LOG"].write_text("\\n".join(__import__('json').dumps(r, sort_keys=True) for r in rows))
+    ...     out = read_events(feature_id="f1", limit=1)
+    ...     read_events.__globals__["EVENTS_LOG"] = old
+    >>> (len(out), out[0]["event"])
+    (1, 'task_enqueued')
+    """
+    if not EVENTS_LOG.exists():
+        return []
+    rows = []
+    try:
+        lines = EVENTS_LOG.read_text(errors="replace").splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if feature_id is not None and row.get("feature_id") != feature_id:
+            continue
+        if task_id is not None and row.get("task_id") != task_id:
+            continue
+        if role is not None and row.get("role") != role:
+            continue
+        rows.append(row)
+    if limit is not None and limit >= 0:
+        rows = rows[-limit:]
+    return rows
+
+
 def read_pr_sweep_metrics():
     data = read_json(PR_SWEEP_METRICS_PATH, {}) or {}
     data.setdefault("guard_skip_total", 0)
     data.setdefault("guard_skip_by_reason", {})
     data.setdefault("updated_at", None)
     return data
+
+
+def read_transitions(*, task_id=None, limit=None):
+    """Return structured transition rows from the append-only transition log.
+
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     old = read_transitions.__globals__["TRANSITIONS_LOG"]
+    ...     read_transitions.__globals__["TRANSITIONS_LOG"] = pathlib.Path(tmp) / "transitions.log"
+    ...     _ = read_transitions.__globals__["TRANSITIONS_LOG"].write_text(
+    ...         "2026-04-15T10:00:00\\ttask-1\\tqueued\\t->\\tclaimed\\tcodex\\n"
+    ...         "2026-04-15T10:01:00\\ttask-1\\tclaimed\\t->\\trunning\\tstart\\n"
+    ...     )
+    ...     out = read_transitions(task_id="task-1")
+    ...     read_transitions.__globals__["TRANSITIONS_LOG"] = old
+    >>> (out[0]["task_id"], out[-1]["to_state"], len(out))
+    ('task-1', 'running', 2)
+    """
+    if not TRANSITIONS_LOG.exists():
+        return []
+    rows = []
+    try:
+        lines = TRANSITIONS_LOG.read_text(errors="replace").splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        parts = line.split("\t", 5)
+        if len(parts) < 6:
+            continue
+        ts, row_task_id, from_state, arrow, to_state, reason = parts
+        if arrow != "->":
+            continue
+        if task_id is not None and row_task_id != task_id:
+            continue
+        rows.append(
+            {
+                "ts": ts,
+                "task_id": row_task_id,
+                "from_state": from_state,
+                "to_state": to_state,
+                "reason": reason,
+            }
+        )
+    if limit is not None and limit >= 0:
+        rows = rows[-limit:]
+    return rows
+
+
+def task_state_entered_at(task_id, state):
+    rows = read_transitions(task_id=task_id)
+    for row in reversed(rows):
+        if row.get("to_state") == state:
+            return row.get("ts"), row.get("reason", "")
+    return None, ""
+
+
+def _seconds_since_iso(ts):
+    if not ts:
+        return None
+    try:
+        then = dt.datetime.fromisoformat(ts)
+    except ValueError:
+        return None
+    if then.tzinfo is None:
+        now = dt.datetime.now()
+    else:
+        now = dt.datetime.now(tz=then.tzinfo)
+    return max(0, int((now - then).total_seconds()))
+
+
+def _format_age(seconds):
+    if seconds is None:
+        return None
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, sec = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours}h{minutes:02d}m"
+    days, hours = divmod(hours, 24)
+    return f"{days}d{hours:02d}h"
+
+
+def _canary_interval_due(cfg, project_name):
+    canary_cfg = cfg.get("synthetic_canary") or {}
+    interval_hours = float(canary_cfg.get("interval_hours", 6) or 6)
+    last = _latest_canary_feature(project_name)
+    if last is None:
+        return True, None
+    age_seconds = _seconds_since_iso(last.get("created_at"))
+    if age_seconds is None:
+        return True, last
+    return age_seconds >= int(interval_hours * 3600), last
+
+
+def _canary_success_overdue(cfg, project_name):
+    canary_cfg = cfg.get("synthetic_canary") or {}
+    sla_hours = float(canary_cfg.get("success_sla_hours", 24) or 24)
+    last = _latest_successful_canary(project_name)
+    if last is None:
+        return True, None
+    age_seconds = _seconds_since_iso(last.get("merged_at") or last.get("created_at"))
+    if age_seconds is None:
+        return True, last
+    return age_seconds >= int(sla_hours * 3600), last
 
 
 def record_pr_sweep_guard_skip(reason):
@@ -513,6 +1182,9 @@ def new_task(
         "engine_args": engine_args or {},
         "depends_on": list(depends_on or []),
         "topology_error": None,
+        "blocker": None,
+        "attempt": 1,
+        "attempt_history": [],
         "created_at": now_iso(),
         "claimed_at": None,
         "started_at": None,
@@ -548,6 +1220,8 @@ def move_task(task_id, from_state, to_state, reason="", mutator=None):
     if mutator is not None:
         mutator(task)
     task["state"] = to_state
+    if to_state not in ("blocked", "failed", "abandoned"):
+        clear_task_blocker(task)
     # Write destination first, then unlink source — if anything crashes mid-way
     # the transition log lets us tell the task didn't land.
     write_json_atomic(dst, task)
@@ -561,9 +1235,81 @@ def move_task(task_id, from_state, to_state, reason="", mutator=None):
         "task_transition",
         task_id=task.get("task_id"),
         feature_id=task.get("feature_id"),
-        details={"from_state": from_state, "to_state": to_state, "reason": reason, "project": task.get("project")},
+        details={
+            "from_state": from_state,
+            "to_state": to_state,
+            "reason": reason,
+            "project": task.get("project"),
+            "blocker_code": (task.get("blocker") or {}).get("code"),
+        },
     )
     return dst, task
+
+
+def _archive_attempt_entry(task, from_state, reason, *, source=None):
+    snapshot = {}
+    for field in ATTEMPT_ARCHIVE_FIELDS:
+        value = task.get(field)
+        if value is not None:
+            snapshot[field] = value
+    return {
+        "attempt": int(task.get("attempt", 1) or 1),
+        "from_state": from_state,
+        "retry_reason": reason,
+        "retry_source": source or "runtime",
+        "archived_at": now_iso(),
+        "snapshot": snapshot,
+    }
+
+
+def reset_task_for_retry(task_id, from_state, *, reason, source=None, mutator=None):
+    """Archive the current attempt, clear transient failure fields, and requeue.
+
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     old_root = reset_task_for_retry.__globals__["QUEUE_ROOT"]
+    ...     reset_task_for_retry.__globals__["QUEUE_ROOT"] = root / "queue"
+    ...     task = new_task(role="implementer", engine="codex", project="demo", summary="x", source="test")
+    ...     task["task_id"] = "task-1"
+    ...     task["state"] = "failed"
+    ...     task["attempt"] = 1
+    ...     task["failure"] = "boom"
+    ...     task["finished_at"] = "2026-04-15T21:00:00"
+    ...     write_json_atomic(task_path("task-1", "failed"), task)
+    ...     _ = reset_task_for_retry("task-1", "failed", reason="retry", source="doctest")
+    ...     out = read_json(task_path("task-1", "queued"))
+    ...     reset_task_for_retry.__globals__["QUEUE_ROOT"] = old_root
+    >>> (out["attempt"], out["failure"] is None, out["attempt_history"][0]["snapshot"]["failure"], out["attempt_history"][0]["retry_source"])
+    (2, True, 'boom', 'doctest')
+    """
+    feature_id_holder = {"value": None}
+    new_attempt_holder = {"value": None}
+
+    def mut(task):
+        feature_id_holder["value"] = task.get("feature_id")
+        history = list(task.get("attempt_history") or [])
+        history.append(_archive_attempt_entry(task, from_state, reason, source=source))
+        task["attempt_history"] = history
+        task["attempt"] = int(task.get("attempt", 1) or 1) + 1
+        new_attempt_holder["value"] = task["attempt"]
+        task["last_retry_at"] = now_iso()
+        task["last_retry_reason"] = reason
+        task["last_retry_source"] = source or "runtime"
+        for field in RETRY_CLEAR_FIELDS:
+            task[field] = None
+        clear_task_blocker(task)
+        if mutator is not None:
+            mutator(task)
+    out = move_task(task_id, from_state, "queued", reason=reason, mutator=mut)
+    append_event(
+        source or "runtime",
+        "retry_reset",
+        task_id=task_id,
+        feature_id=feature_id_holder["value"],
+        details={"from_state": from_state, "reason": reason, "attempt": new_attempt_holder["value"]},
+    )
+    return out
 
 
 def _atomic_claim_doctest_case(dep_state):
@@ -643,6 +1389,9 @@ def atomic_claim(slot_engine):
             continue
         if slot_engine in ("claude", "codex") and project_hard_stopped(task.get("project")):
             continue
+        project_name = task.get("project")
+        if project_name and not project_environment_ok(project_name):
+            continue
         if slot_engine == "codex":
             fid = task.get("feature_id")
             if fid and fid in busy_features:
@@ -717,7 +1466,12 @@ def reap():
         for state in ("claimed", "running"):
             src = task_path(task_id, state)
             if src.exists():
-                move_task(task_id, state, "queued", reason=f"reaper: pid {pid} dead")
+                reset_task_for_retry(
+                    task_id,
+                    state,
+                    reason=f"reaper: pid {pid} dead",
+                    source="reaper",
+                )
                 reaped += 1
                 break
         pidfile.unlink(missing_ok=True)
@@ -727,14 +1481,13 @@ def reap():
         if task.get("topology_error") == "template_missing":
             tmpl = task.get("braid_template")
             if tmpl and (BRAID_TEMPLATES / f"{tmpl}.mmd").exists():
-                move_task(
+                reset_task_for_retry(
                     task["task_id"],
                     "blocked",
-                    "queued",
                     reason="reaper: template regenerated",
+                    source="reaper",
                     mutator=lambda t: t.update(
                         braid_template_hash=None,
-                        topology_error=None,
                     ),
                 )
                 reaped += 1
@@ -745,15 +1498,13 @@ def reap():
         if tmpl and old_hash:
             _, current_hash = braid_template_load(tmpl)
             if current_hash and current_hash != old_hash:
-                move_task(
+                reset_task_for_retry(
                     task["task_id"],
                     "blocked",
-                    "queued",
                     reason="reaper: template refined",
+                    source="reaper",
                     mutator=lambda t: t.update(
                         braid_template_hash=None,
-                        topology_error=None,
-                        refine_request=None,
                     ),
                 )
                 reaped += 1
@@ -3529,7 +4280,7 @@ def _project_has_open_feature(project_name):
     return False
 
 
-def create_feature(*, project, summary, source, roadmap_entry=None, roadmap_entry_id=None):
+def create_feature(*, project, summary, source, roadmap_entry=None, roadmap_entry_id=None, canary=None, self_repair=None):
     """Create a new feature record in state/features/<id>.json.
 
     The git branch itself is created lazily by the first codex worker that
@@ -3559,9 +4310,44 @@ def create_feature(*, project, summary, source, roadmap_entry=None, roadmap_entr
         "finalized_at": None,
         "merged_at": None,
         "finalize_error": None,
+        "canary": dict(canary or {}),
+        "self_repair": dict(self_repair or {}),
     }
     write_json_atomic(feature_path(feature_id), feature)
     return feature
+
+
+def is_canary_feature(feature):
+    return bool((feature or {}).get("canary", {}).get("enabled"))
+
+
+def is_self_repair_feature(feature):
+    return bool((feature or {}).get("self_repair", {}).get("enabled"))
+
+
+def list_canary_features(*, project_name=None, statuses=None):
+    feats = []
+    allowed = set(statuses or ())
+    for feature in list_features():
+        if not is_canary_feature(feature):
+            continue
+        if project_name is not None and feature.get("project") != project_name:
+            continue
+        if allowed and feature.get("status") not in allowed:
+            continue
+        feats.append(feature)
+    feats.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+    return feats
+
+
+def _latest_canary_feature(project_name=None):
+    rows = list_canary_features(project_name=project_name)
+    return rows[0] if rows else None
+
+
+def _latest_successful_canary(project_name=None):
+    rows = list_canary_features(project_name=project_name, statuses=("merged",))
+    return rows[0] if rows else None
 
 
 def update_feature(feature_id, mutator):
@@ -3875,8 +4661,10 @@ def queue_sample(state, limit=10):
     items = []
     for p in sorted(queue_dir(state).glob("*.json"))[:limit]:
         t = read_json(p, {})
+        attempt = int(t.get("attempt", 1) or 1)
+        retry_note = f" a{attempt}" if attempt > 1 else ""
         items.append(
-            f"  {t.get('task_id')} [{t.get('engine')}/{t.get('role')}] "
+            f"  {t.get('task_id')} [{t.get('engine')}/{t.get('role')}{retry_note}] "
             f"{t.get('project')}: {t.get('summary','')[:60]}"
         )
     return items
@@ -3953,6 +4741,7 @@ def task_text(task_id, log_tail_lines=20):
     lines = [
         task.get("task_id", task_id),
         f"state: {state}",
+        f"attempt: {int(task.get('attempt', 1) or 1)}",
         f"engine: {task.get('engine', '-')}",
         f"role: {task.get('role', '-')}",
         f"project: {task.get('project', '-')}",
@@ -3972,6 +4761,25 @@ def task_text(task_id, log_tail_lines=20):
         value = task.get(field)
         if value:
             lines.append(f"{field}: {value}")
+    blocker = task_blocker(task)
+    if blocker:
+        lines.append(f"blocker: {blocker.get('code')} ({blocker.get('source','-')})")
+        if blocker.get("detail"):
+            lines.append(f"blocker_detail: {blocker['detail']}")
+    if task.get("last_retry_at"):
+        lines.append(f"last_retry_at: {task.get('last_retry_at')}")
+        lines.append(f"last_retry_source: {task.get('last_retry_source', '-')}")
+        lines.append(f"last_retry_reason: {task.get('last_retry_reason', '-')}")
+    history = list(task.get("attempt_history") or [])
+    if history:
+        lines.append("attempt_history:")
+        for item in history[-3:]:
+            lines.append(
+                "  "
+                f"a{item.get('attempt','?')} from={item.get('from_state','-')} "
+                f"source={item.get('retry_source','-')} "
+                f"reason={item.get('retry_reason','-')}"
+            )
     engine_args = task.get("engine_args")
     if engine_args:
         lines.append("engine_args:")
@@ -4012,11 +4820,12 @@ def tick_planner():
     ...     memdir = repo / "repo-memory"
     ...     memdir.mkdir(parents=True)
     ...     _ = (memdir / "CURRENT_STATE.md").write_text("ok\\n")
-    ...     old = {k: tick_planner.__globals__[k] for k in ("load_config", "engine_outstanding", "write_agent_status", "project_hard_stopped", "acquire_lock", "assigned_roadmap_entries", "parse_roadmap_next_todo", "create_feature", "new_task", "enqueue_task", "FEATURES_DIR", "PLANNER_DISABLED_DIR")}
+    ...     old = {k: tick_planner.__globals__[k] for k in ("load_config", "engine_outstanding", "write_agent_status", "project_hard_stopped", "project_environment_ok", "acquire_lock", "assigned_roadmap_entries", "parse_roadmap_next_todo", "create_feature", "new_task", "enqueue_task", "FEATURES_DIR", "PLANNER_DISABLED_DIR")}
     ...     tick_planner.__globals__["load_config"] = lambda: {"projects": [{"name": "demo", "path": str(repo)}]}
     ...     tick_planner.__globals__["engine_outstanding"] = lambda: {"claude": 0, "codex": 0, "qa": 0}
     ...     tick_planner.__globals__["write_agent_status"] = lambda *args, **kwargs: None
     ...     tick_planner.__globals__["project_hard_stopped"] = lambda name: False
+    ...     tick_planner.__globals__["project_environment_ok"] = lambda name: True
     ...     tick_planner.__globals__["acquire_lock"] = lambda *args, **kwargs: types.SimpleNamespace(close=lambda: None)
     ...     tick_planner.__globals__["assigned_roadmap_entries"] = lambda name: set()
     ...     tick_planner.__globals__["parse_roadmap_next_todo"] = lambda path, skip_ids=None: {"id": "R-001", "title": "First", "body": "TODO"}
@@ -4042,11 +4851,12 @@ def tick_planner():
     ...     memdir = repo / "repo-memory"
     ...     memdir.mkdir(parents=True)
     ...     _ = (memdir / "CURRENT_STATE.md").write_text("ok\\n")
-    ...     old = {k: tick_planner.__globals__[k] for k in ("load_config", "engine_outstanding", "write_agent_status", "project_hard_stopped", "acquire_lock", "assigned_roadmap_entries", "parse_roadmap_next_todo", "create_feature", "new_task", "enqueue_task", "FEATURES_DIR", "PLANNER_DISABLED_DIR")}
+    ...     old = {k: tick_planner.__globals__[k] for k in ("load_config", "engine_outstanding", "write_agent_status", "project_hard_stopped", "project_environment_ok", "acquire_lock", "assigned_roadmap_entries", "parse_roadmap_next_todo", "create_feature", "new_task", "enqueue_task", "FEATURES_DIR", "PLANNER_DISABLED_DIR")}
     ...     tick_planner.__globals__["load_config"] = lambda: {"projects": [{"name": "demo", "path": str(repo)}]}
     ...     tick_planner.__globals__["engine_outstanding"] = lambda: {"claude": 0, "codex": 0, "qa": 0}
     ...     tick_planner.__globals__["write_agent_status"] = lambda *args, **kwargs: None
     ...     tick_planner.__globals__["project_hard_stopped"] = lambda name: False
+    ...     tick_planner.__globals__["project_environment_ok"] = lambda name: True
     ...     tick_planner.__globals__["acquire_lock"] = lambda *args, **kwargs: types.SimpleNamespace(close=lambda: None)
     ...     tick_planner.__globals__["assigned_roadmap_entries"] = lambda name: set()
     ...     tick_planner.__globals__["parse_roadmap_next_todo"] = lambda path, skip_ids=None: {"id": "R-001", "title": "First", "body": "TODO"}
@@ -4075,9 +4885,13 @@ def tick_planner():
     cfg = load_config()
     skipped_hard_stop = []
     for project in cfg["projects"]:
+        if not project.get("planner_managed", True):
+            continue
         # Only plan for projects whose repo-memory exists — avoid spamming stubs.
         memdir = pathlib.Path(project["path"]) / "repo-memory"
         if not (memdir / "CURRENT_STATE.md").exists():
+            continue
+        if not project_environment_ok(project["name"]):
             continue
         if project_hard_stopped(project["name"]):
             skipped_hard_stop.append(project["name"])
@@ -4322,6 +5136,30 @@ def report(kind):
     counts = queue_counts()
     for st in STATES:
         lines.append(f"- {st}: {counts[st]}")
+    health = environment_health()
+    lines += ["", "## Environment"]
+    lines.append(f"- ok: `{health.get('ok')}`")
+    for issue in health.get("issues", [])[:20]:
+        scope = issue.get("project") or issue.get("scope") or "global"
+        lines.append(
+            f"- [{issue.get('severity')}] `{issue.get('code')}` {scope}: "
+            f"{issue.get('summary')} — {issue.get('detail')}"
+        )
+    retried = []
+    for state in STATES:
+        for p in queue_dir(state).glob("*.json"):
+            t = read_json(p, {})
+            attempt = int(t.get("attempt", 1) or 1)
+            if attempt > 1:
+                retried.append((state, t))
+    lines += ["", "## Retries"]
+    lines.append(f"- tasks with retries: {len(retried)}")
+    for state, task in sorted(retried, key=lambda item: (item[1].get("last_retry_at") or "", item[1].get("task_id") or ""), reverse=True)[:10]:
+        lines.append(
+            f"- `{task.get('task_id')}` state={state} attempt={task.get('attempt')} "
+            f"project={task.get('project','-')} last_retry={task.get('last_retry_at') or '-'} "
+            f"source={task.get('last_retry_source') or '-'}"
+        )
     metrics = read_pr_sweep_metrics()
     lines += ["", "## pr-sweep guard telemetry"]
     lines.append(f"- guard skips total: {metrics.get('guard_skip_total', 0)}")
@@ -4349,6 +5187,52 @@ def report(kind):
         for c in st["recent_commits"]:
             lines.append(f"  - {c}")
         lines.append("")
+    workflows = open_feature_workflow_summaries()
+    lines += ["", "## Open Feature Workflows"]
+    if not workflows:
+        lines.append("- none")
+    for wf in workflows[:10]:
+        frontier = wf.get("frontier") or {}
+        blocker = frontier.get("blocker") or {}
+        canary = wf.get("canary") or {}
+        self_repair = wf.get("self_repair") or {}
+        recent_events = wf.get("recent_events") or []
+        lines.append(
+            f"- `{wf.get('feature_id')}` {wf.get('project')}: "
+            f"{wf.get('summary') or '-'}"
+            f"{' [canary]' if canary.get('enabled') else ''}"
+            f"{' [self-repair]' if self_repair.get('enabled') else ''}"
+        )
+        lines.append(
+            f"  frontier={frontier.get('task_id') or '-'} state={frontier.get('state') or wf.get('feature_status') or '-'} "
+            f"attempt={frontier.get('attempt') or 1}"
+        )
+        if frontier.get("entered_at"):
+            lines.append(f"  entered_at={frontier.get('entered_at')}")
+        if blocker.get("code"):
+            lines.append(f"  blocker={blocker.get('code')}")
+        if recent_events:
+            evt = recent_events[-1]
+            lines.append(f"  last_event={evt.get('ts') or '-'} {evt.get('role') or '-'}:{evt.get('event') or '-'}")
+    canaries = list_canary_features()
+    lines += ["", "## Synthetic Canaries"]
+    if not canaries:
+        lines.append("- none")
+    cfg = load_config()
+    canary_cfg = cfg.get("synthetic_canary") or {}
+    if canary_cfg.get("enabled"):
+        last_success = _latest_successful_canary(canary_cfg.get("project"))
+        age = _format_age(_seconds_since_iso((last_success or {}).get("merged_at") or (last_success or {}).get("created_at")))
+        lines.append(
+            f"- configured lane: `{canary_cfg.get('project')}` interval={canary_cfg.get('interval_hours', 6)}h "
+            f"success_sla={canary_cfg.get('success_sla_hours', 24)}h last_success={age or 'never'}"
+        )
+    for feature in canaries[:10]:
+        lines.append(
+            f"- `{feature.get('feature_id')}` {feature.get('project')}: "
+            f"status={feature.get('status') or '-'} created_at={feature.get('created_at') or '-'} "
+            f"summary={feature.get('summary') or '-'}"
+        )
     if kind == "morning":
         ppd_path = ppd_report_path()
         if ppd_path.exists():
@@ -4406,6 +5290,174 @@ def tick_memory_synthesis(force=False):
     return enqueued
 
 
+def tick_canary_workflows(force=False):
+    """Queue a synthetic canary feature through the normal planner path.
+
+    >>> import pathlib, tempfile, types
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     repo = root / "repo"
+    ...     memdir = repo / "repo-memory"
+    ...     memdir.mkdir(parents=True)
+    ...     _ = (memdir / "CURRENT_STATE.md").write_text("ok\\n")
+    ...     old = {k: tick_canary_workflows.__globals__[k] for k in ("FEATURES_DIR", "load_config", "engine_outstanding", "write_agent_status", "create_feature", "new_task", "enqueue_task", "append_event", "project_environment_ok", "_project_has_open_feature", "planner_disabled", "project_hard_stopped")}
+    ...     tick_canary_workflows.__globals__["FEATURES_DIR"] = root / "features"
+    ...     tick_canary_workflows.__globals__["FEATURES_DIR"].mkdir(parents=True, exist_ok=True)
+    ...     tick_canary_workflows.__globals__["load_config"] = lambda: {"projects": [{"name": "demo", "path": str(repo)}], "synthetic_canary": {"enabled": True, "project": "demo", "summary": "Canary", "roadmap_entry_id": "C-1", "roadmap_title": "Canary", "roadmap_body": "body", "interval_hours": 6}}
+    ...     tick_canary_workflows.__globals__["engine_outstanding"] = lambda: {"claude": 0, "codex": 0, "qa": 0}
+    ...     tick_canary_workflows.__globals__["write_agent_status"] = lambda *args, **kwargs: None
+    ...     tick_canary_workflows.__globals__["project_environment_ok"] = lambda name, refresh=True: True
+    ...     tick_canary_workflows.__globals__["_project_has_open_feature"] = lambda name: False
+    ...     tick_canary_workflows.__globals__["planner_disabled"] = lambda name: False
+    ...     tick_canary_workflows.__globals__["project_hard_stopped"] = lambda name: False
+    ...     tick_canary_workflows.__globals__["create_feature"] = lambda **kwargs: {"feature_id": "feature-1", "summary": kwargs["summary"], "canary": kwargs["canary"], "project": kwargs["project"]}
+    ...     tick_canary_workflows.__globals__["new_task"] = lambda **kwargs: kwargs
+    ...     calls = []
+    ...     tick_canary_workflows.__globals__["enqueue_task"] = lambda task: calls.append(task)
+    ...     tick_canary_workflows.__globals__["append_event"] = lambda *args, **kwargs: None
+    ...     out = tick_canary_workflows()
+    ...     for key, value in old.items():
+    ...         tick_canary_workflows.__globals__[key] = value
+    >>> (out["enqueued"], calls[0]["feature_id"], calls[0]["engine_args"]["canary"]["enabled"])
+    (1, 'feature-1', True)
+    """
+    cfg = load_config()
+    canary_cfg = dict(cfg.get("synthetic_canary") or {})
+    if not canary_cfg.get("enabled"):
+        write_agent_status("canary", "idle", "disabled")
+        return {"enqueued": 0, "reason": "disabled"}
+
+    outstanding = engine_outstanding()
+    backed_up = {engine: n for engine, n in outstanding.items() if n > 1}
+    if backed_up:
+        msg = "Gated — slots busy: " + ", ".join(f"{e}={n}" for e, n in sorted(backed_up.items()))
+        write_agent_status("canary", "gated", msg)
+        return {"enqueued": 0, "reason": "gated"}
+
+    project_name = canary_cfg.get("project")
+    try:
+        project = get_project(cfg, project_name)
+    except KeyError:
+        write_agent_status("canary", "failed", f"unknown project {project_name}")
+        return {"enqueued": 0, "reason": "unknown_project"}
+    if not project_environment_ok(project_name, refresh=True):
+        write_agent_status("canary", "idle", f"project {project_name} environment degraded")
+        return {"enqueued": 0, "reason": "environment_degraded"}
+
+    if project_hard_stopped(project_name):
+        write_agent_status("canary", "idle", f"project {project_name} hard-stopped")
+        return {"enqueued": 0, "reason": "hard_stopped"}
+    if planner_disabled(project_name):
+        write_agent_status("canary", "idle", f"planner disabled for {project_name}")
+        return {"enqueued": 0, "reason": "planner_disabled"}
+    if _project_has_open_feature(project_name):
+        if not list_canary_features(project_name=project_name, statuses=("open", "finalizing")):
+            write_agent_status("canary", "idle", f"project {project_name} already has an open feature")
+            return {"enqueued": 0, "reason": "project_busy"}
+    if list_canary_features(project_name=project_name, statuses=("open", "finalizing")):
+        write_agent_status("canary", "idle", f"in-flight canary exists for {project_name}")
+        return {"enqueued": 0, "reason": "already_in_flight"}
+
+    memdir = pathlib.Path(project["path"]) / "repo-memory"
+    if not (memdir / "CURRENT_STATE.md").exists():
+        write_agent_status("canary", "failed", f"missing repo-memory for {project_name}")
+        return {"enqueued": 0, "reason": "missing_repo_memory"}
+
+    due, last = _canary_interval_due(cfg, project_name)
+    if not force and not due:
+        age = _format_age(_seconds_since_iso((last or {}).get("created_at")))
+        write_agent_status("canary", "idle", f"next canary not due yet for {project_name} (last={age or '-'})")
+        return {"enqueued": 0, "reason": "not_due"}
+
+    roadmap_entry = {
+        "id": canary_cfg.get("roadmap_entry_id") or "R-021-CANARY",
+        "title": canary_cfg.get("roadmap_title") or canary_cfg.get("summary") or "Synthetic workflow canary",
+        "body": canary_cfg.get("roadmap_body") or "",
+    }
+    canary_meta = {
+        "enabled": True,
+        "kind": "workflow",
+        "scheduled_by": "tick-canary",
+        "interval_hours": canary_cfg.get("interval_hours", 6),
+        "config_project": project_name,
+    }
+    feature = create_feature(
+        project=project_name,
+        summary=canary_cfg.get("summary") or "Synthetic workflow canary",
+        source=f"tick-canary:{roadmap_entry['id']}",
+        roadmap_entry=roadmap_entry,
+        roadmap_entry_id=roadmap_entry["id"],
+        canary=canary_meta,
+    )
+    task = new_task(
+        role="planner",
+        engine="claude",
+        project=project_name,
+        summary=(
+            f"Decompose synthetic canary {feature['summary']} for "
+            f"{project_name} (feature {feature['feature_id']})."
+        ),
+        source="tick-canary",
+        braid_template=project_historian_template(project_name),
+        feature_id=feature["feature_id"],
+        engine_args={"roadmap_entry": roadmap_entry, "canary": canary_meta},
+    )
+    enqueue_task(task)
+    append_event(
+        "canary",
+        "feature_enqueued",
+        task_id=task.get("task_id"),
+        feature_id=feature["feature_id"],
+        details={"project": project_name, "summary": feature.get("summary"), "force": force},
+    )
+    write_agent_status("canary", "idle", f"enqueued {feature['feature_id']} for {project_name}")
+    return {"enqueued": 1, "reason": "queued", "feature_id": feature["feature_id"], "task_id": task.get("task_id")}
+
+
+def enqueue_self_repair(*, summary, evidence, issue_kind="runtime_bug", source="manual"):
+    cfg = load_config()
+    repair_cfg = cfg.get("self_repair") or {}
+    if not repair_cfg.get("enabled", True):
+        return {"enqueued": 0, "reason": "disabled"}
+    project_name = repair_cfg.get("project", "devmini-orchestrator")
+    project = get_project(cfg, project_name)
+    if _project_has_open_feature(project_name):
+        return {"enqueued": 0, "reason": "project_busy"}
+    if not project_environment_ok(project_name, refresh=True):
+        return {"enqueued": 0, "reason": "environment_degraded", "project": project_name}
+    feature = create_feature(
+        project=project_name,
+        summary=summary[:240],
+        source=f"self-repair:{source}",
+        roadmap_entry={"id": "R-023-SELF-REPAIR", "title": summary[:120], "body": evidence},
+        roadmap_entry_id="R-023-SELF-REPAIR",
+        self_repair={"enabled": True, "issue_kind": issue_kind, "source": source},
+    )
+    task = new_task(
+        role="implementer",
+        engine="codex",
+        project=project_name,
+        summary=summary[:240],
+        source=f"self-repair:{source}",
+        braid_template="orchestrator-self-repair",
+        feature_id=feature["feature_id"],
+        engine_args={
+            "self_repair": {"enabled": True, "issue_kind": issue_kind, "source": source},
+            "evidence": evidence,
+        },
+    )
+    enqueue_task(task)
+    append_feature_child(feature["feature_id"], task["task_id"])
+    append_event(
+        "self-repair",
+        "feature_enqueued",
+        task_id=task["task_id"],
+        feature_id=feature["feature_id"],
+        details={"project": project_name, "issue_kind": issue_kind, "source": source},
+    )
+    return {"enqueued": 1, "feature_id": feature["feature_id"], "task_id": task["task_id"]}
+
+
 def status_text():
     lines = ["devmini orchestrator status", f"({now_iso()})", ""]
     lines.append("Agents:")
@@ -4417,6 +5469,22 @@ def status_text():
     for st in STATES:
         if counts[st]:
             lines.append(f"  {st}: {counts[st]}")
+    retried = 0
+    for state in STATES:
+        for p in queue_dir(state).glob("*.json"):
+            t = read_json(p, {})
+            if int(t.get("attempt", 1) or 1) > 1:
+                retried += 1
+    if retried:
+        lines.append(f"  retried_tasks: {retried}")
+    health = environment_health()
+    lines.append(f"  environment_ok: {health.get('ok')}")
+    if health.get("issues"):
+        for issue in health.get("issues")[:5]:
+            scope = issue.get("project") or issue.get("scope") or "global"
+            lines.append(
+                f"  env[{issue.get('severity')}]: {issue.get('code')} {scope} {issue.get('summary')}"
+            )
     hard_stopped = [
         p["name"] for p in load_config().get("projects", [])
         if project_hard_stopped(p["name"])
@@ -4424,15 +5492,55 @@ def status_text():
     if hard_stopped:
         lines.append("")
         lines.append(f"HARD-STOP (regression-failure): {', '.join(hard_stopped)}")
-    open_features = list_features(status="open")
-    if open_features:
+    workflows = open_feature_workflow_summaries()
+    if workflows:
         lines.append("")
-        lines.append(f"Features (open): {len(open_features)}")
+        lines.append(f"Features (open): {len(workflows)}")
         per_proj = {}
-        for f in open_features:
-            per_proj[f["project"]] = per_proj.get(f["project"], 0) + 1
+        for wf in workflows:
+            proj = wf.get("project") or "unknown"
+            per_proj[proj] = per_proj.get(proj, 0) + 1
         for proj, n in sorted(per_proj.items()):
             lines.append(f"  {proj}: {n}")
+        for wf in workflows[:5]:
+            frontier = wf.get("frontier") or {}
+            blocker = frontier.get("blocker") or {}
+            canary = wf.get("canary") or {}
+            self_repair = wf.get("self_repair") or {}
+            recent_events = wf.get("recent_events") or []
+            line = (
+                f"  - {wf.get('feature_id')}: "
+                f"{frontier.get('task_id') or '-'} {frontier.get('state') or wf.get('feature_status') or '-'}"
+            )
+            if canary.get("enabled"):
+                line += " [canary]"
+            if self_repair.get("enabled"):
+                line += " [self-repair]"
+            if frontier.get("attempt") and frontier.get("attempt", 1) > 1:
+                line += f" a{frontier['attempt']}"
+            if blocker.get("code"):
+                line += f" blocker={blocker['code']}"
+            lines.append(line)
+            if recent_events:
+                evt = recent_events[-1]
+                lines.append(f"    last_event={evt.get('ts') or '-'} {evt.get('role') or '-'}:{evt.get('event') or '-'}")
+    canaries = list_canary_features()
+    if canaries:
+        lines.append("")
+        lines.append("Canaries:")
+        for feature in canaries[:5]:
+            lines.append(
+                f"  - {feature.get('feature_id')}: {feature.get('project')} {feature.get('status') or '-'}"
+            )
+    canary_cfg = load_config().get("synthetic_canary") or {}
+    if canary_cfg.get("enabled"):
+        last_success = _latest_successful_canary(canary_cfg.get("project"))
+        age = _format_age(_seconds_since_iso((last_success or {}).get("merged_at") or (last_success or {}).get("created_at")))
+        lines.append("")
+        lines.append(
+            f"Canary freshness: project={canary_cfg.get('project')} interval={canary_cfg.get('interval_hours', 6)}h "
+            f"sla={canary_cfg.get('success_sla_hours', 24)}h last_success={age or 'never'}"
+        )
     idx = load_braid_index()
     if idx:
         lines.append("")
@@ -4487,14 +5595,12 @@ def planner_status_text(project_filter=None):
     if project_filter is not None and project_filter not in names:
         return f"error: unknown project {project_filter}"
     rows = []
+    workflows = open_feature_workflow_summaries()
     for project in projects:
         name = project["name"]
         if project_filter is not None and name != project_filter:
             continue
-        open_features = 0
-        for feature in list_features():
-            if feature.get("project") == name and feature.get("status") in ("open", "finalizing"):
-                open_features += 1
+        open_features = sum(1 for wf in workflows if wf.get("project") == name)
         in_flight = 0
         for state in ("claimed", "running"):
             for p in queue_dir(state).glob("*.json"):
@@ -4503,7 +5609,10 @@ def planner_status_text(project_filter=None):
                     in_flight += 1
         rows.append({
             "project": name,
-            "planner": "enabled" if not planner_disabled(name) else "disabled",
+            "planner": (
+                "manual" if not project.get("planner_managed", True)
+                else ("enabled" if not planner_disabled(name) else "disabled")
+            ),
             "hard_stop": "yes" if project_hard_stopped(name) else "no",
             "open_features": str(open_features),
             "in_flight": str(in_flight),
@@ -4606,6 +5715,15 @@ def _feature_context_text(project_name=None, limit=5):
     return json.dumps(rows, indent=2, sort_keys=True) if rows else "[]"
 
 
+def _feature_workflow_context(project_name=None, limit=5):
+    feats = list_features()
+    if project_name:
+        feats = [f for f in feats if f.get("project") == project_name]
+    feats.sort(key=lambda f: f.get("created_at", ""), reverse=True)
+    rows = [feature_workflow_summary(feature) for feature in feats[:limit]]
+    return json.dumps(rows, indent=2, sort_keys=True) if rows else "[]"
+
+
 def _recent_project_task_context(project_name, limit=8):
     tasks = []
     for state in STATES:
@@ -4637,35 +5755,16 @@ def _recent_project_task_context(project_name, limit=8):
 
 def _recent_feature_diagnosis(project_name, limit=5):
     items = []
-    features = [f for f in list_features() if f.get("project") == project_name]
-    features.sort(key=lambda f: f.get("created_at", ""), reverse=True)
-    for feature in features[:limit]:
+    for wf in open_feature_workflow_summaries(project_name)[:limit]:
         item = {
-            "feature_id": feature.get("feature_id"),
-            "status": feature.get("status"),
-            "roadmap_entry_id": feature.get("roadmap_entry_id"),
-            "created_at": feature.get("created_at"),
-            "child_task_count": len(feature.get("child_task_ids", [])),
-            "abandoned_reason": feature.get("abandoned_reason"),
+            "feature_id": wf.get("feature_id"),
+            "status": wf.get("feature_status"),
+            "summary": wf.get("summary"),
+            "planner": wf.get("planner"),
+            "frontier": wf.get("frontier"),
+            "recent_events": wf.get("recent_events") or [],
+            "child_states": wf.get("child_states") or {},
         }
-        planner_tasks = []
-        for state in STATES:
-            for path in queue_dir(state).glob("*.json"):
-                task = read_json(path, None)
-                if not task:
-                    continue
-                if task.get("feature_id") != feature.get("feature_id") or task.get("role") != "planner":
-                    continue
-                planner_tasks.append(task)
-        planner_tasks.sort(key=lambda t: t.get("created_at", ""), reverse=True)
-        if planner_tasks:
-            planner = planner_tasks[0]
-            item["planner_task_id"] = planner.get("task_id")
-            item["planner_task_state"] = planner.get("state")
-            item["planner_finished_at"] = planner.get("finished_at")
-            log_text = _recent_text_lines(planner.get("log_path"), limit=40) if planner.get("log_path") else ""
-            if "# dropped " in log_text or "decomposed into 0" in log_text:
-                item["planner_log_excerpt"] = log_text[-1500:]
         items.append(item)
     return json.dumps(items, indent=2, sort_keys=True) if items else "[]"
 
@@ -4673,8 +5772,8 @@ def _recent_feature_diagnosis(project_name, limit=5):
 def _workflow_snapshot():
     counts = queue_counts()
     open_features = {}
-    for feature in list_features(status="open"):
-        project = feature.get("project") or "unknown"
+    for wf in open_feature_workflow_summaries():
+        project = wf.get("project") or "unknown"
         open_features[project] = open_features.get(project, 0) + 1
     hard_stopped = [
         p["name"] for p in load_config().get("projects", [])
@@ -4803,6 +5902,97 @@ def _feature_ready_for_finalize(feature):
     )
 
 
+def feature_workflow_summary(feature):
+    """Build a compact workflow summary with event-backed timing for the frontier task."""
+    feature_id = feature.get("feature_id")
+    children = []
+    for child_id in feature.get("child_task_ids", []):
+        found = find_task(child_id)
+        if not found:
+            children.append({"task_id": child_id, "state": "missing", "task": None})
+        else:
+            state, task = found
+            children.append({"task_id": child_id, "state": state, "task": task})
+
+    frontier = None
+    for child in children:
+        if child["state"] != "done":
+            frontier = child
+            break
+
+    planner = _latest_feature_planner_task(feature_id)
+    planner_state = planner[0] if planner else None
+    planner_task = planner[1] if planner else None
+    planner_entered_at = planner_reason = None
+    if planner_task and planner_state:
+        planner_entered_at, planner_reason = task_state_entered_at(planner_task["task_id"], planner_state)
+
+    frontier_state = frontier_entered_at = frontier_reason = None
+    frontier_attempt = None
+    frontier_blocker = None
+    if frontier:
+        frontier_state = frontier["state"]
+        if frontier["task"] is not None and frontier_state:
+            frontier_entered_at, frontier_reason = task_state_entered_at(frontier["task_id"], frontier_state)
+            frontier_attempt = int(frontier["task"].get("attempt", 1) or 1)
+            frontier_blocker = task_blocker(frontier["task"])
+    frontier_age_seconds = _seconds_since_iso(frontier_entered_at)
+    recent_events = []
+    for row in read_events(feature_id=feature_id, limit=6):
+        recent_events.append(
+            {
+                "ts": row.get("ts"),
+                "role": row.get("role"),
+                "event": row.get("event"),
+                "task_id": row.get("task_id"),
+                "details": row.get("details") or {},
+            }
+        )
+    repair_events = [
+        row for row in recent_events
+        if row.get("event") in ("repair_attempt", "retry_reset")
+    ]
+    workflow_check = dict(feature.get("workflow_check") or {})
+
+    return {
+        "feature_id": feature_id,
+        "feature_status": feature.get("status"),
+        "project": feature.get("project"),
+        "summary": feature.get("summary"),
+        "canary": dict(feature.get("canary") or {}),
+        "self_repair": dict(feature.get("self_repair") or {}),
+        "child_states": {item["task_id"]: item["state"] for item in children},
+        "planner": {
+            "task_id": planner_task.get("task_id") if planner_task else None,
+            "state": planner_state,
+            "entered_at": planner_entered_at,
+            "reason": planner_reason,
+        },
+        "frontier": {
+            "task_id": frontier["task_id"] if frontier else None,
+            "state": frontier_state,
+            "entered_at": frontier_entered_at,
+            "reason": frontier_reason,
+            "age_seconds": frontier_age_seconds,
+            "age_text": _format_age(frontier_age_seconds),
+            "attempt": frontier_attempt,
+            "blocker": frontier_blocker,
+        },
+        "workflow_check": workflow_check,
+        "recent_events": recent_events,
+        "repair_history": repair_events,
+    }
+
+
+def open_feature_workflow_summaries(project_name=None):
+    feats = list_features()
+    feats = [f for f in feats if f.get("status") in ("open", "finalizing")]
+    if project_name is not None:
+        feats = [f for f in feats if f.get("project") == project_name]
+    feats.sort(key=lambda f: f.get("created_at", ""), reverse=True)
+    return [feature_workflow_summary(feature) for feature in feats]
+
+
 def _workflow_check_attempts(feature, issue_key):
     wc = feature.get("workflow_check") or {}
     attempts = wc.get("attempts") or {}
@@ -4822,6 +6012,12 @@ def _workflow_check_record_attempt(feature_id, issue_key, action, note):
         wc["last_note"] = note
         wc["updated_at"] = now_iso()
     update_feature(feature_id, mut)
+    append_event(
+        "workflow-check",
+        "repair_attempt",
+        feature_id=feature_id,
+        details={"issue_key": issue_key, "action": action, "note": note},
+    )
 
 
 def _workflow_check_worker_plists():
@@ -4855,72 +6051,112 @@ def _workflow_check_restart_workers():
 
 
 def _workflow_check_retry_task(task, state, reason):
-    def mut(t):
-        t["claimed_at"] = None
-        t["started_at"] = None
-        t["finished_at"] = None
-        t["log_path"] = None
-    move_task(task["task_id"], state, "queued", reason=reason, mutator=mut)
+    reset_task_for_retry(
+        task["task_id"],
+        state,
+        reason=reason,
+        source="workflow-check",
+    )
     found = find_task(task["task_id"])
     return bool(found and found[0] in ("queued", "claimed", "running"))
 
 
-def _workflow_check_known_task_action(task, state, project):
-    topo = str(task.get("topology_error") or "")
-    failure = str(task.get("failure") or "")
-    detail = " ".join(part for part in (failure, topo) if part).strip()
-    detail_lower = detail.lower()
-
-    if topo == "regression-failure":
-        return None, "hard-stopped by regression failure"
-    if state == "blocked" and topo == "template_missing":
-        tmpl = task.get("braid_template")
-        if tmpl and (BRAID_TEMPLATES / f"{tmpl}.mmd").exists():
-            return "retry_task", "template now exists"
-        return None, "waiting for template regeneration"
-    if "main_dirty_or_ahead" in topo:
+def _workflow_policy_matches(policy, issue, task, project):
+    if policy.get("kind") and issue.get("kind") != policy["kind"]:
+        return False
+    if policy.get("task_state") and issue.get("task_state") != policy["task_state"]:
+        return False
+    blocker = issue.get("blocker") or {}
+    if policy.get("blocker_code") and blocker.get("code") != policy["blocker_code"]:
+        return False
+    when = policy.get("when")
+    if when == "template_missing_blocked":
+        tmpl = task.get("braid_template") if task else None
+        return not (tmpl and (BRAID_TEMPLATES / f"{tmpl}.mmd").exists())
+    if when == "template_missing_ready":
+        tmpl = task.get("braid_template") if task else None
+        return bool(tmpl and (BRAID_TEMPLATES / f"{tmpl}.mmd").exists())
+    if when == "template_refine_waiting":
+        req = task.get("refine_request") or {}
+        refine_task_id = req.get("refine_task_id")
+        if not refine_task_id:
+            return True
+        refine = find_task(refine_task_id)
+        return not (refine and refine[0] == "done")
+    if when == "template_refine_ready":
+        req = task.get("refine_request") or {}
+        refine_task_id = req.get("refine_task_id")
+        if not refine_task_id:
+            return False
+        refine = find_task(refine_task_id)
+        return bool(refine and refine[0] == "done")
+    if when == "project_main_clean":
         repo = repo_status(project["path"])
-        if repo.get("exists") and not repo.get("dirty"):
-            return "retry_task", "project main checkout is clean again"
-        return None, "project main checkout still dirty"
-    if "repo-memory secret-scan hit" in detail_lower or "detect-secrets findings" in detail_lower:
-        return "restart_workers_then_retry", "workflow runtime changed; reload workers then retry"
-    if "worker crash" in detail_lower:
-        return "retry_task", "worker crashed; task is retryable"
-    if "git', 'worktree', 'add'" in failure and "255" in failure:
-        return "retry_task", "worktree creation failed; retry after cleanup"
-    if state in ("failed", "blocked"):
-        return None, detail or "task is blocked without a known automatic fix"
-    return None, detail or f"task is in state {state}"
+        return bool(repo.get("exists") and not repo.get("dirty"))
+    if when == "project_main_still_dirty":
+        repo = repo_status(project["path"])
+        return not (repo.get("exists") and not repo.get("dirty"))
+    return True
 
 
-def _diagnose_feature_workflow_issue(feature, config):
+def _workflow_policy_decision(issue, task, project):
+    blocker = issue.get("blocker") or {}
+    detail = (blocker.get("detail") or "").strip()
+    summary = (blocker.get("summary") or "").strip()
+    for policy in WORKFLOW_REPAIR_POLICY:
+        if _workflow_policy_matches(policy, issue, task, project):
+            diagnosis = policy.get("diagnosis") or detail or summary or issue.get("diagnosis") or "workflow issue detected"
+            return policy.get("action"), diagnosis, policy.get("name")
+    if issue.get("task_state") in ("failed", "blocked"):
+        return None, detail or summary or "task is blocked without a known automatic fix", None
+    return None, issue.get("diagnosis") or "workflow issue detected", None
+
+
+def _workflow_check_known_task_action(task, state, project):
+    blocker = task_blocker(task)
+    issue = {"kind": "frontier_task_blocked", "task_state": state, "blocker": blocker}
+    action, diagnosis, _ = _workflow_policy_decision(issue, task, project)
+    return action, diagnosis
+
+
+def _workflow_issue_from_summary(feature, workflow, config):
     project = get_project(config, feature["project"])
     feature_id = feature.get("feature_id")
+    frontier = workflow.get("frontier") or {}
+    planner = workflow.get("planner") or {}
+    canary = workflow.get("canary") or {}
+    canary_cfg = config.get("synthetic_canary") or {}
+    canary_stale_sec = int(float(canary_cfg.get("max_frontier_age_hours", 2) or 2) * 3600)
 
     if feature.get("status") == "open":
         if not feature.get("child_task_ids"):
-            planner = _latest_feature_planner_task(feature_id)
-            if planner:
-                state, task = planner
-                if state in ("failed", "blocked"):
+            if planner.get("task_id") and planner.get("state"):
+                found = find_task(planner["task_id"])
+                if found:
+                    state, task = found
+                else:
+                    state, task = planner.get("state"), None
+                blocker = task_blocker(task)
+                if task is not None and state in ("failed", "blocked"):
                     action, diagnosis = _workflow_check_known_task_action(task, state, project)
                     return {
                         "feature_id": feature_id,
                         "project": project["name"],
                         "summary": feature.get("summary") or feature_id,
-                        "issue_key": f"planner:{task['task_id']}:{state}:{task.get('failure') or task.get('topology_error') or ''}",
+                        "issue_key": f"planner:{task['task_id']}:{state}:{(blocker or {}).get('code') or task.get('failure') or task.get('topology_error') or ''}",
                         "kind": "planner_blocked",
                         "task_id": task["task_id"],
                         "task_state": state,
+                        "blocker": blocker,
                         "diagnosis": diagnosis,
+                        "workflow": workflow,
                         "action": action,
                         "task": task,
                     }
-                if state == "done":
+                if task is not None and state == "done":
                     log_excerpt = _recent_text_lines(task.get("log_path"), limit=40) if task.get("log_path") else ""
                     if "decomposed into 0" in log_excerpt or "# dropped " in log_excerpt:
-                        return {
+                        issue = {
                             "feature_id": feature_id,
                             "project": project["name"],
                             "summary": feature.get("summary") or feature_id,
@@ -4928,9 +6164,13 @@ def _diagnose_feature_workflow_issue(feature, config):
                             "kind": "planner_emitted_no_children",
                             "task_id": task["task_id"],
                             "task_state": state,
-                            "diagnosis": "planner completed without emitting any runnable slices",
-                            "action": "retry_task",
+                            "blocker": make_blocker("planner_emitted_no_children", summary="planner emitted no runnable slices", detail="planner completed without emitting any runnable slices", source="workflow-check", retryable=True),
+                            "workflow": workflow,
                             "task": task,
+                        }
+                        issue["action"], issue["diagnosis"], issue["policy"] = _workflow_policy_decision(issue, task, project)
+                        return {
+                            **issue,
                         }
             return {
                 "feature_id": feature_id,
@@ -4940,14 +6180,16 @@ def _diagnose_feature_workflow_issue(feature, config):
                 "kind": "feature_has_no_children",
                 "task_id": None,
                 "task_state": "open",
+                "blocker": make_blocker("feature_has_no_children", summary="feature has no child tasks", detail="feature is open but has no child tasks to make progress", source="workflow-check", retryable=False),
                 "diagnosis": "feature is open but has no child tasks to make progress",
+                "workflow": workflow,
                 "action": None,
                 "task": None,
             }
 
-        for child_id in feature.get("child_task_ids", []):
-            found = find_task(child_id)
-            if not found:
+        if frontier.get("state") == "missing" and frontier.get("task_id"):
+            child_id = frontier["task_id"]
+            if not find_task(child_id):
                 return {
                     "feature_id": feature_id,
                     "project": project["name"],
@@ -4956,31 +6198,65 @@ def _diagnose_feature_workflow_issue(feature, config):
                     "kind": "missing_child",
                     "task_id": child_id,
                     "task_state": "missing",
+                    "blocker": make_blocker("missing_child", summary="feature child task file missing", detail="feature child task file is missing from the queue state tree", source="workflow-check", retryable=False),
                     "diagnosis": "feature child task file is missing from the queue state tree",
+                    "workflow": workflow,
                     "action": None,
                     "task": None,
                 }
-            state, task = found
-            if state == "done":
-                continue
-            if state in ("failed", "blocked", "abandoned"):
+        if frontier.get("task_id") and frontier.get("state") in ("failed", "blocked", "abandoned"):
+            found = find_task(frontier["task_id"])
+            if found:
+                state, task = found
+                blocker = task_blocker(task)
                 action, diagnosis = _workflow_check_known_task_action(task, state, project)
                 return {
                     "feature_id": feature_id,
                     "project": project["name"],
                     "summary": feature.get("summary") or feature_id,
-                    "issue_key": f"task:{task['task_id']}:{state}:{task.get('failure') or task.get('topology_error') or ''}",
+                    "issue_key": f"task:{task['task_id']}:{state}:{(blocker or {}).get('code') or task.get('failure') or task.get('topology_error') or ''}",
                     "kind": "frontier_task_blocked",
                     "task_id": task["task_id"],
                     "task_state": state,
+                    "blocker": blocker,
                     "diagnosis": diagnosis,
+                    "workflow": workflow,
                     "action": action,
                     "task": task,
                 }
+        if frontier.get("task_id") and frontier.get("state") not in (None, "done"):
+            if (
+                canary.get("enabled")
+                and frontier.get("age_seconds") is not None
+                and frontier.get("age_seconds", 0) >= canary_stale_sec
+            ):
+                issue = {
+                    "feature_id": feature_id,
+                    "project": project["name"],
+                    "summary": feature.get("summary") or feature_id,
+                    "issue_key": f"canary-stale:{feature_id}:{frontier.get('task_id')}:{frontier.get('state')}",
+                    "kind": "canary_stale",
+                    "task_id": frontier.get("task_id"),
+                    "task_state": frontier.get("state"),
+                    "blocker": make_blocker(
+                        "canary_stale",
+                        summary="synthetic canary is stale",
+                        detail=(
+                            f"frontier {frontier.get('task_id') or '-'} has stayed "
+                            f"{frontier.get('state') or '-'} for {frontier.get('age_text') or '-'}"
+                        ),
+                        source="workflow-check",
+                        retryable=False,
+                    ),
+                    "workflow": workflow,
+                    "task": None,
+                }
+                issue["action"], issue["diagnosis"], issue["policy"] = _workflow_policy_decision(issue, None, project)
+                return issue
             return None
 
         if _feature_ready_for_finalize(feature):
-            return {
+            issue = {
                 "feature_id": feature_id,
                 "project": project["name"],
                 "summary": feature.get("summary") or feature_id,
@@ -4988,9 +6264,13 @@ def _diagnose_feature_workflow_issue(feature, config):
                 "kind": "ready_for_finalize",
                 "task_id": None,
                 "task_state": "done",
-                "diagnosis": "all child task PRs are merged; feature should be finalized",
-                "action": "feature_finalize",
+                "blocker": None,
+                "workflow": workflow,
                 "task": None,
+            }
+            issue["action"], issue["diagnosis"], issue["policy"] = _workflow_policy_decision(issue, None, project)
+            return {
+                **issue,
             }
         return None
 
@@ -5004,7 +6284,7 @@ def _diagnose_feature_workflow_issue(feature, config):
             or mergeable == "CONFLICTING"
             or review_decision == "CHANGES_REQUESTED"
         ):
-            return {
+            issue = {
                 "feature_id": feature_id,
                 "project": project["name"],
                 "summary": feature.get("summary") or feature_id,
@@ -5012,12 +6292,22 @@ def _diagnose_feature_workflow_issue(feature, config):
                 "kind": "final_pr_blocked",
                 "task_id": None,
                 "task_state": "finalizing",
-                "diagnosis": (
-                    f"final PR #{feature.get('final_pr_number')} is blocked "
-                    f"(mergeStateStatus={merge_state or '-'}, mergeable={mergeable or '-'}, reviewDecision={review_decision or '-'})"
+                "blocker": make_blocker(
+                    "final_pr_blocked",
+                    summary="final PR is blocked",
+                    detail=(
+                        f"mergeStateStatus={merge_state or '-'}, "
+                        f"mergeable={mergeable or '-'}, reviewDecision={review_decision or '-'}"
+                    ),
+                    source="workflow-check",
+                    retryable=True,
                 ),
-                "action": "pr_sweep",
+                "workflow": workflow,
                 "task": None,
+            }
+            issue["action"], issue["diagnosis"], issue["policy"] = _workflow_policy_decision(issue, None, project)
+            return {
+                **issue,
             }
     return None
 
@@ -5042,8 +6332,33 @@ def _write_workflow_check_report(issues, *, reaped=0):
             f"- kind: `{issue['kind']}`",
             f"- diagnosis: {issue['diagnosis']}",
         ]
+        if (issue.get("workflow") or {}).get("canary", {}).get("enabled"):
+            lines.append("- canary: `true`")
+        blocker = issue.get("blocker") or {}
+        if blocker.get("code"):
+            lines.append(f"- blocker: `{blocker['code']}` ({blocker.get('confidence') or '-'})")
+            if blocker.get("source"):
+                lines.append(f"- blocker source: `{blocker['source']}`")
         if issue.get("task_id"):
             lines.append(f"- task: `{issue['task_id']}` ({issue.get('task_state')})")
+        wf = issue.get("workflow") or {}
+        frontier = wf.get("frontier") or {}
+        if frontier.get("entered_at"):
+            lines.append(f"- frontier entered current state: `{frontier['entered_at']}`")
+        if frontier.get("age_text"):
+            lines.append(f"- frontier age: `{frontier['age_text']}`")
+        if frontier.get("reason"):
+            lines.append(f"- frontier transition reason: {frontier['reason']}")
+        if frontier.get("attempt") and frontier.get("attempt", 1) > 1:
+            lines.append(f"- frontier attempt: `{frontier['attempt']}`")
+        repairs = wf.get("repair_history") or []
+        if repairs:
+            evt = repairs[-1]
+            lines.append(
+                f"- last repair activity: `{evt.get('ts') or '-'}` {evt.get('role') or '-'}:{evt.get('event') or '-'}"
+            )
+        if issue.get("policy"):
+            lines.append(f"- repair policy: `{issue['policy']}`")
         if issue.get("action"):
             lines.append(f"- action: `{issue['action']}`")
         lines.append(f"- attempts: {issue.get('attempts', 0)}/{issue.get('max_attempts', 0)}")
@@ -5054,13 +6369,92 @@ def _write_workflow_check_report(issues, *, reaped=0):
     return out
 
 
+def _canary_freshness_issue(cfg):
+    canary_cfg = cfg.get("synthetic_canary") or {}
+    if not canary_cfg.get("enabled"):
+        return None
+    project_name = canary_cfg.get("project")
+    try:
+        project = get_project(cfg, project_name)
+    except KeyError:
+        return None
+    if _project_has_open_feature(project_name) and not list_canary_features(project_name=project_name, statuses=("open", "finalizing")):
+        return None
+    if list_canary_features(project_name=project_name, statuses=("open", "finalizing")):
+        return None
+    overdue, last = _canary_success_overdue(cfg, project_name)
+    if not overdue:
+        return None
+    anchor = _latest_canary_feature(project_name) or last or {}
+    issue = {
+        "feature_id": anchor.get("feature_id") or f"canary:{project_name}",
+        "project": project_name,
+        "summary": canary_cfg.get("summary") or "Synthetic workflow canary",
+        "issue_key": f"canary-freshness:{project_name}",
+        "kind": "canary_missing_recent_success",
+        "task_id": None,
+        "task_state": "idle",
+        "blocker": make_blocker(
+            "canary_missing_recent_success",
+            summary="recent successful canary missing",
+            detail=(
+                f"no merged canary within {canary_cfg.get('success_sla_hours', 24)}h"
+                if last is not None else
+                "no successful canary has been recorded yet"
+            ),
+            source="workflow-check",
+            retryable=True,
+        ),
+        "workflow": {
+            "canary": {"enabled": True, "project": project_name},
+            "recent_events": [],
+            "repair_history": [],
+        },
+        "task": None,
+    }
+    issue["action"], issue["diagnosis"], issue["policy"] = _workflow_policy_decision(issue, None, project)
+    return issue
+
+
+def _environment_health_issues():
+    issues = []
+    for issue in environment_health(refresh=True).get("issues", []):
+        if issue.get("severity") != "error":
+            continue
+        issues.append(
+            {
+                "feature_id": f"env:{issue.get('project') or 'global'}",
+                "project": issue.get("project") or "global",
+                "summary": issue.get("summary") or "environment degraded",
+                "issue_key": f"env:{issue.get('project') or 'global'}:{issue.get('code')}:{issue.get('summary')}",
+                "kind": "environment_degraded",
+                "task_id": None,
+                "task_state": "idle",
+                "blocker": make_blocker(
+                    issue.get("code") or "runtime_env_dirty",
+                    summary=issue.get("summary"),
+                    detail=issue.get("detail"),
+                    source="environment-health",
+                    retryable=False,
+                ),
+                "diagnosis": issue.get("detail") or issue.get("summary") or "environment degraded",
+                "workflow": {},
+                "task": None,
+                "attempts": 0,
+                "max_attempts": 0,
+                "outcome": "diagnosed only",
+            }
+        )
+    return issues
+
+
 def tick_workflow_check():
     cfg = load_config()
     max_attempts = int(cfg.get("workflow_check_max_attempts", 3))
     write_agent_status("workflow-check", "running", "Scanning feature workflows for blockers.")
 
     reaped = reap()
-    issues = []
+    issues = _environment_health_issues()
     action_cache = {}
 
     def cached_action(name, fn):
@@ -5068,10 +6462,35 @@ def tick_workflow_check():
             action_cache[name] = fn()
         return action_cache[name]
 
+    canary_issue = _canary_freshness_issue(cfg)
+    if canary_issue:
+        attempts = 0
+        if canary_issue["feature_id"].startswith("feature-"):
+            feature = read_feature(canary_issue["feature_id"])
+            if feature:
+                attempts = _workflow_check_attempts(feature, canary_issue["issue_key"])
+        canary_issue["attempts"] = attempts
+        canary_issue["max_attempts"] = max_attempts
+        outcome = "diagnosed only"
+        if canary_issue.get("action") and attempts < max_attempts:
+            if canary_issue["action"] == "enqueue_canary":
+                out = cached_action("enqueue_canary", lambda: tick_canary_workflows(force=True))
+                outcome = f"canary scheduler result: {json.dumps(out, sort_keys=True)}"
+            else:
+                outcome = f"unknown action {canary_issue['action']}"
+            if canary_issue["feature_id"].startswith("feature-"):
+                _workflow_check_record_attempt(canary_issue["feature_id"], canary_issue["issue_key"], canary_issue["action"], outcome)
+                canary_issue["attempts"] = attempts + 1
+        elif canary_issue.get("action"):
+            outcome = "automatic attempts exhausted"
+        canary_issue["outcome"] = outcome
+        issues.append(canary_issue)
+
     for feature in list_features():
         if feature.get("status") not in ("open", "finalizing"):
             continue
-        issue = _diagnose_feature_workflow_issue(feature, cfg)
+        workflow = feature_workflow_summary(feature)
+        issue = _workflow_issue_from_summary(feature, workflow, cfg)
         if not issue:
             continue
         attempts = _workflow_check_attempts(feature, issue["issue_key"])
@@ -5127,6 +6546,12 @@ def tick_workflow_check():
                     f"pr-sweep ran: checked={checked} merged={merged} "
                     f"feedback={fb} alerted={alerted} skipped={skipped}"
                 )
+            elif action == "enqueue_canary":
+                out = cached_action(
+                    "enqueue_canary",
+                    lambda: tick_canary_workflows(force=True),
+                )
+                outcome = f"canary scheduler result: {json.dumps(out, sort_keys=True)}"
             else:
                 outcome = f"unknown action {action}"
 
@@ -5155,6 +6580,7 @@ def _build_investigation_context(question):
         ("QUESTION", question.strip()),
         ("CURRENT_DATE", dt.datetime.now().strftime("%Y-%m-%d %A %H:%M:%S %Z")),
         ("WORKFLOW_SNAPSHOT", _workflow_snapshot()),
+        ("ENVIRONMENT_HEALTH", environment_health_text(refresh=True)),
         ("AGENT_STATUSES", _agent_status_snapshot()),
         ("REGRESSION_SCHEDULE", _regression_schedule_snapshot(project["name"] if project else None)),
     ]
@@ -5170,6 +6596,7 @@ def _build_investigation_context(question):
             ("NEXT_ROADMAP_ENTRY", json.dumps(next_entry, indent=2, sort_keys=True) if next_entry else "null")
         )
         sections.append(("FEATURES", _feature_context_text(project["name"], limit=8)))
+        sections.append(("FEATURE_WORKFLOWS", _feature_workflow_context(project["name"], limit=8)))
         sections.append(("FEATURE_DIAGNOSIS", _recent_feature_diagnosis(project["name"], limit=6)))
         sections.append(("RECENT_PROJECT_TASKS", _recent_project_task_context(project["name"], limit=8)))
         sections.append(
@@ -5420,6 +6847,8 @@ def dispatch_telegram_command(text):
     if text in ("/cleanup", "cleanup"):
         checked, cleaned, skipped = cleanup_worktrees()
         return f"cleanup: checked={checked} cleaned={cleaned} skipped={skipped}"
+    if text in ("/env", "env", "/env-health", "env-health"):
+        return environment_health_text(refresh=True)
     if text == "/ask" or text == "ask":
         return "usage: /ask <question>"
     if text.startswith("/ask ") or text.startswith("ask "):
@@ -5443,9 +6872,23 @@ def dispatch_telegram_command(text):
         )
         enqueue_task(task)
         return f"enqueued: {task['task_id']}"
+    if text.startswith("/self_repair ") or text.startswith("self_repair "):
+        raw = text.split(" ", 1)[1].strip()
+        if not raw:
+            return "usage: /self_repair <summary> | <evidence>"
+        if "|" in raw:
+            summary, evidence = [part.strip() for part in raw.split("|", 1)]
+        else:
+            summary, evidence = raw, raw
+        out = enqueue_self_repair(summary=summary, evidence=evidence, source="telegram")
+        return (
+            f"self-repair feature={out['feature_id']} task={out['task_id']}"
+            if out.get("feature_id") else json.dumps(out, sort_keys=True)
+        )
     return (
         "unknown command. allowed: /status /tasks /task <task_id> /queue /planner /reviewer /qa "
-        "/cleanup /ask <question> /regression <project> /report morning|evening /enqueue <summary>"
+        "/cleanup /env /ask <question> /regression <project> /report morning|evening /enqueue <summary> "
+        "/self_repair <summary> | <evidence>"
     )
 
 
@@ -5488,6 +6931,12 @@ def main(argv=None):
     p_mem = sub.add_parser("tick-memory-synthesis")
     p_mem.add_argument("--force", action="store_true")
 
+    p_canary = sub.add_parser("tick-canary-workflows")
+    p_canary.add_argument("--force", action="store_true")
+
+    p_env = sub.add_parser("env-health")
+    p_env.add_argument("--refresh", action="store_true")
+
     p_audit = sub.add_parser("tick-template-audit")
     p_audit.add_argument("--today", default=None)
 
@@ -5527,6 +6976,18 @@ def main(argv=None):
     p_trans.add_argument("--from", dest="from_state", required=True, choices=STATES)
     p_trans.add_argument("--to", dest="to_state", required=True, choices=STATES)
     p_trans.add_argument("--reason", default="")
+
+    p_retry = sub.add_parser("retry-task")
+    p_retry.add_argument("--task", required=True)
+    p_retry.add_argument("--from", dest="from_state", default=None, choices=STATES)
+    p_retry.add_argument("--reason", required=True)
+    p_retry.add_argument("--source", default="cli")
+
+    p_self = sub.add_parser("enqueue-self-repair")
+    p_self.add_argument("--summary", required=True)
+    p_self.add_argument("--evidence", required=True)
+    p_self.add_argument("--issue-kind", default="runtime_bug")
+    p_self.add_argument("--source", default="cli")
 
     args = ap.parse_args(argv)
 
@@ -5571,6 +7032,11 @@ def main(argv=None):
     elif args.cmd == "tick-memory-synthesis":
         out = tick_memory_synthesis(force=args.force)
         print("enqueued:" + (",".join(out) if out else "(none)"))
+    elif args.cmd == "tick-canary-workflows":
+        out = tick_canary_workflows(force=args.force)
+        print(json.dumps(out, sort_keys=True))
+    elif args.cmd == "env-health":
+        print(environment_health_text(refresh=args.refresh))
     elif args.cmd == "tick-template-audit":
         print(tick_template_audit(today=args.today))
     elif args.cmd == "workflow-check":
@@ -5609,6 +7075,10 @@ def main(argv=None):
                 f"{f['feature_id']} [{f['status']}] {f['project']} "
                 f"children={kids} branch={f.get('branch','?')}"
             )
+            if is_canary_feature(f):
+                line += " canary"
+            if is_self_repair_feature(f):
+                line += " self-repair"
             pr_number = f.get("final_pr_number") or f.get("pr_number")
             if pr_number:
                 line += f" pr=#{pr_number}"
@@ -5622,6 +7092,29 @@ def main(argv=None):
     elif args.cmd == "transition":
         move_task(args.task, args.from_state, args.to_state, reason=args.reason)
         print(f"{args.task}: {args.from_state} -> {args.to_state}")
+    elif args.cmd == "retry-task":
+        if args.from_state:
+            from_state = args.from_state
+        else:
+            found = find_task(args.task)
+            if not found:
+                raise SystemExit(f"task not found: {args.task}")
+            from_state = found[0]
+        reset_task_for_retry(
+            args.task,
+            from_state,
+            reason=args.reason,
+            source=args.source,
+        )
+        print(f"{args.task}: {from_state} -> queued (attempt reset)")
+    elif args.cmd == "enqueue-self-repair":
+        out = enqueue_self_repair(
+            summary=args.summary,
+            evidence=args.evidence,
+            issue_kind=args.issue_kind,
+            source=args.source,
+        )
+        print(json.dumps(out, sort_keys=True))
 
 
 if __name__ == "__main__":

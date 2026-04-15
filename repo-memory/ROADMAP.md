@@ -9,7 +9,7 @@ _Append-only. Top-to-bottom is priority order. Status mutates in place; entries 
 ## Active
 
 ### [R-017] Typed blocker taxonomy + workflow contracts
-- **Status:** TODO
+- **Status:** IN_PROGRESS (first blocker schema land, 2026-04-15)
 - **Feature id:** null
 - **Goal:** Replace free-text failure interpretation with explicit machine-checked blocker classes so planner, checker, reaper, and Telegram reports reason over the same contract.
 - **Scope:** Introduce canonical reason codes for task failure/block (`planner_contract_error`, `template_missing_edge`, `runtime_env_dirty`, `delivery_auth_expired`, `qa_baseline_red`, `task_state_corruption`, etc.); stamp them on task/feature records at transition time; make `workflow-check`, `pr-sweep`, and retry logic consume these codes instead of string matching; add transition/doctest coverage for every code path.
@@ -19,7 +19,7 @@ _Append-only. Top-to-bottom is priority order. Status mutates in place; entries 
 - **Notes:** This is the highest-leverage fix for the recent secret-scan, `BRAID_REFINE`, and planner crash incidents. Without typed contracts, autonomy remains prompt-driven rather than runtime-driven.
 
 ### [R-018] Deterministic task reset / retry API
-- **Status:** TODO
+- **Status:** DONE (attempt reset + lineage surfaced, 2026-04-15)
 - **Feature id:** null
 - **Goal:** Retrying a task must produce a clean new attempt state instead of carrying stale terminal fields that can mislead later automation.
 - **Scope:** Add a first-class reset/retry path that archives prior terminal metadata (`finished_at`, `failure_reason`, `false_blocker_claim`, stale blocker fields, prior repair attempt stamps) into attempt history and clears the live task record before requeue; thread the same semantics through manual transitions, workflow-check retries, and template-refine re-dispatch.
@@ -29,7 +29,7 @@ _Append-only. Top-to-bottom is priority order. Status mutates in place; entries 
 - **Notes:** This removes the current "cosmetic but dangerous" stale-state debt visible on retried tasks.
 
 ### [R-019] Event-sourced workflow diagnosis
-- **Status:** TODO
+- **Status:** DONE (shared workflow summary + event/transition-backed diagnosis, 2026-04-15)
 - **Feature id:** null
 - **Goal:** Workflow health and frontier computation should be reconstructed from the append-only event stream and transition ledger, not inferred from mutable JSON blobs with partial state.
 - **Scope:** Promote `state/runtime/events.jsonl` + `transitions.log` into the canonical diagnostic substrate; add an event-backed workflow summarizer that computes frontier task, blocker ancestry, repair history, and stuckness duration; make `workflow-check` and status/report paths consume that summary.
@@ -39,7 +39,7 @@ _Append-only. Top-to-bottom is priority order. Status mutates in place; entries 
 - **Notes:** The current file-backed state machine is fine; the weakness is using mutable task files as both execution substrate and forensic truth.
 
 ### [R-020] Declarative repair policy engine
-- **Status:** TODO
+- **Status:** DONE (policy table drives workflow-check repairs, 2026-04-15)
 - **Feature id:** null
 - **Goal:** Self-heal behavior should be configured as explicit repair classes with bounded actions, cooldowns, and escalation rules instead of being embedded as ad-hoc if/else logic in the checker.
 - **Scope:** Introduce a repair-policy table mapping blocker classes to allowed actions (`retry_task`, `restart_workers_then_retry`, `feature_finalize`, `pr_sweep`, `template_refine`, `escalate_only`), cooldown windows, max attempts, and confidence thresholds; have `workflow-check` execute policy rather than custom branching.
@@ -49,7 +49,7 @@ _Append-only. Top-to-bottom is priority order. Status mutates in place; entries 
 - **Notes:** This is the path from "known signatures" to a controlled autonomous repair loop.
 
 ### [R-021] Synthetic canary workflows
-- **Status:** TODO
+- **Status:** DONE (scheduled canary lane + freshness incidents + launchd job, 2026-04-15)
 - **Feature id:** null
 - **Goal:** The orchestrator should continuously prove that its own plan -> implement -> review -> QA -> finalize path still works by running tiny known-safe canary workflows on a schedule.
 - **Scope:** Add a synthetic repo or dedicated canary lane inside an existing low-risk repo; schedule end-to-end canary features every few hours; assert key invariants (planner emits children, retry works, template-refine works, PR opens, finalization path stays healthy); surface failures as first-class runtime incidents.
@@ -59,7 +59,7 @@ _Append-only. Top-to-bottom is priority order. Status mutates in place; entries 
 - **Notes:** This should become the runtime's equivalent of CI for the orchestrator itself.
 
 ### [R-022] Environment normalization for autonomous operation
-- **Status:** TODO
+- **Status:** DONE (env-health report + claim/dispatch gates, 2026-04-15)
 - **Feature id:** null
 - **Goal:** Local machine drift should stop being a major blocker class for autonomous work.
 - **Scope:** Normalize and validate launchd env, GH auth, required binaries, repo cleanliness preconditions, worktree root state, and per-project health before slots claim work; add an explicit environment health report and preflight gates with typed failure codes.
@@ -69,7 +69,7 @@ _Append-only. Top-to-bottom is priority order. Status mutates in place; entries 
 - **Notes:** This is the operational half of autonomy. Without it, the control plane remains too dependent on host folklore.
 
 ### [R-023] Guarded orchestrator self-repair lane
-- **Status:** TODO
+- **Status:** DONE (manual guarded repair lane on orchestrator repo, 2026-04-15)
 - **Feature id:** null
 - **Goal:** Unknown orchestrator bugs should have a controlled path to generate, review, and land fixes against the orchestrator repo itself instead of only escalating to humans.
 - **Scope:** Create a separate self-repair workflow class that can open an orchestrator feature branch/PR from a diagnosed runtime bug, run the orchestrator self-test suite plus synthetic canaries, and require explicit human approval before merge to `main`.
