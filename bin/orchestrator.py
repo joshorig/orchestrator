@@ -60,6 +60,13 @@ BRAID_EDGE_START_RE = re.compile(r"^\s*(?P<node>[A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]
 BRAID_EDGE_END_RE = re.compile(r"(?P<node>[A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]\n]*\]|\{[^\}\n]*\})?\s*;?\s*$")
 BRAID_BARE_EDGE_RE = re.compile(r"^\s*A\s*-->\s*B\s*;?\s*$")
 BRAID_HARD_PREFIXES = ("Start", "End", "Check:", "Revise:", "Draft:", "Run:", "Read:")
+CLAUDE_CANDIDATE_PATHS = (
+    os.environ.get("CLAUDE_BIN", "").strip(),
+    shutil.which("claude") or "",
+    str(pathlib.Path.home() / ".local/bin/claude"),
+    str(pathlib.Path.home() / "Library/Application Support/Claude/claude-code-vm/current/claude"),
+    str(pathlib.Path.home() / "Library/Application Support/Claude/claude-code/claude.app/Contents/MacOS/claude"),
+)
 
 STATES = (
     "queued",
@@ -4694,7 +4701,8 @@ def _build_investigation_context(question):
 
 
 def _llm_investigation_answer(question, context_text):
-    if shutil.which("claude") is None:
+    claude_bin = next((p for p in CLAUDE_CANDIDATE_PATHS if p and pathlib.Path(p).exists()), None)
+    if not claude_bin:
         return None
     system_prompt = (
         "You are a read-only workflow investigator for the devmini orchestrator.\n"
@@ -4712,7 +4720,7 @@ def _llm_investigation_answer(question, context_text):
     try:
         proc = subprocess.run(
             [
-                "claude",
+                claude_bin,
                 "-p", user_prompt,
                 "--dangerously-skip-permissions",
                 "--system-prompt", system_prompt,
