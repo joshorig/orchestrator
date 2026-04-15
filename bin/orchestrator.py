@@ -107,6 +107,16 @@ BLOCKER_CODES = (
     "canary_stale",
     "runtime_env_dirty",
     "delivery_auth_expired",
+    "runtime_unknown_project",
+    "runtime_precondition_failed",
+    "llm_timeout",
+    "llm_exit_error",
+    "model_output_invalid",
+    "qa_contract_error",
+    "qa_target_missing",
+    "qa_smoke_failed",
+    "auto_commit_failed",
+    "delivery_push_failed",
 )
 WORKFLOW_REPAIR_POLICY = (
     {
@@ -668,6 +678,10 @@ def task_blocker(task):
     'false_blocker_claim'
     >>> task_blocker({"failure": "Command '['git', 'worktree', 'add']' returned non-zero exit status 255."})["code"]
     'worktree_create_failed'
+    >>> task_blocker({"failure": "claude timeout 1800s"})["code"]
+    'llm_timeout'
+    >>> task_blocker({"failure": "smoke re-run timeout"})["code"]
+    'qa_smoke_failed'
     """
     blocker = task.get("blocker")
     if isinstance(blocker, dict) and blocker.get("code"):
@@ -701,6 +715,26 @@ def task_blocker(task):
         return make_blocker("worker_crash", summary="worker crashed mid-task", detail=detail, source="legacy", retryable=True)
     if "git', 'worktree', 'add'" in failure and "255" in failure:
         return make_blocker("worktree_create_failed", summary="git worktree creation failed", detail=detail, source="legacy", retryable=True)
+    if "unknown project" in detail_lower:
+        return make_blocker("runtime_unknown_project", summary="unknown project", detail=detail, source="legacy", retryable=False)
+    if "timeout" in detail_lower and any(name in detail_lower for name in ("claude", "codex", "llm")):
+        return make_blocker("llm_timeout", summary="LLM slot timeout", detail=detail, source="legacy", retryable=True)
+    if "claude exit" in detail_lower or "codex exit" in detail_lower:
+        return make_blocker("llm_exit_error", summary="LLM process exit error", detail=detail, source="legacy", retryable=True)
+    if any(needle in detail_lower for needle in ("no json array", "malformed json", "no mermaid block", "no braid trailer", "candidate markdown invalid", "no review verdict trailer")):
+        return make_blocker("model_output_invalid", summary="model output invalid", detail=detail, source="legacy", retryable=False)
+    if any(needle in detail_lower for needle in ("missing target_task_id", "repo-memory incomplete", "missing refine_request", "missing braid_template", "codex task has no braid_template")):
+        return make_blocker("runtime_precondition_failed", summary="runtime precondition failed", detail=detail, source="legacy", retryable=False)
+    if "no qa." in detail_lower or "script missing:" in detail_lower:
+        return make_blocker("qa_contract_error", summary="QA contract missing", detail=detail, source="legacy", retryable=False)
+    if "worktree missing" in detail_lower or "target worktree missing" in detail_lower:
+        return make_blocker("qa_target_missing", summary="QA target missing", detail=detail, source="legacy", retryable=False)
+    if "smoke red" in detail_lower or "smoke timeout" in detail_lower or "smoke re-run timeout" in detail_lower:
+        return make_blocker("qa_smoke_failed", summary="QA smoke failed", detail=detail, source="legacy", retryable=True)
+    if "auto-commit:" in detail_lower:
+        return make_blocker("auto_commit_failed", summary="auto-commit failed", detail=detail, source="legacy", retryable=True)
+    if "push failed" in detail_lower or "push_failure" in detail_lower:
+        return make_blocker("delivery_push_failed", summary="delivery push failed", detail=detail, source="legacy", retryable=True)
     return None
 
 

@@ -4,6 +4,18 @@ _Append-only log. New entries go at the top. One entry per completed task or mil
 
 ---
 
+## 2026-04-15 — R-017 completion: typed blockers cover QA and feedback loops
+
+**Summary:** Finished `R-017` by extending typed blocker coverage through the remaining execution paths that still mattered for autonomous recovery: QA driver failures, QA target failures, review-feedback loops, and PR-feedback loops. The runtime can now classify those blockers explicitly instead of falling back to brittle log-string inference.
+
+**Changed:**
+- `bin/worker.py` — completed typed blocker stamping for QA task setup failures, smoke failures, push failures after smoke, review-feedback failures, and PR-feedback failures.
+- `bin/worker.py` — reused the shared `fail_task(...)` helper so blocker metadata, retryability, and failure summaries stay consistent across slots.
+- `bin/orchestrator.py` — earlier blocker taxonomy/inference additions now have matching worker coverage across planner, implementer, reviewer, QA, and follow-up feedback loops.
+- `repo-memory/ROADMAP.md` — marked `R-017` done.
+
+**Validation:** `python3 -m py_compile bin/orchestrator.py bin/worker.py bin/telegram_bot.py`, `python3 -m doctest bin/orchestrator.py`, and `python3 bin/orchestrator.py workflow-check`.
+
 ## 2026-04-15 — R-022 / R-023 completion: environment health gates + guarded self-repair lane
 
 **Summary:** Closed out `R-022` and `R-023`. The runtime now has a first-class environment health model that names host/project drift before work is burned on it, and a guarded self-repair lane that can open bounded orchestrator-repo fixes through the normal feature/PR flow without allowing unattended self-merge.

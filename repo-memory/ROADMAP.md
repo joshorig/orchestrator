@@ -9,7 +9,7 @@ _Append-only. Top-to-bottom is priority order. Status mutates in place; entries 
 ## Active
 
 ### [R-017] Typed blocker taxonomy + workflow contracts
-- **Status:** IN_PROGRESS (first blocker schema land, 2026-04-15)
+- **Status:** DONE (coverage completed across worker, QA, and feedback loops, 2026-04-15)
 - **Feature id:** null
 - **Goal:** Replace free-text failure interpretation with explicit machine-checked blocker classes so planner, checker, reaper, and Telegram reports reason over the same contract.
 - **Scope:** Introduce canonical reason codes for task failure/block (`planner_contract_error`, `template_missing_edge`, `runtime_env_dirty`, `delivery_auth_expired`, `qa_baseline_red`, `task_state_corruption`, etc.); stamp them on task/feature records at transition time; make `workflow-check`, `pr-sweep`, and retry logic consume these codes instead of string matching; add transition/doctest coverage for every code path.

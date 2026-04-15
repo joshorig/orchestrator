@@ -48,6 +48,40 @@ def log(msg):
     sys.stderr.flush()
 
 
+def fail_task(task_id, from_state, reason, *, blocker_code=None, summary=None, detail=None, retryable=None, mutator=None):
+    def mut(task):
+        task["finished_at"] = o.now_iso()
+        task["failure"] = reason
+        if blocker_code:
+            o.set_task_blocker(
+                task,
+                blocker_code,
+                summary=summary or reason,
+                detail=detail or reason,
+                source="worker",
+                retryable=retryable,
+            )
+        if mutator is not None:
+            mutator(task)
+    o.move_task(task_id, from_state, "failed", reason=reason[:200], mutator=mut)
+
+
+def block_task(task_id, from_state, reason, *, blocker_code, summary=None, detail=None, retryable=True, mutator=None):
+    def mut(task):
+        task["finished_at"] = o.now_iso()
+        o.set_task_blocker(
+            task,
+            blocker_code,
+            summary=summary or reason,
+            detail=detail or reason,
+            source="worker",
+            retryable=retryable,
+        )
+        if mutator is not None:
+            mutator(task)
+    o.move_task(task_id, from_state, "blocked", reason=reason[:200], mutator=mut)
+
+
 # --- git worktree management ------------------------------------------------
 
 def base_branch_for_task(task):
@@ -1068,7 +1102,8 @@ def run_claude_memory_synthesis(task, cfg, timeout, log_path):
     try:
         project = o.get_project(cfg, project_name)
     except KeyError:
-        o.move_task(task_id, "claimed", "failed", reason=f"unknown project {project_name}")
+        fail_task(task_id, "claimed", f"unknown project {project_name}",
+                  blocker_code="runtime_unknown_project", summary="unknown project", retryable=False)
         return
 
     bt = task.get("braid_template") or "memory-synthesis"
@@ -1089,7 +1124,8 @@ def run_claude_memory_synthesis(task, cfg, timeout, log_path):
                 t["topology_error"] = "template_missing"
             o.move_task(task_id, "claimed", "blocked", reason="template missing", mutator=mut_missing)
             return
-        o.move_task(task_id, "claimed", "failed", reason="template missing, regen disabled")
+        fail_task(task_id, "claimed", "template missing, regen disabled",
+                  blocker_code="template_missing", summary="template missing", retryable=False)
         return
 
     memdir = pathlib.Path(project["path"]) / "repo-memory"
@@ -1097,7 +1133,8 @@ def run_claude_memory_synthesis(task, cfg, timeout, log_path):
     recent_path = memdir / "RECENT_WORK.md"
     decisions_path = memdir / "DECISIONS.md"
     if not current_path.exists() or not recent_path.exists() or not decisions_path.exists():
-        o.move_task(task_id, "claimed", "failed", reason="repo-memory incomplete")
+        fail_task(task_id, "claimed", "repo-memory incomplete",
+                  blocker_code="runtime_precondition_failed", summary="repo-memory incomplete", retryable=False)
         return
 
     current_text = current_path.read_text()
@@ -1147,17 +1184,20 @@ def run_claude_memory_synthesis(task, cfg, timeout, log_path):
                 cwd="/tmp",
             )
         except subprocess.TimeoutExpired:
-            o.move_task(task_id, "running", "failed", reason=f"claude timeout {timeout}s")
+            fail_task(task_id, "running", f"claude timeout {timeout}s",
+                      blocker_code="llm_timeout", summary="claude timeout", retryable=True)
             return
         logf.write(f"\n# exit: {proc.returncode}\n# stdout:\n{proc.stdout or ''}\n")
 
     if proc.returncode != 0:
-        o.move_task(task_id, "running", "failed", reason=f"claude exit {proc.returncode}")
+        fail_task(task_id, "running", f"claude exit {proc.returncode}",
+                  blocker_code="llm_exit_error", summary="claude exit error", retryable=True)
         return
 
     candidate = extract_markdown_document(proc.stdout or "")
     if not markdown_sane(candidate):
-        o.move_task(task_id, "running", "failed", reason="candidate markdown invalid")
+        fail_task(task_id, "running", "candidate markdown invalid",
+                  blocker_code="model_output_invalid", summary="candidate markdown invalid", retryable=False)
         return
     candidate_hits = scan_for_secrets(candidate)
     if candidate_hits:
@@ -1168,7 +1208,8 @@ def run_claude_memory_synthesis(task, cfg, timeout, log_path):
             candidate_hits,
             log_path=str(log_path),
         )
-        o.move_task(task_id, "running", "failed", reason="candidate contains secret-like content")
+        fail_task(task_id, "running", "candidate contains secret-like content",
+                  blocker_code="model_output_invalid", summary="candidate contains secret-like content", retryable=False)
         return
 
     diff_lines = list(
@@ -1181,10 +1222,12 @@ def run_claude_memory_synthesis(task, cfg, timeout, log_path):
         )
     )
     if len(diff_lines) >= 200:
-        o.move_task(task_id, "running", "failed", reason="delta exceeds 200 lines")
+        fail_task(task_id, "running", "delta exceeds 200 lines",
+                  blocker_code="runtime_precondition_failed", summary="memory delta exceeds limit", retryable=False)
         return
     if recent_path.read_text() != recent_text:
-        o.move_task(task_id, "running", "failed", reason="RECENT_WORK changed during synthesis")
+        fail_task(task_id, "running", "RECENT_WORK changed during synthesis",
+                  blocker_code="runtime_precondition_failed", summary="repo-memory changed during synthesis", retryable=True)
         return
 
     tmp = current_path.with_suffix(".md.tmp")
@@ -1207,10 +1250,8 @@ def run_claude_template_gen(task, cfg, task_type, timeout, log_path):
     task_id = task["task_id"]
     gen_prompt_path = o.BRAID_GENERATORS / f"{task_type}.prompt.md"
     if not gen_prompt_path.exists():
-        o.move_task(
-            task_id, "claimed", "failed",
-            reason=f"no generator prompt for {task_type}",
-        )
+        fail_task(task_id, "claimed", f"no generator prompt for {task_type}",
+                  blocker_code="runtime_precondition_failed", summary="generator prompt missing", retryable=False)
         return
 
     project_name = task.get("project")
@@ -1260,19 +1301,22 @@ def run_claude_template_gen(task, cfg, task_type, timeout, log_path):
                 cwd="/tmp",  # avoid CLAUDE.md auto-discovery at worker invocation
             )
         except subprocess.TimeoutExpired:
-            o.move_task(task_id, "running", "failed", reason=f"claude timeout {timeout}s")
+            fail_task(task_id, "running", f"claude timeout {timeout}s",
+                      blocker_code="llm_timeout", summary="claude timeout", retryable=True)
             return
         logf.write(f"\n# exit: {proc.returncode}\n")
         logf.write("# stdout:\n")
         logf.write(proc.stdout or "")
 
     if proc.returncode != 0:
-        o.move_task(task_id, "running", "failed", reason=f"claude exit {proc.returncode}")
+        fail_task(task_id, "running", f"claude exit {proc.returncode}",
+                  blocker_code="llm_exit_error", summary="claude exit error", retryable=True)
         return
 
     graph = extract_mermaid(proc.stdout or "")
     if not graph:
-        o.move_task(task_id, "running", "failed", reason="no mermaid block in output")
+        fail_task(task_id, "running", "no mermaid block in output",
+                  blocker_code="model_output_invalid", summary="template-gen output invalid", retryable=False)
         return
 
     o.braid_template_write(task_type, graph, generator_model="claude-opus")
@@ -1285,7 +1329,8 @@ def run_claude_template_gen(task, cfg, task_type, timeout, log_path):
 def run_claude_template_refine(task, cfg, task_type, timeout, log_path):
     task_id = task["task_id"]
     if not task_type:
-        o.move_task(task_id, "claimed", "failed", reason="template-refine missing braid_template")
+        fail_task(task_id, "claimed", "template-refine missing braid_template",
+                  blocker_code="runtime_precondition_failed", summary="template-refine missing braid_template", retryable=False)
         return
 
     refine = (task.get("engine_args") or {}).get("refine_request") or {}
@@ -1293,12 +1338,14 @@ def run_claude_template_refine(task, cfg, task_type, timeout, log_path):
     condition = (refine.get("condition") or "").strip()
     base_hash = (refine.get("template_hash") or "").strip()
     if not node_id or not condition or not base_hash:
-        o.move_task(task_id, "claimed", "failed", reason="template-refine missing refine_request")
+        fail_task(task_id, "claimed", "template-refine missing refine_request",
+                  blocker_code="runtime_precondition_failed", summary="template-refine missing refine_request", retryable=False)
         return
 
     graph_body, graph_hash = o.braid_template_load(task_type)
     if graph_body is None:
-        o.move_task(task_id, "claimed", "failed", reason=f"template-refine missing {task_type}")
+        fail_task(task_id, "claimed", f"template-refine missing {task_type}",
+                  blocker_code="runtime_precondition_failed", summary="template-refine target missing", retryable=False)
         return
     if graph_hash != base_hash:
         def mut_stale(t):
@@ -1309,7 +1356,8 @@ def run_claude_template_refine(task, cfg, task_type, timeout, log_path):
 
     gen_prompt_path = o.BRAID_GENERATORS / f"{task_type}.prompt.md"
     if not gen_prompt_path.exists():
-        o.move_task(task_id, "claimed", "failed", reason=f"no generator prompt for {task_type}")
+        fail_task(task_id, "claimed", f"no generator prompt for {task_type}",
+                  blocker_code="runtime_precondition_failed", summary="generator prompt missing", retryable=False)
         return
 
     project_name = task.get("project")
@@ -1363,17 +1411,20 @@ def run_claude_template_refine(task, cfg, task_type, timeout, log_path):
                 cwd="/tmp",
             )
         except subprocess.TimeoutExpired:
-            o.move_task(task_id, "running", "failed", reason=f"claude timeout {timeout}s")
+            fail_task(task_id, "running", f"claude timeout {timeout}s",
+                      blocker_code="llm_timeout", summary="claude timeout", retryable=True)
             return
         logf.write(f"\n# exit: {proc.returncode}\n# stdout:\n{proc.stdout or ''}\n")
 
     if proc.returncode != 0:
-        o.move_task(task_id, "running", "failed", reason=f"claude exit {proc.returncode}")
+        fail_task(task_id, "running", f"claude exit {proc.returncode}",
+                  blocker_code="llm_exit_error", summary="claude exit error", retryable=True)
         return
 
     candidate = extract_mermaid(proc.stdout or "")
     if not candidate:
-        o.move_task(task_id, "running", "failed", reason="no mermaid block in refine output")
+        fail_task(task_id, "running", "no mermaid block in refine output",
+                  blocker_code="model_output_invalid", summary="template-refine output invalid", retryable=False)
         return
 
     _, latest_hash = o.braid_template_load(task_type)
@@ -1387,7 +1438,8 @@ def run_claude_template_refine(task, cfg, task_type, timeout, log_path):
     try:
         o.braid_template_write(task_type, candidate, generator_model="claude-opus-refine")
     except ValueError as exc:
-        o.move_task(task_id, "running", "failed", reason=str(exc)[:200])
+        fail_task(task_id, "running", str(exc)[:200],
+                  blocker_code="model_output_invalid", summary="template refinement lint failed", retryable=False)
         return
 
     def mut_done(t):
@@ -1844,7 +1896,8 @@ def run_claude_planner(task, cfg, timeout, log_path):
     try:
         project = o.get_project(cfg, project_name)
     except KeyError:
-        o.move_task(task_id, "claimed", "failed", reason=f"unknown project {project_name}")
+        fail_task(task_id, "claimed", f"unknown project {project_name}",
+                  blocker_code="runtime_unknown_project", summary="unknown project", retryable=False)
         return
 
     memory_ctx = read_memory_context(project["path"])
@@ -1881,24 +1934,28 @@ def run_claude_planner(task, cfg, timeout, log_path):
                 cwd="/tmp",  # avoid CLAUDE.md auto-discovery
             )
         except subprocess.TimeoutExpired:
-            o.move_task(task_id, "running", "failed", reason=f"claude timeout {timeout}s")
+            fail_task(task_id, "running", f"claude timeout {timeout}s",
+                      blocker_code="llm_timeout", summary="claude timeout", retryable=True)
             return
         logf.write(f"\n# exit: {proc.returncode}\n# stdout:\n{proc.stdout or ''}\n")
 
     if proc.returncode != 0:
-        o.move_task(task_id, "running", "failed", reason=f"claude exit {proc.returncode}")
+        fail_task(task_id, "running", f"claude exit {proc.returncode}",
+                  blocker_code="llm_exit_error", summary="claude exit error", retryable=True)
         return
 
     # Extract JSON array from output — claude sometimes wraps in markdown.
     raw = proc.stdout or ""
     m = re.search(r"\[.*\]", raw, re.DOTALL)
     if not m:
-        o.move_task(task_id, "running", "failed", reason="no json array in output")
+        fail_task(task_id, "running", "no json array in output",
+                  blocker_code="model_output_invalid", summary="planner output invalid", retryable=False)
         return
     try:
         slices = json.loads(m.group(0))
     except json.JSONDecodeError:
-        o.move_task(task_id, "running", "failed", reason="malformed json array")
+        fail_task(task_id, "running", "malformed json array",
+                  blocker_code="model_output_invalid", summary="planner output invalid", retryable=False)
         return
 
     # Template → role for codex slices. Slices with a template outside this set
@@ -1992,7 +2049,8 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
     try:
         project = o.get_project(cfg, project_name)
     except KeyError:
-        o.move_task(task_id, "claimed", "failed", reason=f"unknown project {project_name}")
+        fail_task(task_id, "claimed", f"unknown project {project_name}",
+                  blocker_code="runtime_unknown_project", summary="unknown project", retryable=False)
         return
 
     # Pick oldest awaiting-review task for this project (FIFO by finished_at).
@@ -2014,7 +2072,8 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
 
     graph_body, graph_hash = o.braid_template_load("lvc-reviewer-pass")
     if graph_body is None:
-        o.move_task(task_id, "claimed", "failed", reason="reviewer template missing")
+        fail_task(task_id, "claimed", "reviewer template missing",
+                  blocker_code="runtime_precondition_failed", summary="reviewer template missing", retryable=False)
         return
 
     # Pull diff from the target's worktree (capped to keep prompt bounded).
@@ -2088,12 +2147,14 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
             )
         except subprocess.TimeoutExpired:
             o.braid_template_record_use("lvc-reviewer-pass", topology_error=True)
-            o.move_task(task_id, "running", "failed", reason=f"claude timeout {timeout}s")
+            fail_task(task_id, "running", f"claude timeout {timeout}s",
+                      blocker_code="llm_timeout", summary="claude timeout", retryable=True)
             return
         logf.write(f"\n# exit: {proc.returncode}\n# stdout:\n{proc.stdout or ''}\n")
 
     if proc.returncode != 0:
-        o.move_task(task_id, "running", "failed", reason=f"claude exit {proc.returncode}")
+        fail_task(task_id, "running", f"claude exit {proc.returncode}",
+                  blocker_code="llm_exit_error", summary="claude exit error", retryable=True)
         return
 
     raw = proc.stdout or ""
@@ -2107,12 +2168,14 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
             verdict = "topology_error"; break
 
     if verdict is None:
-        o.move_task(task_id, "running", "failed", reason="no review verdict trailer")
+        fail_task(task_id, "running", "no review verdict trailer",
+                  blocker_code="model_output_invalid", summary="review verdict missing", retryable=False)
         return
 
     if verdict == "topology_error":
         o.braid_template_record_use("lvc-reviewer-pass", topology_error=True)
-        o.move_task(task_id, "running", "failed", reason="reviewer topology error")
+        fail_task(task_id, "running", "reviewer topology error",
+                  blocker_code="template_graph_error", summary="reviewer topology error", retryable=True)
         return
 
     o.braid_template_record_use("lvc-reviewer-pass", topology_error=False)
@@ -2223,20 +2286,21 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
     bt = task.get("braid_template") or "review-address-feedback"
 
     if not target_id:
-        o.move_task(task_id, "claimed", "failed", reason="review-feedback: missing target_task_id")
+        fail_task(task_id, "claimed", "review-feedback: missing target_task_id",
+                  blocker_code="runtime_precondition_failed", summary="review-feedback missing target_task_id", retryable=False)
         return
 
     target_file = o.queue_dir("queued") / f"{target_id}.json"
     target = o.read_json(target_file, None)
     if target is None:
-        o.move_task(task_id, "claimed", "failed",
-                    reason=f"review-feedback: target {target_id} not in queued/")
+        fail_task(task_id, "claimed", f"review-feedback: target {target_id} not in queued/",
+                  blocker_code="qa_target_missing", summary="review-feedback target missing", retryable=False)
         return
 
     wt_str = task.get("worktree") or target.get("worktree")
     if not wt_str or not pathlib.Path(wt_str).exists():
-        o.move_task(task_id, "claimed", "failed",
-                    reason=f"review-feedback: target worktree missing: {wt_str}")
+        fail_task(task_id, "claimed", f"review-feedback: target worktree missing: {wt_str}",
+                  blocker_code="qa_target_missing", summary="review-feedback target worktree missing", retryable=False)
         return
     wt = pathlib.Path(wt_str)
     base_branch = task.get("base_branch") or target.get("base_branch") or base_branch_for_task(target)
@@ -2244,7 +2308,8 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
     try:
         project = o.get_project(cfg, task["project"])
     except KeyError:
-        o.move_task(task_id, "claimed", "failed", reason="review-feedback: unknown project")
+        fail_task(task_id, "claimed", "review-feedback: unknown project",
+                  blocker_code="runtime_unknown_project", summary="review-feedback unknown project", retryable=False)
         return
 
     graph_body, graph_hash = o.braid_template_load(bt)
@@ -2264,7 +2329,8 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
             o.move_task(task_id, "claimed", "blocked",
                         reason="template missing", mutator=mut_block)
             return
-        o.move_task(task_id, "claimed", "failed", reason="template missing, regen disabled")
+        fail_task(task_id, "claimed", "template missing, regen disabled",
+                  blocker_code="template_missing", summary="template missing", retryable=False)
         return
 
     lock_fh = None
@@ -2326,8 +2392,8 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
                 def mut_fail(t):
                     t["finished_at"] = o.now_iso()
                     t["failure"] = f"codex timeout {timeout}s"
-                o.move_task(task_id, "running", "failed",
-                            reason=f"review-feedback timeout {timeout}s", mutator=mut_fail)
+                fail_task(task_id, "running", f"review-feedback timeout {timeout}s",
+                          blocker_code="llm_timeout", summary="review-feedback timeout", retryable=True, mutator=mut_fail)
                 return
 
         trailer = ""
@@ -2344,15 +2410,25 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
             def mut_fail(t):
                 t["finished_at"] = o.now_iso()
                 t["topology_error"] = trailer
-            o.move_task(task_id, "running", "failed", reason=trailer[:80], mutator=mut_fail)
+                o.set_task_blocker(
+                    t,
+                    "template_graph_error",
+                    summary="review-feedback topology error",
+                    detail=trailer,
+                    source="worker",
+                    retryable=True,
+                )
+            fail_task(task_id, "running", trailer[:80],
+                      blocker_code="template_graph_error", summary="review-feedback topology error",
+                      retryable=True, mutator=mut_fail)
             return
 
         if not trailer.startswith("BRAID_OK"):
             def mut_fail(t):
                 t["finished_at"] = o.now_iso()
-            o.move_task(task_id, "running", "failed",
-                        reason=f"review-feedback no BRAID trailer (exit {proc.returncode})",
-                        mutator=mut_fail)
+            fail_task(task_id, "running", f"review-feedback no BRAID trailer (exit {proc.returncode})",
+                      blocker_code="model_output_invalid", summary="review-feedback trailer missing",
+                      retryable=False, mutator=mut_fail)
             return
 
         o.braid_template_record_use(bt, topology_error=False)
@@ -2369,8 +2445,9 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
             def mut_fail(t):
                 t["finished_at"] = o.now_iso()
                 t["failure"] = f"auto-commit: {info}"
-            o.move_task(task_id, "running", "failed",
-                        reason=f"auto-commit: {info}", mutator=mut_fail)
+            fail_task(task_id, "running", f"auto-commit: {info}",
+                      blocker_code="auto_commit_failed", summary="auto-commit failed",
+                      retryable=True, mutator=mut_fail)
             return
 
         def mut_target(t):
@@ -2574,20 +2651,21 @@ def run_pr_feedback_task(task, cfg):
     o.LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
     if not target_id:
-        o.move_task(task_id, "claimed", "failed", reason="pr-feedback: missing target_task_id")
+        fail_task(task_id, "claimed", "pr-feedback: missing target_task_id",
+                  blocker_code="runtime_precondition_failed", summary="pr-feedback missing target_task_id", retryable=False)
         return
 
     target_file = o.queue_dir("done") / f"{target_id}.json"
     target = o.read_json(target_file, None)
     if target is None:
-        o.move_task(task_id, "claimed", "failed",
-                    reason=f"pr-feedback: target {target_id} not in done/")
+        fail_task(task_id, "claimed", f"pr-feedback: target {target_id} not in done/",
+                  blocker_code="qa_target_missing", summary="pr-feedback target missing", retryable=False)
         return
 
     wt_str = target.get("worktree")
     if not wt_str or not pathlib.Path(wt_str).exists():
-        o.move_task(task_id, "claimed", "failed",
-                    reason=f"pr-feedback: target worktree missing: {wt_str}")
+        fail_task(task_id, "claimed", f"pr-feedback: target worktree missing: {wt_str}",
+                  blocker_code="qa_target_missing", summary="pr-feedback target worktree missing", retryable=False)
         return
     wt = pathlib.Path(wt_str)
     agent_branch = f"agent/{target_id}"
@@ -2595,7 +2673,8 @@ def run_pr_feedback_task(task, cfg):
     try:
         project = o.get_project(cfg, task["project"])
     except KeyError:
-        o.move_task(task_id, "claimed", "failed", reason="pr-feedback: unknown project")
+        fail_task(task_id, "claimed", "pr-feedback: unknown project",
+                  blocker_code="runtime_unknown_project", summary="pr-feedback unknown project", retryable=False)
         return
 
     bt = task.get("braid_template") or "pr-address-feedback"
@@ -2616,8 +2695,8 @@ def run_pr_feedback_task(task, cfg):
             o.move_task(task_id, "claimed", "blocked",
                         reason="template missing", mutator=mut_block)
             return
-        o.move_task(task_id, "claimed", "failed",
-                    reason="template missing, regen disabled")
+        fail_task(task_id, "claimed", "template missing, regen disabled",
+                  blocker_code="template_missing", summary="template missing", retryable=False)
         return
 
     lock_fh = None
@@ -2677,8 +2756,8 @@ def run_pr_feedback_task(task, cfg):
                 def mut_fail(t):
                     t["finished_at"] = o.now_iso()
                     t["failure"] = f"codex timeout {timeout}s"
-                o.move_task(task_id, "running", "failed",
-                            reason=f"pr-feedback timeout {timeout}s", mutator=mut_fail)
+                fail_task(task_id, "running", f"pr-feedback timeout {timeout}s",
+                          blocker_code="llm_timeout", summary="pr-feedback timeout", retryable=True, mutator=mut_fail)
                 return
 
         trailer = ""
@@ -2695,8 +2774,9 @@ def run_pr_feedback_task(task, cfg):
                 def mut_false(t):
                     t["finished_at"] = o.now_iso()
                     t["false_blocker_claim"] = trailer
-                o.move_task(task_id, "running", "failed",
-                            reason=f"false blocker claim: {trailer[:80]}", mutator=mut_false)
+                fail_task(task_id, "running", f"false blocker claim: {trailer[:80]}",
+                          blocker_code="false_blocker_claim", summary="false blocker claim",
+                          retryable=False, mutator=mut_false)
                 return
             o.braid_template_record_use(bt, topology_error=True)
             regen = o.new_task(
@@ -2711,6 +2791,14 @@ def run_pr_feedback_task(task, cfg):
             def mut_block(t):
                 t["finished_at"] = o.now_iso()
                 t["topology_error"] = trailer
+                o.set_task_blocker(
+                    t,
+                    "template_graph_error",
+                    summary="pr-feedback topology error",
+                    detail=trailer,
+                    source="worker",
+                    retryable=True,
+                )
             o.move_task(task_id, "running", "blocked",
                         reason=trailer[:80], mutator=mut_block)
             return
@@ -2718,9 +2806,9 @@ def run_pr_feedback_task(task, cfg):
         if not trailer.startswith("BRAID_OK"):
             def mut_fail(t):
                 t["finished_at"] = o.now_iso()
-            o.move_task(task_id, "running", "failed",
-                        reason=f"pr-feedback no BRAID trailer (exit {proc.returncode})",
-                        mutator=mut_fail)
+            fail_task(task_id, "running", f"pr-feedback no BRAID trailer (exit {proc.returncode})",
+                      blocker_code="model_output_invalid", summary="pr-feedback trailer missing",
+                      retryable=False, mutator=mut_fail)
             return
 
         # Re-run smoke inside the worktree. Same invocation shape as run_qa_slot:
@@ -2732,8 +2820,9 @@ def run_pr_feedback_task(task, cfg):
             def mut_fail(t):
                 t["finished_at"] = o.now_iso()
                 t["failure"] = "no qa.smoke configured"
-            o.move_task(task_id, "running", "failed",
-                        reason="no qa.smoke", mutator=mut_fail)
+            fail_task(task_id, "running", "no qa.smoke",
+                      blocker_code="qa_contract_error", summary="QA smoke contract missing",
+                      retryable=False, mutator=mut_fail)
             return
 
         smoke_abs = pathlib.Path(project["path"]) / smoke_rel
@@ -2755,16 +2844,18 @@ def run_pr_feedback_task(task, cfg):
                 def mut_fail(t):
                     t["finished_at"] = o.now_iso()
                     t["failure"] = "smoke re-run timeout"
-                o.move_task(task_id, "running", "failed",
-                            reason="smoke re-run timeout", mutator=mut_fail)
+                fail_task(task_id, "running", "smoke re-run timeout",
+                          blocker_code="qa_smoke_failed", summary="smoke re-run timeout",
+                          retryable=True, mutator=mut_fail)
                 return
 
         if smoke_proc.returncode != 0:
             def mut_fail(t):
                 t["finished_at"] = o.now_iso()
                 t["failure"] = f"smoke re-run exit {smoke_proc.returncode}"
-            o.move_task(task_id, "running", "failed",
-                        reason="pr-feedback smoke red", mutator=mut_fail)
+            fail_task(task_id, "running", "pr-feedback smoke red",
+                      blocker_code="qa_smoke_failed", summary="pr-feedback smoke red",
+                      retryable=True, mutator=mut_fail)
             return
 
         # Smoke green — force-push with lease so upstream gets the fix.
@@ -2775,8 +2866,9 @@ def run_pr_feedback_task(task, cfg):
             def mut_fail(t):
                 t["finished_at"] = o.now_iso()
                 t["failure"] = f"pr-feedback push failed: {push.stderr.strip()[:200]}"
-            o.move_task(task_id, "running", "failed",
-                        reason="pr-feedback push failed", mutator=mut_fail)
+            fail_task(task_id, "running", "pr-feedback push failed",
+                      blocker_code="delivery_push_failed", summary="pr-feedback push failed",
+                      retryable=True, mutator=mut_fail)
             return
 
         new_sha = (_git(wt, "rev-parse", "HEAD").stdout or "").strip() or None
@@ -2851,7 +2943,8 @@ def run_codex_slot(task, cfg):
         return run_review_feedback_task(task, cfg, timeout, log_path)
 
     if not bt:
-        o.move_task(task_id, "claimed", "failed", reason="codex task has no braid_template")
+        fail_task(task_id, "claimed", "codex task has no braid_template",
+                  blocker_code="runtime_precondition_failed", summary="codex task missing braid_template", retryable=False)
         return
 
     graph_body, graph_hash = o.braid_template_load(bt)
@@ -2880,14 +2973,16 @@ def run_codex_slot(task, cfg):
                 )
             o.move_task(task_id, "claimed", "blocked", reason="template missing", mutator=mut)
             return
-        o.move_task(task_id, "claimed", "failed", reason="template missing, regen disabled")
+        fail_task(task_id, "claimed", "template missing, regen disabled",
+                  blocker_code="template_missing", summary="template missing", retryable=False)
         return
 
     # Load project + create worktree.
     try:
         project = o.get_project(cfg, task["project"])
     except KeyError:
-        o.move_task(task_id, "claimed", "failed", reason="unknown project")
+        fail_task(task_id, "claimed", "unknown project",
+                  blocker_code="runtime_unknown_project", summary="unknown project", retryable=False)
         return
 
     lock_fh = None
@@ -2993,7 +3088,8 @@ def run_codex_slot(task, cfg):
                 def mut_fail(t):
                     t["finished_at"] = o.now_iso()
                     t["failure"] = f"codex timeout {timeout}s"
-                o.move_task(task_id, "running", "failed", reason=f"codex timeout {timeout}s", mutator=mut_fail)
+                fail_task(task_id, "running", f"codex timeout {timeout}s",
+                          blocker_code="llm_timeout", summary="codex timeout", retryable=True, mutator=mut_fail)
                 return
 
         trailer = ""
@@ -3005,7 +3101,8 @@ def run_codex_slot(task, cfg):
         if proc.returncode != 0 and not trailer:
             def mut_fail(t):
                 t["finished_at"] = o.now_iso()
-            o.move_task(task_id, "running", "failed", reason=f"codex exit {proc.returncode}", mutator=mut_fail)
+            fail_task(task_id, "running", f"codex exit {proc.returncode}",
+                      blocker_code="llm_exit_error", summary="codex exit error", retryable=True, mutator=mut_fail)
             return
 
         if trailer.startswith("BRAID_REFINE"):
@@ -3031,10 +3128,10 @@ def run_codex_slot(task, cfg):
                         source="worker",
                         retryable=False,
                     )
-                o.move_task(
-                    task_id, "running", "failed",
-                    reason=f"false blocker claim: {trailer[:80]}",
-                    mutator=mut_fail_false,
+                fail_task(
+                    task_id, "running", f"false blocker claim: {trailer[:80]}",
+                    blocker_code="false_blocker_claim", summary="false blocker claim",
+                    retryable=False, mutator=mut_fail_false,
                 )
                 return
 
@@ -3078,7 +3175,8 @@ def run_codex_slot(task, cfg):
                 def mut_fail(t):
                     t["finished_at"] = o.now_iso()
                     t["failure"] = f"auto-commit: {info}"
-                o.move_task(task_id, "running", "failed", reason=f"auto-commit: {info}", mutator=mut_fail)
+                fail_task(task_id, "running", f"auto-commit: {info}",
+                          blocker_code="auto_commit_failed", summary="auto-commit failed", retryable=True, mutator=mut_fail)
                 return
             def mut_ok(t):
                 t["finished_at"] = o.now_iso()
@@ -3091,7 +3189,8 @@ def run_codex_slot(task, cfg):
         # Exit 0 but no recognizable trailer → treat as failed (CLI issue, not topology).
         def mut_fail(t):
             t["finished_at"] = o.now_iso()
-        o.move_task(task_id, "running", "failed", reason="no BRAID trailer", mutator=mut_fail)
+        fail_task(task_id, "running", "no BRAID trailer",
+                  blocker_code="model_output_invalid", summary="BRAID trailer missing", retryable=False, mutator=mut_fail)
 
     finally:
         if lock_fh is not None:
@@ -3207,7 +3306,8 @@ def run_qa_slot(task, cfg):
     try:
         project = o.get_project(cfg, task["project"])
     except KeyError:
-        o.move_task(task_id, "claimed", "failed", reason="unknown project")
+        fail_task(task_id, "claimed", "unknown project",
+                  blocker_code="runtime_unknown_project", summary="unknown project", retryable=False)
         return
 
     qa_cfg = project.get("qa", {})
@@ -3215,7 +3315,8 @@ def run_qa_slot(task, cfg):
     # script without editing config (e.g., synthetic regression simulators).
     script_rel = eargs.get("script") or qa_cfg.get(contract_kind)
     if not script_rel:
-        o.move_task(task_id, "claimed", "failed", reason=f"no qa.{contract_kind} in config")
+        fail_task(task_id, "claimed", f"no qa.{contract_kind} in config",
+                  blocker_code="qa_contract_error", summary="QA contract missing", retryable=False)
         return
 
     # Resolve target + script path + cwd based on contract.
@@ -3242,6 +3343,14 @@ def run_qa_slot(task, cfg):
             def mut_target_fail(t):
                 t["finished_at"] = o.now_iso()
                 t["qa_failure"] = "worktree missing"
+                o.set_task_blocker(
+                    t,
+                    "qa_target_missing",
+                    summary="QA target worktree missing",
+                    detail=f"target worktree missing: {target_wt}",
+                    source="worker",
+                    retryable=False,
+                )
             o.move_task(target_id, "awaiting-qa", "failed",
                         reason="qa target worktree missing", mutator=mut_target_fail)
             def mut_self(t):
@@ -3261,7 +3370,8 @@ def run_qa_slot(task, cfg):
         smoke_env_repo_root = None
 
     if not script_abs.exists():
-        o.move_task(task_id, "claimed", "failed", reason=f"script missing: {script_abs}")
+        fail_task(task_id, "claimed", f"script missing: {script_abs}",
+                  blocker_code="qa_contract_error", summary="QA script missing", retryable=False)
         return
 
     timeout = eargs.get(
@@ -3313,6 +3423,14 @@ def run_qa_slot(task, cfg):
                     def mut_t_to(t):
                         t["finished_at"] = o.now_iso()
                         t["qa_failure"] = f"smoke timeout {timeout}s"
+                        o.set_task_blocker(
+                            t,
+                            "qa_smoke_failed",
+                            summary="smoke timeout",
+                            detail=f"smoke timeout {timeout}s",
+                            source="worker",
+                            retryable=True,
+                        )
                     o.move_task(target_id, "awaiting-qa", "failed",
                                 reason="smoke timeout", mutator=mut_t_to)
                     def mut_d_to(t):
@@ -3320,7 +3438,8 @@ def run_qa_slot(task, cfg):
                     o.move_task(task_id, "running", "done",
                                 reason=f"target timeout, driver done", mutator=mut_d_to)
                 else:
-                    o.move_task(task_id, "running", "failed", reason=f"qa timeout {timeout}s")
+                    fail_task(task_id, "running", f"qa timeout {timeout}s",
+                              blocker_code="qa_smoke_failed", summary="QA timeout", retryable=True)
                 return
 
         if proc.returncode == 0:
@@ -3388,6 +3507,14 @@ def run_qa_slot(task, cfg):
                         t["finished_at"] = o.now_iso()
                         t["qa_passed_at"] = o.now_iso()
                         t["push_failure"] = push_failure
+                        o.set_task_blocker(
+                            t,
+                            "delivery_push_failed",
+                            summary="push failed after smoke passed",
+                            detail=push_failure,
+                            source="worker",
+                            retryable=True,
+                        )
                         if pr_body_path:
                             t["pr_body_path"] = str(pr_body_path)
                     o.move_task(target_id, "awaiting-qa", "failed",
@@ -3434,6 +3561,14 @@ def run_qa_slot(task, cfg):
             def mut_target_fail(t):
                 t["finished_at"] = o.now_iso()
                 t["qa_failure"] = f"smoke exit {proc.returncode}"
+                o.set_task_blocker(
+                    t,
+                    "qa_smoke_failed",
+                    summary="smoke failed",
+                    detail=f"smoke exit {proc.returncode}",
+                    source="worker",
+                    retryable=True,
+                )
             o.move_task(target_id, "awaiting-qa", "failed",
                         reason=f"smoke fail via {task_id}", mutator=mut_target_fail)
             def mut_driver_fail(t):
@@ -3443,10 +3578,12 @@ def run_qa_slot(task, cfg):
         else:
             def mut_fail(t):
                 t["finished_at"] = o.now_iso()
-            o.move_task(task_id, "running", "failed",
-                        reason=f"{contract_kind} exit {proc.returncode}", mutator=mut_fail)
+            fail_task(task_id, "running", f"{contract_kind} exit {proc.returncode}",
+                      blocker_code="qa_smoke_failed", summary=f"{contract_kind} failed",
+                      retryable=True, mutator=mut_fail)
     except TimeoutError as exc:
-        o.move_task(task_id, "claimed", "failed", reason=str(exc))
+        fail_task(task_id, "claimed", str(exc),
+                  blocker_code="runtime_precondition_failed", summary="QA precondition failed", retryable=True)
     finally:
         if lock_fh is not None:
             lock_fh.close()
