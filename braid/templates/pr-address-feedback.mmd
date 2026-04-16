@@ -1,59 +1,54 @@
 flowchart TD;
-    Start[Start] -- "always" --> ReadCtx[Read: parse conflict flag + comment list];
-    ReadCtx -- "context parsed" --> ReadBranch[Read: confirm on agent/<target_id> branch];
-    ReadBranch -- "branch confirmed" --> CheckBaseline;
-    subgraph SB0[Baseline Gate]
-        CheckBaseline[Check: baseline smoke green on target worktree]
-    end
-    CheckBaseline -- "baseline red" --> ExitRed[Exit: BRAID_TOPOLOGY_ERROR baseline_red];
-    CheckBaseline -- "baseline green" --> Branch[Branch: route on work type];
-    Branch -- "conflicts flagged" --> Fetch[Fetch: origin <base_branch>];
-    Branch -- "no conflicts" --> CheckFailures[Branch: failed <check> present?];
-    Fetch -- "fetch complete" --> Rebase[Rebase: worktree onto origin/<base_branch>];
-    Rebase -- "conflict markers present" --> ResolveHunk[Resolve: apply fix for <conflict_hunk>];
-    ResolveHunk -- "hunk resolved" --> ContinueRebase[Continue: git rebase --continue];
-    ContinueRebase -- "more hunks remain" --> ResolveHunk;
-    ContinueRebase -- "rebase complete" --> CheckFailures;
-    Rebase -- "rebase clean" --> CheckFailures;
-    CheckFailures -- "failed checks present" --> ReadCheck[Read: inspect first failed <check>];
-    CheckFailures -- "no failed checks" --> ScanComments[Scan: first unhandled <comment>];
-    ReadCheck -- "failure understood" --> LocateCheck[Locate: files behind <check>];
-    LocateCheck -- "files found" --> DraftCheckFix[Draft: <fix> for failed <check>];
-    DraftCheckFix -- "fix drafted" --> ApplyCheckFix[Apply: write <fix> for <check>];
-    ApplyCheckFix -- "fix applied" --> CommitCheckFix[Commit: agent identity, <check> reference];
-    CommitCheckFix -- "check rerun complete" --> CheckFailures;
-    ScanComments -- "no comments left" --> C1;
-    ScanComments -- "comment selected" --> ReadComment[Read: understand <comment> intent];
-    ReadComment -- "intent clear" --> LocateFile[Locate: <file> referenced by <comment>];
-    ReadComment -- "intent ambiguous" --> RationaleOnly[Draft: rationale for Check 2];
-    LocateFile -- "file found" --> DraftFix[Draft: <fix> addressing <comment>];
-    DraftFix -- "fix drafted" --> ApplyFix[Apply: write <fix> to <file>];
-    ApplyFix -- "fix applied" --> CommitFix[Commit: agent identity, <comment> reference];
-    RationaleOnly -- "rationale recorded" --> CommitFix;
-    CommitFix -- "commit recorded" --> ScanComments;
-    subgraph S1[Conflict Gate]
-        C1[Check: conflicts resolved]
-    end
-    C1 -- "conflict markers remain" --> Revise[Revise: re-run resolve loop];
-    C1 -- "conflicts cleared" --> C2;
-    subgraph S2[Comment Gate]
-        C2[Check: each comment addressed]
-    end
-    C2 -- "comment ignored" --> Revise;
-    C2 -- "all comments handled" --> C3;
-    subgraph S3[Post-Fix Smoke Gate]
-        C3[Check: post-fix smoke green]
-    end
-    C3 -- "smoke red" --> Revise;
-    C3 -- "smoke green" --> C4;
-    subgraph S4[Scope Gate]
-        C4[Check: no new files outside scope]
-    end
-    C4 -- "scope creep detected" --> Revise;
-    C4 -- "scope clean" --> C5;
-    subgraph S5[Identity Gate]
-        C5[Check: commit authored under agent identity]
-    end
-    C5 -- "wrong author found" --> Revise;
-    C5 -- "identity confirmed" --> End[End];
-    Revise -- "fix re-applied" --> ScanComments;
+    Start[Start] -- "if entered" --> ReadFlag[Read conflict flag];
+    ReadFlag -- "if flag read" --> ReadComments[Read comment list];
+    ReadComments -- "if comments loaded" --> ReadChecks[Read failed check list];
+    ReadChecks -- "if checks loaded" --> Check0[Check: baseline smoke green];
+    Check0 -- "if baseline red" --> ExitBaseline[Exit: BRAID_TOPOLOGY_ERROR baseline_red];
+    Check0 -- "if baseline green" --> Route[Route by input signals];
+    Route -- "if conflicts present" --> Rebase[Rebase onto origin/<base>];
+    Route -- "if no conflicts and checks failed" --> PickCheck[Pick next failed <check>];
+    Route -- "if no conflicts and no checks and comments" --> PickComment[Pick next <comment>];
+    Route -- "if nothing actionable" --> Join[Join fix branches];
+    Rebase -- "if conflict hunks present" --> Resolve[Resolve <conflict_hunk>];
+    Resolve -- "if hunk resolved" --> StageConflict[Stage resolved <file>];
+    StageConflict -- "if more hunks" --> Resolve;
+    StageConflict -- "if rebase continues" --> Rebase;
+    Rebase -- "if rebase clean" --> CommitConflict[Commit under agent identity];
+    CommitConflict -- "if committed" --> CheckFailuresGate[Gate to failed check loop];
+    CheckFailuresGate -- "if checks failed" --> PickCheck;
+    CheckFailuresGate -- "if no checks failed" --> CommentsGate[Gate to comment loop];
+    PickCheck -- "if <check> selected" --> DraftCheckFix[Draft <fix> for <check>];
+    DraftCheckFix -- "if fix drafted" --> ApplyCheckFix[Apply <fix> to <file>];
+    ApplyCheckFix -- "if applied" --> CommitCheckFix[Commit under agent identity];
+    CommitCheckFix -- "if more checks failed" --> PickCheck;
+    CommitCheckFix -- "if checks clear" --> CommentsGate;
+    CommentsGate -- "if comments remain" --> PickComment;
+    CommentsGate -- "if no comments" --> Join;
+    PickComment -- "if <comment> selected" --> Classify[Classify <comment> actionable or rationale];
+    Classify -- "if code change needed" --> DraftFix[Draft <fix> for <comment>];
+    Classify -- "if rationale only" --> RecordRationale[Record rationale in commit msg];
+    DraftFix -- "if fix drafted" --> ApplyFix[Apply <fix> to <file>];
+    ApplyFix -- "if applied" --> CommitFix[Commit under agent identity];
+    RecordRationale -- "if rationale recorded" --> CommitFix;
+    CommitFix -- "if more comments" --> PickComment;
+    CommitFix -- "if comments exhausted" --> Join;
+    Join -- "if joined" --> Check1[Check: conflicts resolved];
+    Check1 -- "if markers remain" --> Revise[Revise: reopen failed branch];
+    Check1 -- "if tree clean" --> Check2[Check: each comment addressed];
+    Check2 -- "if comment unaddressed" --> Revise;
+    Check2 -- "if all addressed" --> Check3[Check: post-fix smoke green];
+    Check3 -- "if smoke red" --> Revise;
+    Check3 -- "if smoke green" --> Check4[Check: no new files outside scope];
+    Check4 -- "if scope creep" --> Revise;
+    Check4 -- "if scope intact" --> Check5[Check: commit authored under agent identity];
+    Check5 -- "if author mismatch" --> Revise;
+    Check5 -- "if identity ok" --> Emit[Emit BRAID_OK];
+    Revise -- "if conflict failure" --> Rebase;
+    Revise -- "if check failure" --> PickCheck;
+    Revise -- "if comment failure" --> PickComment;
+    Revise -- "if unreachable" --> ExitUnreachable[Exit: BRAID_TOPOLOGY_ERROR graph_unreachable];
+    Revise -- "if malformed" --> ExitMalformed[Exit: BRAID_TOPOLOGY_ERROR graph_malformed];
+    Emit -- "if emitted" --> End[End];
+    ExitBaseline -- "if exited" --> End;
+    ExitUnreachable -- "if exited" --> End;
+    ExitMalformed -- "if exited" --> End;

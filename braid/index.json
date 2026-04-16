@@ -51,10 +51,16 @@
       "ok",
       "ok",
       "ok",
+      "ok",
+      "ok",
+      "ok",
+      "ok",
+      "ok",
+      "ok",
       "ok"
     ],
     "topology_errors": 1,
-    "uses": 172
+    "uses": 178
   },
   "memory-synthesis": {
     "created_at": "2026-04-14T00:30:00",
@@ -74,9 +80,9 @@
     "uses": 0
   },
   "pr-address-feedback": {
-    "created_at": "2026-04-13T23:30:00",
-    "generator_model": "hand-authored",
-    "hash": "sha256:35bbfe1a966bab208466781f2cedde53407386dd1e1f1d9d98c7080b2c87e5e6",
+    "created_at": "2026-04-16T12:52:54",
+    "generator_model": "claude-opus",
+    "hash": "sha256:a3db805be2aea6d473eb33d77a3ad0a2d0ac1cb9737175b9f6d5910ab00c63a6",
     "path": "braid/templates/pr-address-feedback.mmd",
     "recent_outcomes": [
       "ok",
@@ -87,10 +93,22 @@
       "ok",
       "ok",
       "ok",
+      "ok",
+      "ok",
+      "ok",
+      "ok",
+      "topology_error",
+      "ok",
+      "ok",
+      "ok",
+      "ok",
+      "ok",
+      "ok",
+      "ok",
       "ok"
     ],
-    "topology_errors": 0,
-    "uses": 9
+    "topology_errors": 1,
+    "uses": 20
   },
   "review-address-feedback": {
     "created_at": "2026-04-14T07:20:00",

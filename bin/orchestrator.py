@@ -6514,13 +6514,14 @@ def _workflow_check_known_task_action(task, state, project):
 def _workflow_issue_from_summary(feature, workflow, config):
     project = get_project(config, feature["project"])
     feature_id = feature.get("feature_id")
+    feature_status = feature.get("status")
     frontier = workflow.get("frontier") or {}
     planner = workflow.get("planner") or {}
     canary = workflow.get("canary") or {}
     canary_cfg = config.get("synthetic_canary") or {}
     canary_stale_sec = int(float(canary_cfg.get("max_frontier_age_hours", 2) or 2) * 3600)
 
-    if feature.get("status") == "open":
+    if feature_status == "open":
         if not feature.get("child_task_ids"):
             if planner.get("task_id") and planner.get("state"):
                 found = find_task(planner["task_id"])
@@ -6579,43 +6580,63 @@ def _workflow_issue_from_summary(feature, workflow, config):
                 "task": None,
             }
 
-        if frontier.get("state") == "missing" and frontier.get("task_id"):
-            child_id = frontier["task_id"]
-            if not find_task(child_id):
-                return {
-                    "feature_id": feature_id,
-                    "project": project["name"],
-                    "summary": feature.get("summary") or feature_id,
-                    "issue_key": f"missing-child:{child_id}",
-                    "kind": "missing_child",
-                    "task_id": child_id,
-                    "task_state": "missing",
-                    "blocker": make_blocker("missing_child", summary="feature child task file missing", detail="feature child task file is missing from the queue state tree", source="workflow-check", retryable=False),
-                    "diagnosis": "feature child task file is missing from the queue state tree",
-                    "workflow": workflow,
-                    "action": None,
-                    "task": None,
-                }
-        if frontier.get("task_id") and frontier.get("state") in ("failed", "blocked", "abandoned"):
-            found = find_task(frontier["task_id"])
-            if found:
-                state, task = found
-                blocker = task_blocker(task)
-                action, diagnosis = _workflow_check_known_task_action(task, state, project)
-                return {
-                    "feature_id": feature_id,
-                    "project": project["name"],
-                    "summary": feature.get("summary") or feature_id,
-                    "issue_key": f"task:{task['task_id']}:{state}:{(blocker or {}).get('code') or task.get('failure') or task.get('topology_error') or ''}",
-                    "kind": "frontier_task_blocked",
-                    "task_id": task["task_id"],
-                    "task_state": state,
-                    "blocker": blocker,
-                    "diagnosis": diagnosis,
-                    "workflow": workflow,
-                    "action": action,
-                    "task": task,
-                }
+        if _feature_ready_for_finalize(feature):
+            issue = {
+                "feature_id": feature_id,
+                "project": project["name"],
+                "summary": feature.get("summary") or feature_id,
+                "issue_key": f"ready-for-finalize:{feature_id}",
+                "kind": "ready_for_finalize",
+                "task_id": None,
+                "task_state": "done",
+                "blocker": None,
+                "workflow": workflow,
+                "task": None,
+            }
+            issue["action"], issue["diagnosis"], issue["policy"] = _workflow_policy_decision(issue, None, project)
+            return {
+                **issue,
+            }
+        return None
+
+    if frontier.get("state") == "missing" and frontier.get("task_id"):
+        child_id = frontier["task_id"]
+        if not find_task(child_id):
+            return {
+                "feature_id": feature_id,
+                "project": project["name"],
+                "summary": feature.get("summary") or feature_id,
+                "issue_key": f"missing-child:{child_id}",
+                "kind": "missing_child",
+                "task_id": child_id,
+                "task_state": "missing",
+                "blocker": make_blocker("missing_child", summary="feature child task file missing", detail="feature child task file is missing from the queue state tree", source="workflow-check", retryable=False),
+                "diagnosis": "feature child task file is missing from the queue state tree",
+                "workflow": workflow,
+                "action": None,
+                "task": None,
+            }
+    if frontier.get("task_id") and frontier.get("state") in ("failed", "blocked", "abandoned"):
+        found = find_task(frontier["task_id"])
+        if found:
+            state, task = found
+            blocker = task_blocker(task)
+            action, diagnosis = _workflow_check_known_task_action(task, state, project)
+            return {
+                "feature_id": feature_id,
+                "project": project["name"],
+                "summary": feature.get("summary") or feature_id,
+                "issue_key": f"task:{task['task_id']}:{state}:{(blocker or {}).get('code') or task.get('failure') or task.get('topology_error') or ''}",
+                "kind": "frontier_task_blocked",
+                "task_id": task["task_id"],
+                "task_state": state,
+                "blocker": blocker,
+                "diagnosis": diagnosis,
+                "workflow": workflow,
+                "action": action,
+                "task": task,
+            }
+    if feature_status == "open":
         if frontier.get("task_id") and frontier.get("state") not in (None, "done"):
             if (
                 canary.get("enabled")
@@ -6647,26 +6668,7 @@ def _workflow_issue_from_summary(feature, workflow, config):
                 return issue
             return None
 
-        if _feature_ready_for_finalize(feature):
-            issue = {
-                "feature_id": feature_id,
-                "project": project["name"],
-                "summary": feature.get("summary") or feature_id,
-                "issue_key": f"ready-for-finalize:{feature_id}",
-                "kind": "ready_for_finalize",
-                "task_id": None,
-                "task_state": "done",
-                "blocker": None,
-                "workflow": workflow,
-                "task": None,
-            }
-            issue["action"], issue["diagnosis"], issue["policy"] = _workflow_policy_decision(issue, None, project)
-            return {
-                **issue,
-            }
-        return None
-
-    if feature.get("status") == "finalizing" and feature.get("final_pr_number"):
+    if feature_status == "finalizing" and feature.get("final_pr_number"):
         snap = _gh_pr_snapshot(project["path"], feature["final_pr_number"])
         merge_state = snap.get("mergeStateStatus", "")
         mergeable = snap.get("mergeable", "")
