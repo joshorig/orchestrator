@@ -396,7 +396,7 @@ CONFIG_DEFAULTS = {
     "topology_error_regen_threshold": 0.10,
     "topology_error_regen_window": 20,
     "topology_error_regen_min_samples": 5,
-    "workflow_check_max_attempts": 3,
+    "workflow_check_max_attempts": 6,
     "synthetic_canary": {
         "enabled": False,
         "project": "lvc-standard",
@@ -3187,6 +3187,23 @@ def pr_sweep(dry_run=False):
                 s["auto_merged"] = True
                 t["pr_sweep"] = s
             update_task_in_place(task_file, mut_merged)
+            feature_id = task.get("feature_id")
+            if feature_id:
+                feature = read_feature(feature_id)
+                if feature and feature.get("status") == "finalizing" and feature.get("final_pr_number"):
+                    review_ok, review_reason = _request_codex_review(
+                        repo_path,
+                        feature["final_pr_number"],
+                        reason=f"feature branch advanced via task PR #{pr_number} auto-merge",
+                    )
+                    if feature:
+                        def mut_feature_review(f):
+                            if review_ok:
+                                f["final_pr_review_requested_at"] = now_iso()
+                                f["final_pr_review_request_error"] = None
+                            else:
+                                f["final_pr_review_request_error"] = review_reason
+                        update_feature(feature_id, mut_feature_review)
             merged += 1
             print(f"pr-sweep merged {task.get('task_id')} pr=#{pr_number} into {base_ref}")
             append_transition(task.get("task_id", "?"), "done", "done",
@@ -3897,8 +3914,30 @@ def feature_finalize(dry_run=False):
             f["final_pr_url"] = pr_url
             f["finalized_at"] = now_iso()
             f["finalize_error"] = None
+            f["final_pr_review_requested_at"] = None
+            f["final_pr_review_request_error"] = None
 
         update_feature(feature_id, mut_feature)
+        review_ok, review_reason = _request_codex_review(
+            project["path"],
+            pr_number,
+            reason="initial final feature PR",
+        )
+        if not review_ok:
+            update_feature(
+                feature_id,
+                lambda f: f.update({"final_pr_review_request_error": review_reason}),
+            )
+        else:
+            update_feature(
+                feature_id,
+                lambda f: f.update(
+                    {
+                        "final_pr_review_requested_at": now_iso(),
+                        "final_pr_review_request_error": None,
+                    }
+                ),
+            )
         opened += 1
         print(f"feature-finalize opened {feature_id} pr={pr_url or pr_number or '(unknown)'}")
 
@@ -6238,6 +6277,33 @@ def _gh_pr_snapshot(repo_path, pr_number):
         return json.loads(proc.stdout or "{}")
     except json.JSONDecodeError as exc:
         return {"error": f"bad gh pr json: {exc}"}
+
+
+def _request_codex_review(repo_path, pr_number, *, reason=None, commit_sha=None):
+    if shutil.which("gh") is None:
+        return False, "gh CLI not installed"
+    if not pr_number:
+        return False, "missing pr number"
+    details = []
+    if reason:
+        details.append(reason)
+    if commit_sha:
+        details.append(f"head {commit_sha[:12]}")
+    suffix = f" ({'; '.join(details)})" if details else ""
+    body = f"@codex please review the latest push{suffix}."
+    try:
+        proc = subprocess.run(
+            ["gh", "pr", "comment", str(pr_number), "--body", body],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "gh pr comment timeout"
+    if proc.returncode != 0:
+        return False, (proc.stderr or proc.stdout or "gh pr comment failed").strip()[:240]
+    return True, "ok"
 
 
 def _latest_feature_planner_task(feature_id):

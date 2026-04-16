@@ -1736,6 +1736,17 @@ def topology_reason_is_valid(trailer):
     return any(code in rest for code in VALID_TOPOLOGY_REASONS)
 
 
+def topology_reason_code(trailer):
+    _, _, rest = trailer.partition(":")
+    rest = rest.strip().lower()
+    if not rest:
+        return None
+    for code in VALID_TOPOLOGY_REASONS:
+        if code in rest:
+            return code
+    return None
+
+
 _BRAID_REFINE_NODE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 
 
@@ -2036,13 +2047,12 @@ def run_claude_planner(task, cfg, timeout, log_path):
 
 
 def run_claude_reviewer(task, cfg, timeout, log_path):
-    """Claude reviewer: claim one awaiting-review target and transition it.
+    """Codex reviewer: deep pre-push review of the awaiting-review target.
 
-    Loads the lvc-reviewer-pass BRAID template as system context plus the
-    target's git diff vs main as user context, runs claude, parses verdict,
-    promotes target → awaiting-qa on APPROVE or enqueues a review-feedback
-    codex pass on REQUEST_CHANGE. The reviewer task itself is marked done with
-    the verdict in its log.
+    Uses the reviewer BRAID template plus full read access to the target
+    worktree so the reviewer can inspect touched files, adjacent code, call
+    sites, and tests before approving. The target moves to awaiting-qa only on
+    APPROVE; REQUEST_CHANGE enqueues review-feedback on the same worktree.
     """
     task_id = task["task_id"]
     project_name = task.get("project")
@@ -2079,54 +2089,67 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
     # Pull diff from the target's worktree (capped to keep prompt bounded).
     target_wt = target.get("worktree")
     target_base = target.get("base_branch") or base_branch_for_task(target)
+    if not target_wt or not pathlib.Path(target_wt).exists():
+        fail_task(task_id, "claimed", f"review target worktree missing: {target_wt}",
+                  blocker_code="qa_target_missing", summary="review target worktree missing", retryable=False)
+        return
     diff_text = "(no worktree available)"
-    if target_wt and pathlib.Path(target_wt).exists():
-        try:
-            stat = subprocess.run(
-                ["git", "-C", target_wt, "diff", target_base, "--stat"],
+    changed_files = f"(no files changed vs {target_base})"
+    try:
+        changed_files = (
+            subprocess.run(
+                ["git", "-C", target_wt, "diff", target_base, "--name-only"],
                 capture_output=True, text=True, timeout=30,
-            ).stdout
-            body = subprocess.run(
-                ["git", "-C", target_wt, "diff", target_base],
-                capture_output=True, text=True, timeout=30,
-            ).stdout
-            if len(body) > 30000:
-                body = body[:30000] + "\n\n[...diff truncated at 30k chars...]\n"
-            diff_text = (stat + "\n\n" + body).strip() or f"(empty diff vs {target_base})"
-        except subprocess.TimeoutExpired:
-            diff_text = "(git diff timed out)"
+            ).stdout.strip() or changed_files
+        )
+        stat = subprocess.run(
+            ["git", "-C", target_wt, "diff", target_base, "--stat"],
+            capture_output=True, text=True, timeout=30,
+        ).stdout
+        body = subprocess.run(
+            ["git", "-C", target_wt, "diff", target_base],
+            capture_output=True, text=True, timeout=30,
+        ).stdout
+        if len(body) > 30000:
+            body = body[:30000] + "\n\n[...diff truncated at 30k chars...]\n"
+        diff_text = (stat + "\n\n" + body).strip() or f"(empty diff vs {target_base})"
+    except subprocess.TimeoutExpired:
+        diff_text = "(git diff timed out)"
 
     memory_ctx = read_memory_context(project["path"])
 
-    system_prompt = (
-        "You are the BRAID reviewer for devmini. Traverse the review graph below "
-        "deterministically against the provided worktree diff. Do not freelance.\n\n"
-        "[BRAID REASONING GRAPH — reviewer-pass]\n"
+    review_prompt = (
+        "[BRAID REVIEW GRAPH — traverse deterministically.]\n"
         f"{graph_body}\n"
         "[END GRAPH]\n\n"
+        "You are Codex acting as the internal pre-push reviewer. Perform a deep review "
+        "of the worktree before it is allowed to proceed to QA/push.\n"
+        "- Read the changed files, surrounding implementation, related call sites, and relevant tests/benchmarks.\n"
+        "- Focus on regressions, missing invariants, concurrency/performance hazards, incomplete tests, and contract mismatches.\n"
+        "- Do not modify files. Review only.\n"
+        "- If the diff is insufficient, inspect the repository directly from the worktree.\n\n"
+        f"REVIEW TARGET: {target_id}\n"
+        f"TARGET SUMMARY: {target.get('summary','')}\n"
+        f"TARGET WORKTREE: {target_wt}\n"
+        f"FILES CHANGED vs {target_base}:\n{changed_files}\n\n"
+        f"[DIFF vs {target_base}]\n{diff_text}\n\n"
+        f"[PROJECT MEMORY]\n{memory_ctx}\n\n"
         "Emit EXACTLY one of these as the final line of your response:\n"
         "  BRAID_OK: APPROVE — <one-line justification>\n"
         "  BRAID_OK: REQUEST_CHANGE — <one-line reason>\n"
-        "  BRAID_TOPOLOGY_ERROR: <reason graph could not be traversed>"
-    )
-    user_prompt = (
-        f"REVIEW TARGET: {target_id}\n"
-        f"TARGET SUMMARY: {target.get('summary','')}\n"
-        f"TARGET WORKTREE: {target_wt}\n\n"
-        f"[DIFF vs main]\n{diff_text}\n\n"
-        f"[PROJECT MEMORY]\n{memory_ctx}\n"
+        "  BRAID_TOPOLOGY_ERROR: <reason graph could not be traversed>\n"
     )
 
+    last_msg_path = o.LOGS_DIR / f"{task_id}.last.txt"
+    review_timeout = max(timeout, 1800)
     cmd = [
-        "claude",
-        "-p", user_prompt,
-        "--dangerously-skip-permissions",
-        "--system-prompt", system_prompt,
-        "--output-format", "text",
-        "--model", "sonnet",
-        "--max-budget-usd", "1.00",
-        "--disallowedTools", "Bash,Read,Write,Edit,Grep,Glob,Agent,WebFetch,WebSearch",
-        "--no-session-persistence",
+        "codex", "exec",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--skip-git-repo-check",
+        "-C", str(target_wt),
+        "--ephemeral",
+        "-o", str(last_msg_path),
+        review_prompt,
     ]
 
     def mut_running(t):
@@ -2138,26 +2161,26 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
     o.move_task(task_id, "claimed", "running", reason=f"review of {target_id}", mutator=mut_running)
 
     with log_path.open("w") as logf:
-        logf.write(f"# claude reviewer task={task_id} target={target_id}\n")
+        logf.write(f"# codex reviewer task={task_id} target={target_id}\n")
         logf.write(f"# template=lvc-reviewer-pass hash={graph_hash}\n\n")
         try:
             proc = subprocess.run(
-                cmd, stdout=subprocess.PIPE, stderr=logf, text=True, timeout=timeout,
-                cwd="/tmp",
+                cmd, stdout=logf, stderr=subprocess.STDOUT, text=True, timeout=review_timeout,
             )
         except subprocess.TimeoutExpired:
             o.braid_template_record_use("lvc-reviewer-pass", topology_error=True)
-            fail_task(task_id, "running", f"claude timeout {timeout}s",
-                      blocker_code="llm_timeout", summary="claude timeout", retryable=True)
+            fail_task(task_id, "running", f"codex reviewer timeout {review_timeout}s",
+                      blocker_code="llm_timeout", summary="codex reviewer timeout", retryable=True)
             return
-        logf.write(f"\n# exit: {proc.returncode}\n# stdout:\n{proc.stdout or ''}\n")
+        if last_msg_path.exists():
+            logf.write(f"\n# reviewer last message:\n{last_msg_path.read_text(errors='replace')}\n")
 
     if proc.returncode != 0:
-        fail_task(task_id, "running", f"claude exit {proc.returncode}",
-                  blocker_code="llm_exit_error", summary="claude exit error", retryable=True)
+        fail_task(task_id, "running", f"codex reviewer exit {proc.returncode}",
+                  blocker_code="llm_exit_error", summary="codex reviewer exit error", retryable=True)
         return
 
-    raw = proc.stdout or ""
+    raw = last_msg_path.read_text(errors="replace") if last_msg_path.exists() else ""
     verdict = None
     for line in reversed([l.strip() for l in raw.splitlines() if l.strip()][-15:]):
         if line.startswith("BRAID_OK: APPROVE"):
@@ -2201,10 +2224,10 @@ def _handle_review_request_change(reviewer_task_id, project_name, target, review
     """Route reviewer request_change into feedback retry or terminal failure.
 
     >>> _review_request_change_doctest()
-    ((('move', 'failed', 'review rounds exhausted (3)', 4), ('alert', 'review rounds exhausted (3)')), (('enqueue', 2, 'review-address-feedback'), ('move', 'queued', 'review feedback round 2', 2)))
+    ((('move', 'failed', 'review rounds exhausted (6)', 7), ('alert', 'review rounds exhausted (6)')), (('enqueue', 2, 'review-address-feedback'), ('move', 'queued', 'review feedback round 2', 2)))
     """
     rounds = int(target.get("review_feedback_rounds", 0)) + 1
-    MAX_ROUNDS = 3
+    MAX_ROUNDS = 6
     target_id = target["task_id"]
     if rounds > MAX_ROUNDS:
         def mut_fail_target(t):
@@ -2267,7 +2290,7 @@ def _review_request_change_doctest():
     old_o = _review_request_change_doctest.__globals__["o"]
     _review_request_change_doctest.__globals__["o"] = FakeO()
     try:
-        _handle_review_request_change("reviewer-1", "demo", {"task_id": "task-a", "project": "demo", "feature_id": "f1", "base_branch": "main", "worktree": "/tmp/wt", "review_feedback_rounds": 3}, "need tests", lambda t: t.update({"reviewed_by": "reviewer-1"}))
+        _handle_review_request_change("reviewer-1", "demo", {"task_id": "task-a", "project": "demo", "feature_id": "f1", "base_branch": "main", "worktree": "/tmp/wt", "review_feedback_rounds": 6}, "need tests", lambda t: t.update({"reviewed_by": "reviewer-1"}))
         exhausted = (calls[0], calls[1])
         calls.clear()
         _handle_review_request_change("reviewer-2", "demo", {"task_id": "task-b", "project": "demo", "feature_id": "f2", "base_branch": "main", "worktree": "/tmp/wt", "review_feedback_rounds": 1}, "need docs", lambda t: t.update({"reviewed_by": "reviewer-2"}))
@@ -2778,6 +2801,22 @@ def run_pr_feedback_task(task, cfg):
                           blocker_code="false_blocker_claim", summary="false blocker claim",
                           retryable=False, mutator=mut_false)
                 return
+            if topology_reason_code(trailer) == "baseline_red":
+                def mut_fail(t):
+                    t["finished_at"] = o.now_iso()
+                    t["failure"] = trailer
+                    o.set_task_blocker(
+                        t,
+                        "qa_smoke_failed",
+                        summary="pr-feedback baseline smoke red",
+                        detail=trailer,
+                        source="worker",
+                        retryable=True,
+                    )
+                fail_task(task_id, "running", "pr-feedback baseline smoke red",
+                          blocker_code="qa_smoke_failed", summary="pr-feedback baseline smoke red",
+                          retryable=True, mutator=mut_fail)
+                return
             o.braid_template_record_use(bt, topology_error=True)
             regen = o.new_task(
                 role="planner", engine="claude",
@@ -2907,11 +2946,26 @@ def run_pr_feedback_task(task, cfg):
                     f"{failed_count} failed ({len(set(thread_ids))} unique thread(s))\n"
                 )
 
+        review_ok = review_reason = None
+        if pr_number:
+            review_ok, review_reason = o._request_codex_review(
+                project["path"],
+                pr_number,
+                reason="autonomous PR feedback fix",
+                commit_sha=new_sha,
+            )
+
         def mut_ok(t):
             t["finished_at"] = o.now_iso()
             t["pr_feedback_new_sha"] = new_sha
             if thread_ids:
                 t["resolved_thread_count"] = resolved_count
+            if pr_number:
+                if review_ok:
+                    t["review_requested_at"] = o.now_iso()
+                    t["review_request_error"] = None
+                else:
+                    t["review_request_error"] = review_reason
         o.move_task(task_id, "running", "done",
                     reason=f"pr-feedback pushed {new_sha}", mutator=mut_ok)
 
@@ -2998,15 +3052,22 @@ def run_codex_slot(task, cfg):
             try:
                 ensure_feature_branch(project["path"], base_branch)
             except MainDirtyOrAhead as exc:
+                exc_text = str(exc)
+                blocker_code = "runtime_env_dirty" if "fetch origin main failed" in exc_text.lower() else "project_main_dirty"
+                blocker_summary = (
+                    "feature branch refresh failed"
+                    if blocker_code == "runtime_env_dirty"
+                    else "project main checkout dirty or ahead"
+                )
                 def mut_block_main(t):
                     t["finished_at"] = o.now_iso()
                     t["topology_error"] = "main_dirty_or_ahead"
-                    t["topology_error_message"] = str(exc)
+                    t["topology_error_message"] = exc_text
                     o.set_task_blocker(
                         t,
-                        "project_main_dirty",
-                        summary="project main checkout dirty or ahead",
-                        detail=str(exc),
+                        blocker_code,
+                        summary=blocker_summary,
+                        detail=exc_text,
                         source="worker",
                         retryable=True,
                     )
@@ -3014,14 +3075,14 @@ def run_codex_slot(task, cfg):
                     task_id,
                     "claimed",
                     "blocked",
-                    reason=str(exc)[:80],
+                    reason=exc_text[:80],
                     mutator=mut_block_main,
                 )
                 try:
                     write_regression_alert(
                         project["name"],
                         task_id,
-                        f"main_dirty_or_ahead: {exc}",
+                        f"main_dirty_or_ahead: {exc_text}",
                         None,
                     )
                 except Exception as alert_exc:
@@ -3132,6 +3193,24 @@ def run_codex_slot(task, cfg):
                     task_id, "running", f"false blocker claim: {trailer[:80]}",
                     blocker_code="false_blocker_claim", summary="false blocker claim",
                     retryable=False, mutator=mut_fail_false,
+                )
+                return
+            if topology_reason_code(trailer) == "baseline_red":
+                def mut_fail_baseline(t):
+                    t["finished_at"] = o.now_iso()
+                    t["failure"] = trailer
+                    o.set_task_blocker(
+                        t,
+                        "qa_smoke_failed",
+                        summary="baseline smoke red before fix",
+                        detail=trailer,
+                        source="worker",
+                        retryable=True,
+                    )
+                fail_task(
+                    task_id, "running", "baseline smoke red before fix",
+                    blocker_code="qa_smoke_failed", summary="baseline smoke red before fix",
+                    retryable=True, mutator=mut_fail_baseline,
                 )
                 return
 
@@ -3480,25 +3559,44 @@ def run_qa_slot(task, cfg):
                             "push_branch": f"agent/{target_id}",
                             "push_base_branch": target_base,
                         }
-                        # Pattern C: also open the PR via gh.
-                        try:
-                            pr_ok, pr_reason, pr_url, pr_number = create_pr(
-                                target=target, project=project,
-                                branch=f"agent/{target_id}",
-                                pr_body_path=pr_body_path,
-                                log_path=log_path,
-                                base_branch=target_base,
-                            )
-                        except Exception as exc:
-                            pr_ok, pr_reason = False, f"create_pr crashed: {exc}"
-                            pr_url, pr_number = None, None
-                            log(f"create_pr crashed: {exc}")
-                        if pr_ok:
-                            pushed_info["pr_url"] = pr_url
+                        pr_number = target.get("pr_number")
+                        pr_url = target.get("pr_url")
+                        if pr_number:
                             pushed_info["pr_number"] = pr_number
-                            pushed_info["pr_created_at"] = o.now_iso()
+                            if pr_url:
+                                pushed_info["pr_url"] = pr_url
                         else:
-                            pushed_info["pr_create_failure"] = pr_reason
+                            # Pattern C: also open the PR via gh.
+                            try:
+                                pr_ok, pr_reason, pr_url, pr_number = create_pr(
+                                    target=target, project=project,
+                                    branch=f"agent/{target_id}",
+                                    pr_body_path=pr_body_path,
+                                    log_path=log_path,
+                                    base_branch=target_base,
+                                )
+                            except Exception as exc:
+                                pr_ok, pr_reason = False, f"create_pr crashed: {exc}"
+                                pr_url, pr_number = None, None
+                                log(f"create_pr crashed: {exc}")
+                            if pr_ok:
+                                pushed_info["pr_url"] = pr_url
+                                pushed_info["pr_number"] = pr_number
+                                pushed_info["pr_created_at"] = o.now_iso()
+                            else:
+                                pushed_info["pr_create_failure"] = pr_reason
+                        if pr_number:
+                            review_ok, review_reason = o._request_codex_review(
+                                project["path"],
+                                pr_number,
+                                reason="autonomous branch update after QA",
+                                commit_sha=sha,
+                            )
+                            if review_ok:
+                                pushed_info["review_requested_at"] = o.now_iso()
+                                pushed_info["review_request_error"] = None
+                            else:
+                                pushed_info["review_request_error"] = review_reason
                     else:
                         push_failure = reason
 
