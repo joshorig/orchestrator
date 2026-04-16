@@ -1477,15 +1477,20 @@ DAG_HISTORIAN_POSITIVE_PATTERNS = (
 )
 TRP_PIPELINE_STAGE_POSITIVE_PATTERNS = (
     "stage", "pipeline", "platform-runtime", "platform runtime", "ingest", "jmh",
+    "controller", "publish", "projection", "payload", "explainability", "signal",
+)
+TRP_PIPELINE_CONFLICT_PATTERNS = (
+    "stage", "pipeline", "platform-runtime", "platform runtime", "ingest", "jmh",
 )
 TRP_UI_COMPONENT_POSITIVE_PATTERNS = (
     "component", "page", ".tsx", "playwright", "a11y", "apps/",
+    "ui", "types", "type update", "contract snapshot", "provenance matrix",
 )
 
 PROJECT_CROSS_MARKERS = {
     "lvc": ("dag-framework", "trade-research-platform", "apps/", ".tsx", "playwright", "a11y"),
     "dag": ("lvc-standard", "trade-research-platform", "apps/", ".tsx", "playwright", "a11y"),
-    "trp": ("lvc-standard", "dag-framework", "src/main/java", "operator", "repo-memory/"),
+    "trp": ("lvc-standard", "dag-framework", "src/main/java", "operator"),
 }
 
 
@@ -1624,6 +1629,8 @@ def classify_slice(template, summary):
     True
     >>> classify_slice("trp-implement-pipeline-stage", "Tune stage batching in ingest pipeline")[0]
     True
+    >>> classify_slice("trp-implement-pipeline-stage", "Widen CryptoController + publishCryptoCycleExplainability; project 7 crypto signals into Phase 1 explainability shape")[0]
+    True
     >>> classify_slice("trp-implement-pipeline-stage", "Build apps/research/page.tsx with a11y fixes")[0]
     False
     >>> classify_slice("trp-implement-pipeline-stage", "Append RECENT_WORK historian memory note")[0]
@@ -1636,12 +1643,16 @@ def classify_slice(template, summary):
     True
     >>> classify_slice("trp-ui-component", "Update page component and accessibility flow")[0]
     True
+    >>> classify_slice("trp-ui-component", "Update UI types + contract snapshot for crypto Phase 1 payload; flip provenance matrix crypto column to implemented")[0]
+    True
     >>> classify_slice("trp-ui-component", "Optimize ingest pipeline stage jmh smoke")[0]
     False
     >>> classify_slice("trp-ui-component", "Append RECENT_WORK history entry")[0]
     False
     >>> classify_slice("trp-ui-component", "Fix lvc-standard operator semantics")[0]
     False
+    >>> classify_slice("trp-historian-update", "Append R-001 completion observation to repo-memory/RECENT_WORK.md")[0]
+    True
     """
     s = (summary or "").lower()
     if not template:
@@ -1678,6 +1689,17 @@ def classify_slice(template, summary):
         if not _contains_any(s, DAG_HISTORIAN_POSITIVE_PATTERNS):
             return False, "no historian keyword"
         return True, None
+    if template == "trp-historian-update":
+        reason = _cross_project_reason(s, "trp")
+        if reason:
+            return False, reason
+        if _contains_any(s, TRP_UI_COMPONENT_POSITIVE_PATTERNS):
+            return False, "ui slice misrouted to historian"
+        if _contains_any(s, TRP_PIPELINE_STAGE_POSITIVE_PATTERNS):
+            return False, "pipeline-stage slice misrouted to historian"
+        if not _contains_any(s, DAG_HISTORIAN_POSITIVE_PATTERNS):
+            return False, "no historian keyword"
+        return True, None
     if template == "trp-implement-pipeline-stage":
         reason = _cross_project_reason(s, "trp")
         if reason:
@@ -1693,7 +1715,7 @@ def classify_slice(template, summary):
         reason = _cross_project_reason(s, "trp")
         if reason:
             return False, reason
-        if _contains_any(s, TRP_PIPELINE_STAGE_POSITIVE_PATTERNS):
+        if _contains_any(s, TRP_PIPELINE_CONFLICT_PATTERNS):
             return False, "pipeline-stage slice misrouted to ui-component"
         if _contains_any(s, DAG_HISTORIAN_POSITIVE_PATTERNS):
             return False, "historian slice misrouted to ui-component"
