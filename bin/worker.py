@@ -2224,10 +2224,10 @@ def _handle_review_request_change(reviewer_task_id, project_name, target, review
     """Route reviewer request_change into feedback retry or terminal failure.
 
     >>> _review_request_change_doctest()
-    ((('move', 'failed', 'review rounds exhausted (6)', 7), ('alert', 'review rounds exhausted (6)')), (('enqueue', 2, 'review-address-feedback'), ('move', 'queued', 'review feedback round 2', 2)))
+    ((('move', 'failed', 'review rounds exhausted (20)', 21), ('alert', 'review rounds exhausted (20)')), (('enqueue', 2, 'review-address-feedback'), ('move', 'queued', 'review feedback round 2', 2)))
     """
     rounds = int(target.get("review_feedback_rounds", 0)) + 1
-    MAX_ROUNDS = 6
+    MAX_ROUNDS = 20
     target_id = target["task_id"]
     if rounds > MAX_ROUNDS:
         def mut_fail_target(t):
@@ -2290,7 +2290,7 @@ def _review_request_change_doctest():
     old_o = _review_request_change_doctest.__globals__["o"]
     _review_request_change_doctest.__globals__["o"] = FakeO()
     try:
-        _handle_review_request_change("reviewer-1", "demo", {"task_id": "task-a", "project": "demo", "feature_id": "f1", "base_branch": "main", "worktree": "/tmp/wt", "review_feedback_rounds": 6}, "need tests", lambda t: t.update({"reviewed_by": "reviewer-1"}))
+        _handle_review_request_change("reviewer-1", "demo", {"task_id": "task-a", "project": "demo", "feature_id": "f1", "base_branch": "main", "worktree": "/tmp/wt", "review_feedback_rounds": 20}, "need tests", lambda t: t.update({"reviewed_by": "reviewer-1"}))
         exhausted = (calls[0], calls[1])
         calls.clear()
         _handle_review_request_change("reviewer-2", "demo", {"task_id": "task-b", "project": "demo", "feature_id": "f2", "base_branch": "main", "worktree": "/tmp/wt", "review_feedback_rounds": 1}, "need docs", lambda t: t.update({"reviewed_by": "reviewer-2"}))

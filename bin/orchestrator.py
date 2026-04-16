@@ -6351,6 +6351,27 @@ def _feature_related_tasks(feature_id):
     return tasks
 
 
+def _follow_up_frontier_key(item):
+    task = item.get("task") or {}
+    entered_at, _ = task_state_entered_at(item.get("task_id"), item.get("state"))
+    state_rank = {
+        "failed": 0,
+        "blocked": 1,
+        "abandoned": 2,
+        "running": 3,
+        "claimed": 4,
+        "queued": 5,
+        "awaiting-review": 6,
+        "awaiting-qa": 7,
+    }
+    return (
+        state_rank.get(item.get("state"), 99),
+        entered_at or "",
+        task.get("created_at") or "",
+        item.get("task_id") or "",
+    )
+
+
 def feature_workflow_summary(feature):
     """Build a compact workflow summary with event-backed timing for the frontier task."""
     feature_id = feature.get("feature_id")
@@ -6382,14 +6403,9 @@ def feature_workflow_summary(feature):
             if item.get("state") == "done":
                 continue
             follow_ups.append(item)
-        follow_ups.sort(
-            key=lambda item: (
-                (item.get("task") or {}).get("created_at") or "",
-                item.get("task_id") or "",
-            )
-        )
+        follow_ups.sort(key=_follow_up_frontier_key)
         if follow_ups:
-            frontier = follow_ups[-1]
+            frontier = follow_ups[0]
 
     planner = _latest_feature_planner_task(feature_id)
     planner_state = planner[0] if planner else None
