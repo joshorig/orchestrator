@@ -593,16 +593,16 @@ def environment_health(*, refresh=False):
     issues = []
 
     required_bins = {
-        "git": "runtime_env_dirty",
-        "bash": "runtime_env_dirty",
-        "python3": "runtime_env_dirty",
-        "launchctl": "runtime_env_dirty",
-        "gh": "delivery_auth_expired",
-        "codex": "runtime_env_dirty",
-        "claude": "runtime_env_dirty",
+        "git": ("runtime_env_dirty", lambda: shutil.which("git")),
+        "bash": ("runtime_env_dirty", lambda: shutil.which("bash")),
+        "python3": ("runtime_env_dirty", lambda: shutil.which("python3")),
+        "launchctl": ("runtime_env_dirty", lambda: shutil.which("launchctl")),
+        "gh": ("delivery_auth_expired", lambda: shutil.which("gh")),
+        "codex": ("runtime_env_dirty", lambda: next((p for p in CODEX_CANDIDATE_PATHS if p and pathlib.Path(p).exists()), None)),
+        "claude": ("runtime_env_dirty", lambda: next((p for p in CLAUDE_CANDIDATE_PATHS if p and pathlib.Path(p).exists()), None)),
     }
-    for binary, code in required_bins.items():
-        if shutil.which(binary) is None:
+    for binary, (code, resolver) in required_bins.items():
+        if not resolver():
             issues.append(
                 {
                     "code": code,

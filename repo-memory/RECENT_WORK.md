@@ -4,6 +4,16 @@ _Append-only log. New entries go at the top. One entry per completed task or mil
 
 ---
 
+## 2026-04-16 — Environment-health binary detection matches runtime candidate paths
+
+**Summary:** Fixed the false-positive `required binary missing: claude` environment-health reports. The runtime already knows how to locate Claude and Codex outside bare `PATH`, but `environment_health()` was only checking `shutil.which(...)`, so it could declare the binary missing even while the orchestrator could actually run it.
+
+**Changed:**
+- `bin/orchestrator.py` — updated environment-health binary checks to use the existing `CLAUDE_CANDIDATE_PATHS` and `CODEX_CANDIDATE_PATHS` fallback resolution, instead of only checking `PATH`.
+- `bin/orchestrator.py` — kept `git/bash/python3/launchctl/gh` on direct `PATH` resolution while aligning the agent binaries with the runtime’s real launch behavior.
+
+**Validation:** `python3 -m py_compile bin/orchestrator.py`, `python3 bin/orchestrator.py env-health --refresh`, and `python3 bin/orchestrator.py workflow-check`.
+
 ## 2026-04-16 — Worker pickup fix: nudge launchd workers on enqueue/retry
 
 **Summary:** Fixed the control-plane bug where queued engine tasks could sit unclaimed until a manual `python3 bin/worker.py ...` kick, even though the corresponding launchd worker was loaded. The orchestrator now nudges the relevant launchd worker(s) whenever it enqueues or retries a task, instead of relying purely on KeepAlive/throttle timing after a clean no-work exit.
