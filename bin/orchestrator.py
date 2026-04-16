@@ -1759,7 +1759,7 @@ AUTO_HANDLE_COMMENT_AUTHORS = {
     "github-advanced-security",
 }
 
-PR_SWEEP_MAX_FEEDBACK_ROUNDS = 3
+PR_SWEEP_MAX_FEEDBACK_ROUNDS = 10
 
 
 def _pr_body_has_orchestrator_mention(body):

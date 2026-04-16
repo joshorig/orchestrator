@@ -4,6 +4,15 @@ _Append-only log. New entries go at the top. One entry per completed task or mil
 
 ---
 
+## 2026-04-16 — Raise pr-sweep feedback cap from 3 to 10
+
+**Summary:** Increased the automatic `pr-sweep` / feature-PR feedback retry cap from 3 rounds to 10 so long-running CI repair loops do not park prematurely after only a few self-heal attempts. This was needed live on `lvc-standard` PR #20, where the third repair round fixed the local reproduction but GitHub still had the PR in an `UNSTABLE` check-blocked state and the old cap stopped any further automated follow-up.
+
+**Changed:**
+- `bin/orchestrator.py` — set `PR_SWEEP_MAX_FEEDBACK_ROUNDS = 10`.
+
+**Validation:** `python3 -m py_compile bin/orchestrator.py` and a live `python3 bin/orchestrator.py pr-sweep` run using the new cap.
+
 ## 2026-04-16 — Feature workflow summary now includes follow-up repair tasks
 
 **Summary:** Fixed the workflow-summary blind spot where feature status only tracked original `child_task_ids`. That meant `pr-feedback` / `review-feedback` follow-up tasks could fail without becoming the feature frontier, so `workflow-check` would miss a genuinely blocked open feature. The summary now includes non-planner feature-scoped follow-up tasks and uses them as the frontier once the original child slices are done.
