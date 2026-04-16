@@ -4,6 +4,20 @@ _Append-only log. New entries go at the top. One entry per completed task or mil
 
 ---
 
+## 2026-04-16 — trade-research-platform canary prep: project-aware review + historian wiring
+
+**Summary:** Brought `trade-research-platform` up to canary-ready orchestrator shape without yet re-enabling planner traffic. The runtime now has dedicated TRP historian and reviewer BRAID templates, reviewer selection is project-aware instead of forcing TRP diffs through the lvc review contract, TRP delivery is configured for autonomous push/PR once enabled, and the TRP repo now carries the unresolved-bot-review GitHub workflow backstop used by the autonomous PR-feedback loop.
+
+**Changed:**
+- `bin/orchestrator.py` — added `project_reviewer_template(...)` so review passes can select `trp-reviewer-pass` for TRP while leaving existing lvc behavior unchanged.
+- `bin/worker.py` — `run_claude_reviewer()` now loads/records the per-project reviewer template instead of hard-wiring `lvc-reviewer-pass`.
+- `braid/generators/trp-reviewer-pass.prompt.md`, `braid/templates/trp-reviewer-pass.mmd` — new mixed-surface TRP review contract covering UI/API/runtime checks.
+- `braid/templates/trp-historian-update.mmd`, `braid/index.json` — landed the missing live historian template/registry entry so the first TRP planner cycle does not immediately burn a template-missing repair loop.
+- `config/orchestrator.json` — flipped TRP `auto_push` on so an intentional canary can exercise the full branch push/PR/re-review path once planner is re-enabled.
+- `trade-research-platform/repo-memory/*.md` and `.github/workflows/unresolved-bot-review.yml` — corrected stale setup notes and added the PR-thread merge backstop.
+
+**Validation:** `python3 -m py_compile bin/orchestrator.py bin/worker.py`, `python3 -m doctest -o ELLIPSIS bin/orchestrator.py bin/worker.py`, `python3 bin/orchestrator.py lint-templates --template trp-historian-update`, `python3 bin/orchestrator.py lint-templates --template trp-reviewer-pass`, and live `python3 bin/orchestrator.py status` all pass. TRP remains planner-disabled intentionally, but is now structurally ready for a controlled canary.
+
 ## 2026-04-16 — Raise pr-sweep feedback cap from 3 to 10
 
 **Summary:** Increased the automatic `pr-sweep` / feature-PR feedback retry cap from 3 rounds to 10 so long-running CI repair loops do not park prematurely after only a few self-heal attempts. This was needed live on `lvc-standard` PR #20, where the third repair round fixed the local reproduction but GitHub still had the PR in an `UNSTABLE` check-blocked state and the old cap stopped any further automated follow-up.

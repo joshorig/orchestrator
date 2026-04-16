@@ -72,7 +72,7 @@
       "path": "/Volumes/devssd/repos/apps/trade-research-platform",
       "type": "application",
       "playwright": true,
-      "auto_push": false,
+      "auto_push": true,
       "qa": {
         "smoke": "qa/smoke.sh",
         "regression": "qa/regression.sh",

@@ -746,6 +746,18 @@ def project_historian_template(project_name):
     return mapping.get(project_name, "lvc-historian-update")
 
 
+def project_reviewer_template(project_name):
+    mapping = {
+        "lvc-standard": "lvc-reviewer-pass",
+        "dag-framework": "lvc-reviewer-pass",
+        "trade-research-platform": "trp-reviewer-pass",
+    }
+    if project_name == "trade-research-platform":
+        trp_prompt = BRAID_GENERATORS / "trp-reviewer-pass.prompt.md"
+        return "trp-reviewer-pass" if trp_prompt.exists() else "lvc-reviewer-pass"
+    return mapping.get(project_name, "lvc-reviewer-pass")
+
+
 def write_json_atomic(path, obj):
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")

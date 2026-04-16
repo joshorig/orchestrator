@@ -2080,7 +2080,8 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
     target = candidates[0][1]
     target_id = target["task_id"]
 
-    graph_body, graph_hash = o.braid_template_load("lvc-reviewer-pass")
+    reviewer_template = o.project_reviewer_template(project_name)
+    graph_body, graph_hash = o.braid_template_load(reviewer_template)
     if graph_body is None:
         fail_task(task_id, "claimed", "reviewer template missing",
                   blocker_code="runtime_precondition_failed", summary="reviewer template missing", retryable=False)
@@ -2162,13 +2163,13 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
 
     with log_path.open("w") as logf:
         logf.write(f"# codex reviewer task={task_id} target={target_id}\n")
-        logf.write(f"# template=lvc-reviewer-pass hash={graph_hash}\n\n")
+        logf.write(f"# template={reviewer_template} hash={graph_hash}\n\n")
         try:
             proc = subprocess.run(
                 cmd, stdout=logf, stderr=subprocess.STDOUT, text=True, timeout=review_timeout,
             )
         except subprocess.TimeoutExpired:
-            o.braid_template_record_use("lvc-reviewer-pass", topology_error=True)
+            o.braid_template_record_use(reviewer_template, topology_error=True)
             fail_task(task_id, "running", f"codex reviewer timeout {review_timeout}s",
                       blocker_code="llm_timeout", summary="codex reviewer timeout", retryable=True)
             return
@@ -2196,12 +2197,12 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
         return
 
     if verdict == "topology_error":
-        o.braid_template_record_use("lvc-reviewer-pass", topology_error=True)
+        o.braid_template_record_use(reviewer_template, topology_error=True)
         fail_task(task_id, "running", "reviewer topology error",
                   blocker_code="template_graph_error", summary="reviewer topology error", retryable=True)
         return
 
-    o.braid_template_record_use("lvc-reviewer-pass", topology_error=False)
+    o.braid_template_record_use(reviewer_template, topology_error=False)
 
     def mut_target(t):
         t["review_verdict"] = verdict
