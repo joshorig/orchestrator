@@ -245,6 +245,15 @@ WORKFLOW_REPAIR_POLICY = (
         "blocker_code": "template_graph_error",
         "action": None,
         "diagnosis": "waiting for template regeneration",
+        "when": "template_graph_waiting",
+    },
+    {
+        "name": "template_graph_retry",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "template_graph_error",
+        "action": "retry_task",
+        "diagnosis": "template regeneration landed",
+        "when": "template_graph_ready",
     },
     {
         "name": "template_refine_exhausted_report",
@@ -6487,6 +6496,20 @@ def _workflow_policy_matches(policy, issue, task, project):
             return False
         refine = find_task(refine_task_id)
         return bool(refine and refine[0] == "done")
+    if when == "template_graph_waiting":
+        tmpl = task.get("braid_template") if task else None
+        if not tmpl:
+            return True
+        _, current_hash = braid_template_load(tmpl)
+        previous_hash = task.get("braid_template_hash")
+        return not (current_hash and current_hash != previous_hash)
+    if when == "template_graph_ready":
+        tmpl = task.get("braid_template") if task else None
+        if not tmpl:
+            return False
+        _, current_hash = braid_template_load(tmpl)
+        previous_hash = task.get("braid_template_hash")
+        return bool(current_hash and current_hash != previous_hash)
     if when == "project_main_clean":
         repo = repo_status(project["path"])
         return bool(repo.get("exists") and not repo.get("dirty"))
