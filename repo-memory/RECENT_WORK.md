@@ -4,6 +4,18 @@ _Append-only log. New entries go at the top. One entry per completed task or mil
 
 ---
 
+## 2026-04-16 — Worker pickup fix: nudge launchd workers on enqueue/retry
+
+**Summary:** Fixed the control-plane bug where queued engine tasks could sit unclaimed until a manual `python3 bin/worker.py ...` kick, even though the corresponding launchd worker was loaded. The orchestrator now nudges the relevant launchd worker(s) whenever it enqueues or retries a task, instead of relying purely on KeepAlive/throttle timing after a clean no-work exit.
+
+**Changed:**
+- `bin/orchestrator.py` — added `_worker_launch_labels(...)` and `_nudge_engine_workers(...)` to map task engines to launchd worker labels and `kickstart` them opportunistically.
+- `bin/orchestrator.py` — `enqueue_task()` now nudges the matching engine worker immediately after writing a queued task.
+- `bin/orchestrator.py` — `reset_task_for_retry()` now nudges the matching engine worker after a retry reset lands back in `queue/queued`.
+- `bin/orchestrator.py` — completed the earlier slot-occupancy fix by keeping `engine_outstanding()` for backlog and using `engine_active_counts()` for reviewer/QA gating.
+
+**Validation:** `python3 -m py_compile bin/orchestrator.py`, `python3 -m doctest bin/orchestrator.py`, and live verification that QA no longer self-gates on a queued driver task and that queued engine work can be nudged into claim/running without manual per-slot intervention.
+
 ## 2026-04-15 — Policy coverage: every blocker code now has an explicit repair policy
 
 **Summary:** Completed the declarative repair-policy table so every blocker code in the typed workflow contract now has an explicit policy outcome. Transient runtime failures are auto-retried within the bounded attempt budget, while structural/configuration blockers now resolve deterministically to report-only or wait states instead of falling through as uncovered cases.

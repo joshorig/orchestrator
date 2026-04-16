@@ -1360,7 +1360,52 @@ def enqueue_task(task):
         feature_id=task.get("feature_id"),
         details={"project": task.get("project"), "source": task.get("source"), "braid_template": task.get("braid_template")},
     )
+    _nudge_engine_workers(task.get("engine"))
     return path
+
+
+def _worker_launch_labels(engine):
+    if engine == "claude":
+        return ("com.devmini.orchestrator.worker.claude",)
+    if engine == "qa":
+        return ("com.devmini.orchestrator.worker.qa",)
+    if engine == "codex":
+        return (
+            "com.devmini.orchestrator.worker.codex",
+            "com.devmini.orchestrator.worker.codex-2",
+            "com.devmini.orchestrator.worker.codex-3",
+            "com.devmini.orchestrator.worker.codex-4",
+            "com.devmini.orchestrator.worker.codex-5",
+            "com.devmini.orchestrator.worker.codex-6",
+        )
+    return ()
+
+
+def _nudge_engine_workers(engine):
+    """Ask launchd to start the worker(s) for a queued engine task.
+
+    This avoids relying on KeepAlive/throttle timing after a clean no-work
+    exit. Failures are non-fatal: workers may still wake on their own.
+    """
+    labels = _worker_launch_labels(engine)
+    if not labels:
+        return []
+    uid = str(os.getuid())
+    attempted = []
+    for label in labels:
+        attempted.append(label)
+        try:
+            subprocess.run(
+                ["launchctl", "kickstart", f"gui/{uid}/{label}"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return attempted
 
 
 def move_task(task_id, from_state, to_state, reason="", mutator=None):
@@ -1466,6 +1511,10 @@ def reset_task_for_retry(task_id, from_state, *, reason, source=None, mutator=No
         feature_id=feature_id_holder["value"],
         details={"from_state": from_state, "reason": reason, "attempt": new_attempt_holder["value"]},
     )
+    found = find_task(task_id, states=("queued",))
+    if found:
+        _, task = found
+        _nudge_engine_workers(task.get("engine"))
     return out
 
 
@@ -4798,14 +4847,44 @@ def queue_counts():
 
 
 def engine_outstanding():
-    """Count active tasks per engine across queued/claimed/running only.
+    """Count per-engine backlog across queued/claimed/running.
 
-    Used by tick_planner to gate further decomposition when the pipeline is
-    already carrying work. awaiting-review/awaiting-qa are excluded — those are
-    pipeline holding states picked up by their own tickers.
+    Used by producer ticks such as planner/memory-synthesis to apply
+    backpressure when the pipeline is already carrying work. awaiting-review
+    / awaiting-qa are excluded — those are pipeline holding states picked up
+    by their own tickers.
     """
     counts = {"claude": 0, "codex": 0, "qa": 0}
     for state in ("queued", "claimed", "running"):
+        for p in queue_dir(state).glob("*.json"):
+            t = read_json(p, {})
+            eng = t.get("engine")
+            if eng in counts:
+                counts[eng] += 1
+    return counts
+
+
+def engine_active_counts():
+    """Count active slot occupancy per engine across claimed/running only.
+
+    Used by consumer ticks that should gate on real slot use, not their own
+    queued driver tasks.
+
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     old = engine_active_counts.__globals__["QUEUE_ROOT"]
+    ...     engine_active_counts.__globals__["QUEUE_ROOT"] = root / "queue"
+    ...     write_json_atomic(engine_active_counts.__globals__["QUEUE_ROOT"] / "queued" / "q.json", {"engine": "qa"})
+    ...     write_json_atomic(engine_active_counts.__globals__["QUEUE_ROOT"] / "claimed" / "c.json", {"engine": "qa"})
+    ...     write_json_atomic(engine_active_counts.__globals__["QUEUE_ROOT"] / "running" / "r.json", {"engine": "codex"})
+    ...     out = engine_active_counts()
+    ...     engine_active_counts.__globals__["QUEUE_ROOT"] = old
+    >>> out == {"claude": 0, "codex": 1, "qa": 1}
+    True
+    """
+    counts = {"claude": 0, "codex": 0, "qa": 0}
+    for state in ("claimed", "running"):
         for p in queue_dir(state).glob("*.json"):
             t = read_json(p, {})
             eng = t.get("engine")
@@ -5111,10 +5190,10 @@ def tick_reviewer():
     Each reviewer task claims the oldest awaiting-review target at run time and
     transitions it to awaiting-qa or failed based on the review verdict.
     """
-    outstanding = engine_outstanding()
-    if outstanding.get("claude", 0) > 0:
+    active = engine_active_counts()
+    if active.get("claude", 0) > 0:
         write_agent_status(
-            "reviewer", "gated", f"Gated — claude slot busy: claude={outstanding['claude']}"
+            "reviewer", "gated", f"Gated — claude slot busy: claude={active['claude']}"
         )
         return
     # Count awaiting-review per project.
@@ -5162,10 +5241,10 @@ def tick_qa():
     Each driver task claims the oldest awaiting-qa target at run time and
     runs smoke.sh in that target's worktree.
     """
-    outstanding = engine_outstanding()
-    if outstanding.get("qa", 0) > 0:
+    active = engine_active_counts()
+    if active.get("qa", 0) > 0:
         write_agent_status(
-            "qa", "gated", f"Gated — qa slot busy: qa={outstanding['qa']}"
+            "qa", "gated", f"Gated — qa slot busy: qa={active['qa']}"
         )
         return
     aq_by_project = {}
