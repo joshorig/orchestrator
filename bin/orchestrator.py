@@ -1471,7 +1471,9 @@ def reset_task_for_retry(task_id, from_state, *, reason, source=None, mutator=No
     >>> with tempfile.TemporaryDirectory() as tmp:
     ...     root = pathlib.Path(tmp)
     ...     old_root = reset_task_for_retry.__globals__["QUEUE_ROOT"]
+    ...     old_subprocess = reset_task_for_retry.__globals__["subprocess"]
     ...     reset_task_for_retry.__globals__["QUEUE_ROOT"] = root / "queue"
+    ...     reset_task_for_retry.__globals__["subprocess"] = subprocess
     ...     task = new_task(role="implementer", engine="codex", project="demo", summary="x", source="test")
     ...     task["task_id"] = "task-1"
     ...     task["state"] = "failed"
@@ -1482,6 +1484,7 @@ def reset_task_for_retry(task_id, from_state, *, reason, source=None, mutator=No
     ...     _ = reset_task_for_retry("task-1", "failed", reason="retry", source="doctest")
     ...     out = read_json(task_path("task-1", "queued"))
     ...     reset_task_for_retry.__globals__["QUEUE_ROOT"] = old_root
+    ...     reset_task_for_retry.__globals__["subprocess"] = old_subprocess
     >>> (out["attempt"], out["failure"] is None, out["attempt_history"][0]["snapshot"]["failure"], out["attempt_history"][0]["retry_source"])
     (2, True, 'boom', 'doctest')
     """
@@ -2539,18 +2542,19 @@ def pr_sweep(dry_run=False):
     ...     pr_sweep.__globals__["get_project"] = lambda config, name: config["projects"][0]
     ...     pr_sweep.__globals__["_extract_actionable_comments"] = lambda info, handled: []
     ...     pr_sweep.__globals__["_extract_failed_checks"] = lambda info: [{"name": "unresolved-review-threads", "conclusion": "FAILURE", "details_url": "https://example/check"}]
-    ...     pr_sweep.__globals__["_enqueue_pr_feedback"] = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not enqueue"))
+    ...     calls = []
+    ...     pr_sweep.__globals__["_enqueue_pr_feedback"] = lambda *args, **kwargs: calls.append(kwargs) or "task-check-fix-escalated"
     ...     pr_sweep.__globals__["_write_pr_alert"] = lambda *args, **kwargs: alerts.append(args) or None
     ...     pr_sweep.__globals__["_unresolved_bot_review_threads"] = lambda *args, **kwargs: []
     ...     pr_sweep.__globals__["now_iso"] = lambda: "2026-04-14T22:46:35"
     ...     pr_sweep.__globals__["subprocess"] = FakeSubprocess()
     ...     result = pr_sweep()
     ...     saved = json.loads(task_path.read_text())
-    ...     observed = (result, alerts, saved["pr_sweep"]["failing_checks"], saved["pr_sweep"]["last_merge_state"])
+    ...     observed = (result, len(calls), saved["pr_sweep"]["last_feedback_reason"], saved["pr_sweep"]["feedback_task_id"], saved["pr_sweep"]["failing_checks"])
     ...     for key, value in original.items():
     ...         pr_sweep.__globals__[key] = value
     >>> observed
-    ((1, 0, 0, 0, 1), [], ['unresolved-review-threads'], 'UNSTABLE')
+    ((1, 0, 1, 0, 0), 1, 'checks', 'task-check-fix-escalated', ['unresolved-review-threads'])
 
     >>> import json, pathlib, tempfile, types
     >>> with tempfile.TemporaryDirectory() as tmp:
@@ -2739,18 +2743,19 @@ def pr_sweep(dry_run=False):
     ...     pr_sweep.__globals__["get_project"] = lambda config, name: config["projects"][0]
     ...     pr_sweep.__globals__["_extract_actionable_comments"] = lambda info, handled: []
     ...     pr_sweep.__globals__["_extract_failed_checks"] = lambda info: [{"name": "unresolved-bot-review", "conclusion": "FAILURE", "details_url": "https://example/check"}]
-    ...     pr_sweep.__globals__["_enqueue_feature_pr_feedback"] = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not enqueue"))
+    ...     calls = []
+    ...     pr_sweep.__globals__["_enqueue_feature_pr_feedback"] = lambda *args, **kwargs: calls.append(kwargs) or "task-feature-check-fix-escalated"
     ...     pr_sweep.__globals__["_write_pr_alert"] = lambda *args, **kwargs: alerts.append(args) or None
     ...     pr_sweep.__globals__["_unresolved_bot_review_threads"] = lambda *args, **kwargs: []
     ...     pr_sweep.__globals__["now_iso"] = lambda: "2026-04-14T22:46:35"
     ...     pr_sweep.__globals__["subprocess"] = FakeSubprocess()
     ...     result = pr_sweep()
     ...     saved = json.loads(feature_path.read_text())
-    ...     observed = (result, alerts, saved["final_pr_sweep"]["failing_checks"], saved["final_pr_sweep"]["last_merge_state"])
+    ...     observed = (result, len(calls), saved["final_pr_sweep"]["last_feedback_reason"], saved["final_pr_sweep"]["feedback_task_id"], saved["final_pr_sweep"]["failing_checks"])
     ...     for key, value in original.items():
     ...         pr_sweep.__globals__[key] = value
     >>> observed
-    ((1, 0, 0, 0, 1), [], ['unresolved-bot-review'], 'UNSTABLE')
+    ((1, 0, 1, 0, 0), 1, 'checks', 'task-feature-check-fix-escalated', ['unresolved-bot-review'])
 
     >>> import json, pathlib, tempfile, types
     >>> with tempfile.TemporaryDirectory() as tmp:
