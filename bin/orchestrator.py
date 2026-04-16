@@ -3078,20 +3078,61 @@ def pr_sweep(dry_run=False):
                     "feedback_rounds": rounds + 1,
                     "last_feedback_reason": "unresolved_bot_review_threads",
                     "feedback_task_id": feedback_task_id,
-                    "handled_comment_ids": handled_ids + [c["id"] for c in new_thread_comments],
+                    "handled_comment_ids": _merge_comment_ids(handled_ids, new_thread_comments),
                     "unresolved_bot_threads": count,
                 }))
                 fb_enqueued += 1
                 continue
-            # All unresolved threads are already in handled_comment_ids —
-            # a previous round is in flight or its fix failed to satisfy
-            # the bot and no new comment has landed. Do NOT fall through
-            # to Case 4 (would merge an un-green PR); stamp and skip.
+            guard_task_id = sweep.get("feedback_task_id")
+            if guard_task_id and _task_exists_in_queue(guard_task_id):
+                record_pr_sweep_guard_skip("task_unresolved_bot_review_threads")
+                task = update_task_in_place(task_file, stamp_sweep({
+                    "last_mergeable": mergeable,
+                    "last_merge_state": merge_state,
+                    "unresolved_bot_threads": count,
+                }))
+                continue
+            if rounds >= PR_SWEEP_MAX_FEEDBACK_ROUNDS:
+                if sweep.get("escalated_comments"):
+                    task = update_task_in_place(task_file, stamp_sweep({
+                        "last_mergeable": mergeable,
+                        "last_merge_state": merge_state,
+                        "unresolved_bot_threads": count,
+                    }))
+                    skipped += 1
+                    continue
+                _write_pr_alert(
+                    project_name, task.get("task_id"), pr_number,
+                    f"exhausted {rounds} pr-feedback rounds, "
+                    f"{count} unresolved bot review thread(s) remain unresolved",
+                    pr_url,
+                )
+                task = update_task_in_place(task_file, stamp_sweep({
+                    "last_mergeable": mergeable,
+                    "last_merge_state": merge_state,
+                    "escalated_comments": True,
+                    "unresolved_bot_threads": count,
+                }))
+                alerted += 1
+                continue
+            if dry_run:
+                print(f"DRY-RUN pr-sweep {task.get('task_id')}: would retry "
+                      f"feedback for {count} unresolved bot review thread(s)")
+                continue
+            feedback_task_id = _enqueue_pr_feedback(
+                task, project_name, pr_number, base_ref,
+                conflicts=False, comments=unresolved_bot_threads, check_failures=[],
+            )
             task = update_task_in_place(task_file, stamp_sweep({
                 "last_mergeable": mergeable,
+                "last_merge_state": merge_state,
+                "feedback_rounds": rounds + 1,
+                "last_feedback_reason": "unresolved_bot_review_threads_retry",
+                "feedback_task_id": feedback_task_id,
+                "handled_comment_ids": _merge_comment_ids(handled_ids, unresolved_bot_threads),
                 "unresolved_bot_threads": count,
             }))
-            skipped += 1
+            fb_enqueued += 1
             continue
 
         # Case 3: waiting on review / checks. Don't merge, don't alert — just stamp.
@@ -3137,9 +3178,10 @@ def pr_sweep(dry_run=False):
             if dry_run:
                 print(f"DRY-RUN pr-sweep {task.get('task_id')}: would enqueue feedback for failed checks")
                 continue
+            check_comments = unresolved_bot_threads if _checks_require_thread_feedback(failed_checks) else []
             feedback_task_id = _enqueue_pr_feedback(
                 task, project_name, pr_number, base_ref,
-                conflicts=False, comments=[], check_failures=failed_checks,
+                conflicts=False, comments=check_comments, check_failures=failed_checks,
             )
             task = update_task_in_place(task_file, stamp_sweep({
                 "last_mergeable": mergeable,
@@ -3147,6 +3189,7 @@ def pr_sweep(dry_run=False):
                 "feedback_rounds": rounds + 1,
                 "last_feedback_reason": "checks",
                 "feedback_task_id": feedback_task_id,
+                "handled_comment_ids": _merge_comment_ids(handled_ids, check_comments),
                 "failing_checks": [c["name"] for c in failed_checks],
             }))
             fb_enqueued += 1
@@ -3334,7 +3377,7 @@ def pr_sweep(dry_run=False):
                 "last_feedback_reason": "conflict",
                 "feedback_task_id": feedback_task_id,
                 "feedback_task_dispatched_at": now_iso(),
-                "handled_comment_ids": handled_ids + [c["id"] for c in actionable + new_thread_comments if c.get("id")],
+                "handled_comment_ids": _merge_comment_ids(handled_ids, actionable + new_thread_comments),
                 "unresolved_bot_threads": len(unresolved_bot_threads),
                 "last_mergeable": mergeable,
                 "last_merge_state": merge_state,
@@ -3393,7 +3436,68 @@ def pr_sweep(dry_run=False):
                 "last_feedback_reason": last_reason,
                 "feedback_task_id": feedback_task_id,
                 "feedback_task_dispatched_at": now_iso(),
-                "handled_comment_ids": handled_ids + [c["id"] for c in feedback_comments if c.get("id")],
+                "handled_comment_ids": _merge_comment_ids(handled_ids, feedback_comments),
+                "unresolved_bot_threads": len(unresolved_bot_threads),
+                "last_mergeable": info.get("mergeable", "UNKNOWN"),
+                "last_merge_state": info.get("mergeStateStatus", ""),
+            }))
+            fb_enqueued += 1
+            continue
+        if unresolved_bot_threads:
+            if rounds >= PR_SWEEP_MAX_FEEDBACK_ROUNDS:
+                if sweep.get("escalated_comments"):
+                    update_feature(feature_id, stamp_feature_sweep({
+                        "last_mergeable": info.get("mergeable", "UNKNOWN"),
+                        "last_merge_state": info.get("mergeStateStatus", ""),
+                        "unresolved_bot_threads": len(unresolved_bot_threads),
+                    }))
+                    skipped += 1
+                    continue
+                _write_pr_alert(
+                    project_name, feature_id, pr_number,
+                    f"exhausted {rounds} feature-pr feedback rounds, "
+                    f"{len(unresolved_bot_threads)} unresolved bot review thread(s) remain unresolved",
+                    pr_url,
+                )
+                update_feature(feature_id, stamp_feature_sweep({
+                    "escalated_comments": True,
+                    "last_mergeable": info.get("mergeable", "UNKNOWN"),
+                    "last_merge_state": info.get("mergeStateStatus", ""),
+                    "unresolved_bot_threads": len(unresolved_bot_threads),
+                }))
+                alerted += 1
+                continue
+            guard_task_id = sweep.get("feedback_task_id")
+            if guard_task_id and _task_exists_in_queue(guard_task_id):
+                record_pr_sweep_guard_skip("feature_feedback")
+                update_feature(feature_id, stamp_feature_sweep({
+                    "last_mergeable": info.get("mergeable", "UNKNOWN"),
+                    "last_merge_state": info.get("mergeStateStatus", ""),
+                    "unresolved_bot_threads": len(unresolved_bot_threads),
+                }))
+                continue
+            if branch_repair_in_flight:
+                record_pr_sweep_guard_skip("feature_branch_repair")
+                update_feature(feature_id, stamp_feature_sweep({
+                    "last_mergeable": info.get("mergeable", "UNKNOWN"),
+                    "last_merge_state": info.get("mergeStateStatus", ""),
+                    "unresolved_bot_threads": len(unresolved_bot_threads),
+                }))
+                continue
+            if dry_run:
+                print(f"DRY-RUN pr-sweep feature {feature_id}: would retry feedback for "
+                      f"{len(unresolved_bot_threads)} unresolved bot review thread(s)")
+                continue
+            feedback_task_id = _enqueue_feature_pr_feedback(
+                feature, project_name, pr_number,
+                comments=unresolved_bot_threads, check_failures=[], conflicts=False,
+            )
+            update_feature(feature_id, stamp_feature_sweep({
+                "feedback_rounds": rounds + 1,
+                "last_feedback_reason": "unresolved_bot_review_threads_retry",
+                "feedback_task_id": feedback_task_id,
+                "feedback_task_dispatched_at": now_iso(),
+                "handled_comment_ids": _merge_comment_ids(handled_ids, unresolved_bot_threads),
                 "unresolved_bot_threads": len(unresolved_bot_threads),
                 "last_mergeable": info.get("mergeable", "UNKNOWN"),
                 "last_merge_state": info.get("mergeStateStatus", ""),
@@ -3443,14 +3547,16 @@ def pr_sweep(dry_run=False):
             if dry_run:
                 print(f"DRY-RUN pr-sweep feature {feature_id}: would enqueue feedback for failed checks")
                 continue
+            check_comments = unresolved_bot_threads if _checks_require_thread_feedback(failed_checks) else []
             feedback_task_id = _enqueue_feature_pr_feedback(
-                feature, project_name, pr_number, comments=[], check_failures=failed_checks, conflicts=False,
+                feature, project_name, pr_number, comments=check_comments, check_failures=failed_checks, conflicts=False,
             )
             update_feature(feature_id, stamp_feature_sweep({
                 "feedback_rounds": rounds + 1,
                 "last_feedback_reason": "checks",
                 "feedback_task_id": feedback_task_id,
                 "feedback_task_dispatched_at": now_iso(),
+                "handled_comment_ids": _merge_comment_ids(handled_ids, check_comments),
                 "failing_checks": [c["name"] for c in failed_checks],
                 "last_mergeable": info.get("mergeable", "UNKNOWN"),
                 "last_merge_state": info.get("mergeStateStatus", ""),
@@ -3672,6 +3778,36 @@ def _enqueue_feature_pr_feedback(feature, project_name, pr_number, *, comments, 
     )
     enqueue_task(task)
     return task["task_id"]
+
+
+def _merge_comment_ids(existing_ids, comments):
+    merged = list(existing_ids or [])
+    seen = {str(cid) for cid in merged if cid is not None}
+    for comment in comments or []:
+        cid = comment.get("id")
+        if cid is None:
+            continue
+        cid = str(cid)
+        if cid in seen:
+            continue
+        seen.add(cid)
+        merged.append(cid)
+    return merged
+
+
+def _checks_require_thread_feedback(failed_checks):
+    """Whether the failing check set means unresolved review threads still need fixing.
+
+    >>> _checks_require_thread_feedback([{"name": "unresolved-review-threads"}])
+    True
+    >>> _checks_require_thread_feedback([{"name": "CI"}])
+    False
+    """
+    for check in failed_checks or []:
+        name = str(check.get("name") or "").lower()
+        if "unresolved" in name and "review" in name:
+            return True
+    return False
 
 
 def _load_feature_children(feature):
@@ -6372,6 +6508,61 @@ def _follow_up_frontier_key(item):
     )
 
 
+def _follow_up_repair_key(item):
+    """Group repeated repair attempts so older superseded lanes don't own the frontier.
+
+    >>> _follow_up_repair_key({"task_id": "t1", "task": {"feature_id": "f1", "engine_args": {"mode": "feature-pr-feedback", "feature_pr_number": 21}}})
+    ('feature-pr-feedback', 'f1', 21)
+    >>> _follow_up_repair_key({"task_id": "t2", "task": {"feature_id": "f1", "engine_args": {"mode": "pr-feedback", "pr_number": 7}, "parent_task_id": "task-parent"}})
+    ('pr-feedback', 'task-parent', 7)
+    """
+    task = item.get("task") or {}
+    eargs = task.get("engine_args") or {}
+    mode = eargs.get("mode")
+    if mode == "feature-pr-feedback":
+        return ("feature-pr-feedback", task.get("feature_id"), eargs.get("feature_pr_number"))
+    if mode == "pr-feedback":
+        return ("pr-feedback", task.get("parent_task_id"), eargs.get("pr_number"))
+    return None
+
+
+def _suppress_superseded_follow_ups(items):
+    """Drop older retry attempts once a newer task exists for the same repair lane.
+
+    >>> items = [
+    ...     {"task_id": "task-old", "state": "failed", "task": {"created_at": "2026-04-16T12:00:00", "feature_id": "f1", "engine_args": {"mode": "feature-pr-feedback", "feature_pr_number": 21}}},
+    ...     {"task_id": "task-new", "state": "failed", "task": {"created_at": "2026-04-16T12:05:00", "feature_id": "f1", "engine_args": {"mode": "feature-pr-feedback", "feature_pr_number": 21}}},
+    ... ]
+    >>> [item["task_id"] for item in _suppress_superseded_follow_ups(items)]
+    ['task-new']
+    """
+    latest = {}
+    for item in items:
+        key = _follow_up_repair_key(item)
+        if key is None:
+            continue
+        marker = (
+            (item.get("task") or {}).get("created_at") or "",
+            item.get("task_id") or "",
+        )
+        if marker > latest.get(key, ("", "")):
+            latest[key] = marker
+
+    kept = []
+    for item in items:
+        key = _follow_up_repair_key(item)
+        if key is None:
+            kept.append(item)
+            continue
+        marker = (
+            (item.get("task") or {}).get("created_at") or "",
+            item.get("task_id") or "",
+        )
+        if marker == latest.get(key):
+            kept.append(item)
+    return kept
+
+
 def feature_workflow_summary(feature):
     """Build a compact workflow summary with event-backed timing for the frontier task."""
     feature_id = feature.get("feature_id")
@@ -6403,6 +6594,7 @@ def feature_workflow_summary(feature):
             if item.get("state") == "done":
                 continue
             follow_ups.append(item)
+        follow_ups = _suppress_superseded_follow_ups(follow_ups)
         follow_ups.sort(key=_follow_up_frontier_key)
         if follow_ups:
             frontier = follow_ups[0]
