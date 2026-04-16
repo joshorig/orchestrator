@@ -4788,6 +4788,87 @@ def agent_statuses():
     return [read_json(p, {}) for p in sorted(AGENT_STATE_DIR.glob("*.json"))]
 
 
+def _matching_tasks(*, states, engine=None, role=None, source=None):
+    tasks = []
+    for state in states:
+        for p in sorted(queue_dir(state).glob("*.json")):
+            task = read_json(p, {})
+            if not task:
+                continue
+            if engine and task.get("engine") != engine:
+                continue
+            if role and task.get("role") != role:
+                continue
+            if source and task.get("source") != source:
+                continue
+            tasks.append((state, task))
+    return tasks
+
+
+def _format_status_task_detail(tasks):
+    if not tasks:
+        return ""
+    task_ids = [task.get("task_id") or "-" for _, task in tasks]
+    if len(task_ids) == 1:
+        return task_ids[0]
+    return f"{task_ids[0]} (+{len(task_ids) - 1} more)"
+
+
+def effective_agent_statuses():
+    """Return operator-facing agent statuses reconciled with live queue state."""
+    rows = {row.get("role"): row for row in agent_statuses() if row.get("role")}
+
+    for slot in ("claude", "codex", "qa"):
+        role = f"worker-{slot}"
+        active = _matching_tasks(states=("claimed", "running"), engine=slot)
+        row = dict(rows.get(role) or {"role": role, "updated_at": now_iso()})
+        if active:
+            row["status"] = "running"
+            row["detail"] = _format_status_task_detail(active)
+        else:
+            row["status"] = "idle"
+            row["detail"] = ""
+        rows[role] = row
+
+    reviewer_active = _matching_tasks(states=("claimed", "running"), engine="claude", role="reviewer", source="tick-reviewer")
+    reviewer_queued = _matching_tasks(states=("queued",), engine="claude", role="reviewer", source="tick-reviewer")
+    reviewer_pending = len(list(queue_dir("awaiting-review").glob("*.json")))
+    row = dict(rows.get("reviewer") or {"role": "reviewer", "updated_at": now_iso()})
+    if reviewer_active:
+        row["status"] = "running"
+        row["detail"] = f"Reviewing {reviewer_pending} pending via {_format_status_task_detail(reviewer_active)}"
+    elif reviewer_queued:
+        row["status"] = "queued"
+        row["detail"] = f"Reviewer queued for {reviewer_pending} pending via {_format_status_task_detail(reviewer_queued)}"
+    elif reviewer_pending:
+        row["status"] = "idle"
+        row["detail"] = f"{reviewer_pending} awaiting-review without queued reviewer"
+    else:
+        row["status"] = "idle"
+        row["detail"] = "No awaiting-review work."
+    rows["reviewer"] = row
+
+    qa_active = _matching_tasks(states=("claimed", "running"), engine="qa", role="qa", source="tick-qa")
+    qa_queued = _matching_tasks(states=("queued",), engine="qa", role="qa", source="tick-qa")
+    qa_pending = len(list(queue_dir("awaiting-qa").glob("*.json")))
+    row = dict(rows.get("qa") or {"role": "qa", "updated_at": now_iso()})
+    if qa_active:
+        row["status"] = "running"
+        row["detail"] = f"QA on {qa_pending} pending via {_format_status_task_detail(qa_active)}"
+    elif qa_queued:
+        row["status"] = "queued"
+        row["detail"] = f"QA driver queued for {qa_pending} pending via {_format_status_task_detail(qa_queued)}"
+    elif qa_pending:
+        row["status"] = "idle"
+        row["detail"] = f"{qa_pending} awaiting-qa without queued QA driver"
+    else:
+        row["status"] = "idle"
+        row["detail"] = "No awaiting-qa work."
+    rows["qa"] = row
+
+    return [rows[key] for key in sorted(rows)]
+
+
 def planner_disabled(project_name):
     """Return True when planner is runtime-disabled for a project.
 
@@ -5114,7 +5195,7 @@ def tick_planner():
     outstanding = engine_outstanding()
     backed_up = {e: n for e, n in outstanding.items() if n > 1}
     if backed_up:
-        msg = "Gated — slots busy: " + ", ".join(f"{e}={n}" for e, n in sorted(backed_up.items()))
+        msg = "Gated — backlog busy: " + ", ".join(f"{e}={n}" for e, n in sorted(backed_up.items()))
         write_agent_status("planner", "gated", msg)
         return
     write_agent_status("planner", "running", "Refreshing queue from repo-memory.")
@@ -5209,9 +5290,13 @@ def tick_reviewer():
     write_agent_status("reviewer", "running", f"Queueing reviewer for {len(ar_by_project)} project(s).")
     cfg = load_config()
     enqueued = 0
+    covered = []
     for project in cfg["projects"]:
         name = project["name"]
         if name not in ar_by_project:
+            continue
+        if has_project_task(project=name, engine="claude", role="reviewer", source="tick-reviewer"):
+            covered.append(name)
             continue
         memdir = pathlib.Path(project["path"]) / "repo-memory"
         if not (memdir / "CURRENT_STATE.md").exists():
@@ -5228,7 +5313,13 @@ def tick_reviewer():
         enqueued += 1
         # Only one reviewer in flight at a time across the claude slot.
         break
-    write_agent_status("reviewer", "idle", f"Reviewer enqueued ({enqueued}).")
+    if enqueued:
+        detail = f"Reviewer enqueued ({enqueued})."
+    elif covered:
+        detail = f"Reviewer already queued/running for: {','.join(covered)}"
+    else:
+        detail = "No reviewer enqueued."
+    write_agent_status("reviewer", "idle", detail)
 
 
 def tick_qa():
@@ -5259,9 +5350,13 @@ def tick_qa():
     write_agent_status("qa", "running", f"Queueing qa smoke for {len(aq_by_project)} project(s).")
     cfg = load_config()
     enqueued = 0
+    covered = []
     for project in cfg["projects"]:
         name = project["name"]
         if name not in aq_by_project:
+            continue
+        if has_project_task(project=name, engine="qa", role="qa", source="tick-qa"):
+            covered.append(name)
             continue
         memdir = pathlib.Path(project["path"]) / "repo-memory"
         if not (memdir / "CURRENT_STATE.md").exists():
@@ -5281,7 +5376,13 @@ def tick_qa():
         enqueued += 1
         # Single qa worker; one driver in flight at a time.
         break
-    write_agent_status("qa", "idle", f"QA driver enqueued ({enqueued}).")
+    if enqueued:
+        detail = f"QA driver enqueued ({enqueued})."
+    elif covered:
+        detail = f"QA driver already queued/running for: {','.join(covered)}"
+    else:
+        detail = "No QA driver enqueued."
+    write_agent_status("qa", "idle", detail)
 
 
 def tick_regression(project_name):
@@ -5366,7 +5467,7 @@ def report(kind):
     out = REPORT_DIR / f"{kind}_{ts}.md"
     lines = [f"# {kind.title()} Status Report", "", f"Generated: {now_iso()}", ""]
     lines.append("## Agent status")
-    for s in agent_statuses():
+    for s in effective_agent_statuses():
         lines.append(f"- **{s.get('role')}**: {s.get('status')} — {s.get('detail','')}")
     lines += ["", "## Queue"]
     counts = queue_counts()
@@ -5489,6 +5590,25 @@ def has_in_flight_task(*, project, braid_template):
     return False
 
 
+def has_project_task(*, project, engine=None, source=None, role=None, states=("queued", "claimed", "running")):
+    """Return True when a matching task already exists for the project."""
+    for state in states:
+        for p in queue_dir(state).glob("*.json"):
+            task = read_json(p, {})
+            if not task:
+                continue
+            if task.get("project") != project:
+                continue
+            if engine and task.get("engine") != engine:
+                continue
+            if source and task.get("source") != source:
+                continue
+            if role and task.get("role") != role:
+                continue
+            return True
+    return False
+
+
 def tick_memory_synthesis(force=False):
     """Queue weekly memory-synthesis tasks for stale repo-memory state."""
     outstanding = engine_outstanding()
@@ -5566,7 +5686,7 @@ def tick_canary_workflows(force=False):
     outstanding = engine_outstanding()
     backed_up = {engine: n for engine, n in outstanding.items() if n > 1}
     if backed_up:
-        msg = "Gated — slots busy: " + ", ".join(f"{e}={n}" for e, n in sorted(backed_up.items()))
+        msg = "Gated — backlog busy: " + ", ".join(f"{e}={n}" for e, n in sorted(backed_up.items()))
         write_agent_status("canary", "gated", msg)
         return {"enqueued": 0, "reason": "gated"}
 
@@ -5697,7 +5817,7 @@ def enqueue_self_repair(*, summary, evidence, issue_kind="runtime_bug", source="
 def status_text():
     lines = ["devmini orchestrator status", f"({now_iso()})", ""]
     lines.append("Agents:")
-    for s in agent_statuses():
+    for s in effective_agent_statuses():
         lines.append(f"  {s.get('role')}: {s.get('status')} — {s.get('detail','')}")
     lines.append("")
     lines.append("Queue:")
@@ -6031,7 +6151,7 @@ def _workflow_snapshot():
 def _agent_status_snapshot():
     today = dt.datetime.now().date().isoformat()
     rows = []
-    for status in agent_statuses():
+    for status in effective_agent_statuses():
         updated_at = status.get("updated_at") or ""
         rows.append(
             {
@@ -6138,9 +6258,23 @@ def _feature_ready_for_finalize(feature):
     )
 
 
+def _feature_related_tasks(feature_id):
+    tasks = []
+    if not feature_id:
+        return tasks
+    for state in STATES:
+        for path in queue_dir(state).glob("*.json"):
+            task = read_json(path, {})
+            if task.get("feature_id") != feature_id:
+                continue
+            tasks.append({"task_id": task.get("task_id"), "state": state, "task": task})
+    return tasks
+
+
 def feature_workflow_summary(feature):
     """Build a compact workflow summary with event-backed timing for the frontier task."""
     feature_id = feature.get("feature_id")
+    child_ids = set(feature.get("child_task_ids", []))
     children = []
     for child_id in feature.get("child_task_ids", []):
         found = find_task(child_id)
@@ -6155,6 +6289,27 @@ def feature_workflow_summary(feature):
         if child["state"] != "done":
             frontier = child
             break
+
+    follow_ups = []
+    if frontier is None:
+        for item in _feature_related_tasks(feature_id):
+            task_id = item.get("task_id")
+            if task_id in child_ids:
+                continue
+            task = item.get("task") or {}
+            if task.get("role") == "planner":
+                continue
+            if item.get("state") == "done":
+                continue
+            follow_ups.append(item)
+        follow_ups.sort(
+            key=lambda item: (
+                (item.get("task") or {}).get("created_at") or "",
+                item.get("task_id") or "",
+            )
+        )
+        if follow_ups:
+            frontier = follow_ups[-1]
 
     planner = _latest_feature_planner_task(feature_id)
     planner_state = planner[0] if planner else None
@@ -6198,6 +6353,7 @@ def feature_workflow_summary(feature):
         "canary": dict(feature.get("canary") or {}),
         "self_repair": dict(feature.get("self_repair") or {}),
         "child_states": {item["task_id"]: item["state"] for item in children},
+        "follow_up_states": {item["task_id"]: item["state"] for item in follow_ups},
         "planner": {
             "task_id": planner_task.get("task_id") if planner_task else None,
             "state": planner_state,

@@ -16,7 +16,8 @@ You are the BRAID generator for devmini. Your single job: produce a Mermaid reas
 - **Conflicts:** the feature base has advanced and the PR is now CONFLICTING or DIRTY against `origin/<base_branch>`. Codex must rebase and resolve.
 - **Review comments:** one or more actionable review comments have been posted by an allowlisted author (`chatgpt-codex-connector`, `copilot`, `github-advanced-security`) or by an explicit `@devmini-orchestrator` / `@orchestrator` mention. Codex must read each comment, apply the requested fix, and verify nothing regressed.
 
-Both can be present in the same pass. The solver MUST handle the conflict branch first, then the comment branch, because conflict resolution can change the files a comment refers to.
+Both can be present in the same pass. The solver MUST handle the conflict branch first, then the failed-check branch, then the comment branch, because conflict resolution can change the files a comment or failing check refers to.
+If there are failing CI checks but no review comments, the graph must still have a valid traversal path: inspect the first failed `<check>`, apply the targeted fix, and loop until the failed-check set is clear before entering the comment-handling branch.
 
 The solver MUST NOT push. `worker.py` re-runs the repo smoke suite and force-pushes with `--force-with-lease` after `BRAID_OK` is emitted. Pushing from inside the graph is a topology error.
 
@@ -54,7 +55,7 @@ The graph should roughly flow:
 
 `Start → Read conflict flag → Read comment list → Check: baseline smoke → Rebase onto <base> (if conflicts) → Resolve <conflict_hunk> → Draft fix for <comment> → Commit fix → Check: conflicts resolved → Check: each comment addressed → Check: post-fix smoke → Check: no new files outside scope → Check: commit authored under agent identity → Revise: (on any failure) → End`
 
-Include a distinct sub-region for each `Check:` so the solver traverses them one at a time. The conflict-handling and comment-handling paths should be distinct sub-regions joined before the first post-fix `Check:`.
+Include a distinct sub-region for each `Check:` so the solver traverses them one at a time. The conflict-handling, failed-check, and comment-handling paths should be distinct sub-regions joined before the first post-fix `Check:`. A `check_failures`-only run must never dead-end at the routing branch.
 
 ## Output requirements
 

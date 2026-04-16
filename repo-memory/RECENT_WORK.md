@@ -4,6 +4,40 @@ _Append-only log. New entries go at the top. One entry per completed task or mil
 
 ---
 
+## 2026-04-16 — Feature workflow summary now includes follow-up repair tasks
+
+**Summary:** Fixed the workflow-summary blind spot where feature status only tracked original `child_task_ids`. That meant `pr-feedback` / `review-feedback` follow-up tasks could fail without becoming the feature frontier, so `workflow-check` would miss a genuinely blocked open feature. The summary now includes non-planner feature-scoped follow-up tasks and uses them as the frontier once the original child slices are done.
+
+**Changed:**
+- `bin/orchestrator.py` — added `_feature_related_tasks(feature_id)` to scan the queue tree for all tasks attached to a feature.
+- `bin/orchestrator.py` — `feature_workflow_summary()` now preserves child-slice frontier behavior first, then falls through to the newest non-done feature follow-up task when all original children are done.
+- `bin/orchestrator.py` — workflow summaries now expose `follow_up_states` alongside `child_states`, so reports and investigations can see blocked repair lanes explicitly.
+
+**Validation:** `python3 -m py_compile bin/orchestrator.py`, direct `feature_workflow_summary(feature-20260415-101058-14d56c)` inspection showing failed `task-20260416-021513-94e949` as the frontier, and `python3 bin/orchestrator.py workflow-check` auto-retrying that previously invisible `invalid_braid_refine` blocker.
+
+## 2026-04-16 — Reconcile operator status with live queue state
+
+**Summary:** Fixed the sticky agent-status problem where `status` and reports could keep showing old `gated` or `running` details long after the queue had moved on. Operator-facing status now derives live state for worker slots plus the reviewer/QA lanes from the actual queue instead of trusting the last `state/agents/*.json` write forever.
+
+**Changed:**
+- `bin/orchestrator.py` — added `_matching_tasks(...)` and `_format_status_task_detail(...)` helpers for queue-derived role inspection.
+- `bin/orchestrator.py` — added `effective_agent_statuses()` to reconcile `worker-{claude,codex,qa}`, `reviewer`, and `qa` against live `queued/claimed/running` task state plus `awaiting-review` / `awaiting-qa` backlog.
+- `bin/orchestrator.py` — switched `status_text()`, `report()`, and `_agent_status_snapshot()` to use the reconciled view instead of the raw persisted agent-status files.
+
+**Validation:** `python3 -m py_compile bin/orchestrator.py`, live `python3 bin/orchestrator.py status`, live `python3 bin/orchestrator.py report morning`, and direct inspection of `effective_agent_statuses()` showing QA/reviewer/workers aligned with queue reality.
+
+## 2026-04-16 — Prevent duplicate QA/reviewer drivers; align backlog guard messaging
+
+**Summary:** Closed the remaining duplicate-driver gap in the scheduler ticks. `tick-qa` and `tick-reviewer` could still emit a fresh per-project driver even when an older queued driver for the same project already existed, which created stale no-op backlog and made pickup issues look worse than they were. This pass also fixed the wording on planner/canary backlog gating so it no longer claims `slots busy` when the guard is really queue backpressure.
+
+**Changed:**
+- `bin/orchestrator.py` — added `has_project_task(...)` to detect same-project queued/claimed/running tasks by engine/source/role.
+- `bin/orchestrator.py` — `tick-qa()` now skips projects already covered by an existing `tick-qa` driver and reports `QA driver already queued/running ...` instead of enqueueing duplicates.
+- `bin/orchestrator.py` — `tick_reviewer()` now applies the same dedupe guard for reviewer drivers.
+- `bin/orchestrator.py` — planner/canary backlog guards now say `backlog busy` instead of `slots busy`, matching the actual use of `engine_outstanding()`.
+
+**Validation:** `python3 -m py_compile bin/orchestrator.py`, live `python3 bin/orchestrator.py qa`, live `python3 bin/orchestrator.py reviewer`, `python3 bin/orchestrator.py workflow-check`, and direct task-history verification that the previously suspicious queued QA driver was an old duplicate that claimed and no-op completed as `nothing awaiting-qa`.
+
 ## 2026-04-16 — Environment-health binary detection matches runtime candidate paths
 
 **Summary:** Fixed the false-positive `required binary missing: claude` environment-health reports. The runtime already knows how to locate Claude and Codex outside bare `PATH`, but `environment_health()` was only checking `shutil.which(...)`, so it could declare the binary missing even while the orchestrator could actually run it.
