@@ -1031,6 +1031,8 @@ def append_transition(task_id, from_state, to_state, reason=""):
     TRANSITIONS_LOG.parent.mkdir(parents=True, exist_ok=True)
     with TRANSITIONS_LOG.open("a") as f:
         f.write(f"{now_iso()}\t{task_id}\t{from_state}\t->\t{to_state}\t{reason}\n")
+        f.flush()
+        os.fsync(f.fileno())
 
 
 def make_blocker(code, *, summary=None, detail=None, source=None, confidence="high", retryable=None, metadata=None):
@@ -1784,14 +1786,23 @@ def reset_task_for_retry(task_id, from_state, *, reason, source=None, mutator=No
         if mutator is not None:
             mutator(task)
     out = move_task(task_id, from_state, "queued", reason=reason, mutator=mut)
+    removed_worktree = None
+    found = find_task(task_id, states=("queued",))
+    if found:
+        _, task = found
+        removed_worktree = _remove_task_worktree_if_present(task)
     append_event(
         source or "runtime",
         "retry_reset",
         task_id=task_id,
         feature_id=feature_id_holder["value"],
-        details={"from_state": from_state, "reason": reason, "attempt": new_attempt_holder["value"]},
+        details={
+            "from_state": from_state,
+            "reason": reason,
+            "attempt": new_attempt_holder["value"],
+            "worktree_cleanup": removed_worktree,
+        },
     )
-    found = find_task(task_id, states=("queued",))
     if found:
         _, task = found
         _nudge_engine_workers(task.get("engine"))
@@ -1933,8 +1944,42 @@ def pid_alive(pid):
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True
+        try:
+            proc = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "pid="],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return proc.returncode == 0 and bool((proc.stdout or "").strip())
     return True
+
+
+def _remove_task_worktree_if_present(task):
+    worktree = (task or {}).get("worktree")
+    if not worktree:
+        return False, "no worktree"
+    wt_path = pathlib.Path(worktree)
+    if not wt_path.exists():
+        return True, "worktree already absent"
+    proc = subprocess.run(
+        ["git", "-C", str(STATE_ROOT), "worktree", "remove", "--force", str(wt_path)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    if proc.returncode == 0:
+        return True, "git worktree remove --force"
+    try:
+        shutil.rmtree(wt_path)
+    except OSError as exc:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        return False, f"{detail[:160] or 'remove failed'}; fallback rmtree failed: {exc}"
+    return True, "fallback rmtree"
 
 
 def reap():
@@ -3125,6 +3170,17 @@ def pr_sweep(dry_run=False):
         if proc.returncode != 0:
             err = (proc.stderr or "").strip()[:200]
             print(f"pr-sweep {task.get('task_id')}: gh pr view failed: {err}")
+            if any(token in err.lower() for token in ("401", "unauthorized", "authentication", "forbidden")):
+                environment_health(refresh=True)
+                write_agent_status("pr-sweep", "failed", f"gh auth failure on {project_name}; sweep halted")
+                append_event(
+                    "pr-sweep",
+                    "auth_failure",
+                    task_id=task.get("task_id"),
+                    details={"project": project_name, "pr_number": pr_number, "error": err},
+                )
+                skipped += 1
+                return (checked, merged, fb_enqueued, alerted, skipped)
             skipped += 1
             continue
         try:
@@ -4082,13 +4138,16 @@ def _checks_require_thread_feedback(failed_checks):
 
 
 def _load_feature_children(feature):
-    """Load done/ child task JSONs for a feature, or return None if any missing."""
+    """Load child task JSONs for a feature across all queue states."""
     children = []
     for child_id in feature.get("child_task_ids", []):
-        child = read_json(task_path(child_id, "done"), None)
-        if child is None:
+        found = find_task(child_id)
+        if not found:
             print(f"feature-finalize {feature.get('feature_id')}: orphan child id {child_id}")
             return None
+        state, child = found
+        child = dict(child or {})
+        child["state"] = state
         children.append(child)
     return children
 
@@ -7402,6 +7461,56 @@ def _workflow_issue_from_summary(feature, workflow, config):
             }
     if feature_status == "open":
         if frontier.get("task_id") and frontier.get("state") not in (None, "done"):
+            if frontier.get("state") == "awaiting-review" and (frontier.get("age_seconds") or 0) >= 6 * 3600:
+                return {
+                    "feature_id": feature_id,
+                    "project": project["name"],
+                    "summary": feature.get("summary") or feature_id,
+                    "issue_key": f"awaiting-review-stale:{feature_id}:{frontier.get('task_id')}",
+                    "kind": "awaiting_review_stale",
+                    "task_id": frontier.get("task_id"),
+                    "task_state": frontier.get("state"),
+                    "blocker": make_blocker(
+                        "runtime_precondition_failed",
+                        summary="awaiting-review task is stale",
+                        detail=(
+                            f"frontier {frontier.get('task_id') or '-'} has stayed awaiting-review for "
+                            f"{frontier.get('age_text') or '-'}"
+                        ),
+                        source="workflow-check",
+                        retryable=True,
+                    ),
+                    "diagnosis": "awaiting-review frontier exceeded 6h SLA; requeue reviewer sweep",
+                    "workflow": workflow,
+                    "action": "enqueue_reviewer",
+                    "task": None,
+                    "policy": "awaiting_review_sla",
+                }
+            if frontier.get("state") == "awaiting-qa" and (frontier.get("age_seconds") or 0) >= 6 * 3600:
+                return {
+                    "feature_id": feature_id,
+                    "project": project["name"],
+                    "summary": feature.get("summary") or feature_id,
+                    "issue_key": f"awaiting-qa-stale:{feature_id}:{frontier.get('task_id')}",
+                    "kind": "awaiting_qa_stale",
+                    "task_id": frontier.get("task_id"),
+                    "task_state": frontier.get("state"),
+                    "blocker": make_blocker(
+                        "runtime_precondition_failed",
+                        summary="awaiting-qa task is stale",
+                        detail=(
+                            f"frontier {frontier.get('task_id') or '-'} has stayed awaiting-qa for "
+                            f"{frontier.get('age_text') or '-'}"
+                        ),
+                        source="workflow-check",
+                        retryable=True,
+                    ),
+                    "diagnosis": "awaiting-qa frontier exceeded 6h SLA; requeue QA sweep",
+                    "workflow": workflow,
+                    "action": "enqueue_qa",
+                    "task": None,
+                    "policy": "awaiting_qa_sla",
+                }
             if (
                 canary.get("enabled")
                 and frontier.get("age_seconds") is not None
@@ -7764,6 +7873,12 @@ def tick_workflow_check():
                     lambda: tick_canary_workflows(force=True),
                 )
                 outcome = f"canary scheduler result: {json.dumps(out, sort_keys=True)}"
+            elif action == "enqueue_reviewer":
+                cached_action("tick_reviewer", tick_reviewer)
+                outcome = "reviewer sweep enqueued"
+            elif action == "enqueue_qa":
+                cached_action("tick_qa", tick_qa)
+                outcome = "qa sweep enqueued"
             elif action == "enqueue_self_repair":
                 out = cached_action(
                     f"self_repair:{issue['issue_key']}",
