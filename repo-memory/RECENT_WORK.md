@@ -1,3 +1,10 @@
+## 2026-04-18 — Removed keychain-backed orchestrator creds
+
+**Summary:** Reverted orchestrator secret management to file-backed storage only. `bin/orchestrator.py` now reads and writes `config/gh-token`, `config/telegram.token`, and `config/claude.env` directly, while the `creds` CLI remains as a thin file-management wrapper so automation no longer depends on the macOS Security framework.
+
+- `bin/orchestrator.py` — removed macOS keychain helpers and switched secret loading/status/set/delete paths to file operations only.
+- `README.md`, `config/telegram.example.json`, `repo-memory/CURRENT_STATE.md` — updated operator guidance to describe file-backed credentials rather than keychain-backed storage.
+
 # devmini orchestrator — RECENT WORK
 
 _Append-only log. New entries go at the top. One entry per completed task or milestone. Historian role maintains this after each completed task; humans append during bootstrapping._

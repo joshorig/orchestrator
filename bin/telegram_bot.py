@@ -4,7 +4,7 @@
 Transport: long-polling `getUpdates`. Never a webhook (no public ports per security principles).
 
 Config: config/telegram.json beneath the orchestrator repo root (gitignored local override).
-Bot token can be provided there or via the orchestrator keychain-backed secret store.
+Bot token can be provided there or via the file-backed `telegram-bot-token` secret managed by orchestrator.
 Approved chats come from the orchestrator's dynamic allowlist state.
 
 Commands are dispatched through orchestrator.dispatch_telegram_command — shared with the

@@ -293,7 +293,7 @@ source bin/gh_env.sh
 gh auth status
 ```
 
-Runtime-managed credentials now support a keychain-backed path through the CLI:
+Runtime-managed credentials are file-backed and can be managed through the CLI:
 
 ```bash
 python3 bin/orchestrator.py creds status gh-token
@@ -312,7 +312,7 @@ launchctl setenv GH_TOKEN "$GH_TOKEN"
 
 ## Mobile control (Telegram)
 
-Long-polling bot at `bin/telegram_bot.py`. No public ports, no webhook. The bot token can come from the keychain-backed `telegram-bot-token` secret or `config/telegram.json`. Approved chats are read from `state/runtime/allowlist.json`, with optional bootstrap IDs still supported from `config/telegram.json`. Unknown chats are logged to `logs/telegram-reject.log`, but `/register [name]` is allowed so a new operator can request access. Reports written to `reports/` are auto-pushed every 60s.
+Long-polling bot at `bin/telegram_bot.py`. No public ports, no webhook. The bot token can come from the file-backed `telegram-bot-token` secret or `config/telegram.json`. Approved chats are read from `state/runtime/allowlist.json`, with optional bootstrap IDs still supported from `config/telegram.json`. Unknown chats are logged to `logs/telegram-reject.log`, but `/register [name]` is allowed so a new operator can request access. Reports written to `reports/` are auto-pushed every 60s.
 
 Commands: `/status`, `/queue`, `/planner`, `/reviewer`, `/qa`, `/cleanup`, `/ask <question>`, `/ask codex: <question>`, `/ask both: <question>`, `/regression <project>`, `/report morning|evening`, `/enqueue <summary>`, `/register [name]`, `/approve_operator <chat_id> [name]`, `/operators`. Unknown commands return the help string — no arbitrary shell.
 

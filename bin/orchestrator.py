@@ -520,22 +520,16 @@ CONTEXT_SOURCE_DEFAULTS = {
 }
 SECRET_SPECS = {
     "gh-token": {
-        "service": "devmini.orchestrator.gh-token",
-        "account": "gh-token",
         "label": "GitHub token",
         "env_var": "GH_TOKEN",
         "path": GH_TOKEN_PATH,
     },
     "telegram-bot-token": {
-        "service": "devmini.orchestrator.telegram-bot-token",
-        "account": "telegram-bot",
         "label": "Telegram bot token",
         "env_var": "TELEGRAM_BOT_TOKEN",
         "path": STATE_ROOT / "config" / "telegram.token",
     },
     "claude-env": {
-        "service": "devmini.orchestrator.claude-env",
-        "account": "claude-env",
         "label": "Claude env blob",
         "env_var": None,
         "path": STATE_ROOT / "config" / "claude.env",
@@ -570,11 +564,11 @@ def now_iso():
 
 
 def load_gh_token_env():
-    """Load GH_TOKEN from keychain or config/gh-token if the process environment lacks it."""
+    """Load GH_TOKEN from config/gh-token if the process environment lacks it."""
     token = os.environ.get("GH_TOKEN", "").strip()
     if token:
         return True
-    token = keychain_secret_get("gh-token")
+    token = secret_value("gh-token")
     if not token:
         return False
     os.environ["GH_TOKEN"] = token
@@ -585,14 +579,14 @@ def load_telegram_bot_token():
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     if token:
         return token
-    token = keychain_secret_get("telegram-bot-token")
+    token = secret_value("telegram-bot-token")
     if token:
         os.environ["TELEGRAM_BOT_TOKEN"] = token
     return token
 
 
 def load_claude_env_blob():
-    return keychain_secret_get("claude-env")
+    return secret_value("claude-env")
 
 def canonical_orchestrator_root():
     """Best-effort canonical checkout path for this repo, preferring branch main."""
@@ -645,20 +639,6 @@ def _read_json_if_exists(path):
     return json.loads(pathlib.Path(path).read_text())
 
 
-def _security_cmd(*args, timeout=15):
-    try:
-        proc = subprocess.run(
-            ["security", *args],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return False, "", str(exc)
-    return proc.returncode == 0, proc.stdout or "", proc.stderr or ""
-
-
 def _secret_spec(name):
     spec = SECRET_SPECS.get(name)
     if not spec:
@@ -666,7 +646,8 @@ def _secret_spec(name):
     return spec
 
 
-def _legacy_secret_value(spec):
+def secret_value(name):
+    spec = _secret_spec(name)
     path = pathlib.Path(spec["path"])
     try:
         return path.read_text().strip()
@@ -674,69 +655,38 @@ def _legacy_secret_value(spec):
         return ""
 
 
-def keychain_secret_get(name):
-    """Return a secret from the macOS Keychain, falling back to the legacy file.
-
-    >>> spec = {"service": "svc", "account": "acct", "path": pathlib.Path("/tmp/missing")}
-    >>> old = keychain_secret_get.__globals__["_security_cmd"]
-    >>> keychain_secret_get.__globals__["_security_cmd"] = lambda *args, **kwargs: (True, "sekrit\\n", "")
-    >>> keychain_secret_get.__globals__["SECRET_SPECS"]["_tmp"] = spec
-    >>> keychain_secret_get("_tmp")
-    'sekrit'
-    >>> keychain_secret_get.__globals__["_security_cmd"] = old
-    >>> _ = keychain_secret_get.__globals__["SECRET_SPECS"].pop("_tmp", None)
-    """
+def secret_set(name, value):
     spec = _secret_spec(name)
-    ok, stdout, _ = _security_cmd(
-        "find-generic-password",
-        "-s", spec["service"],
-        "-a", spec["account"],
-        "-w",
-    )
-    if ok:
-        return (stdout or "").strip()
-    return _legacy_secret_value(spec)
+    path = pathlib.Path(spec["path"])
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(value)
+        path.chmod(0o600)
+    except OSError as exc:
+        return False, str(exc)
+    return True, str(path)
 
 
-def keychain_secret_set(name, value):
+def secret_delete(name):
     spec = _secret_spec(name)
-    _security_cmd(
-        "delete-generic-password",
-        "-s", spec["service"],
-        "-a", spec["account"],
-    )
-    ok, stdout, stderr = _security_cmd(
-        "add-generic-password",
-        "-U",
-        "-s", spec["service"],
-        "-a", spec["account"],
-        "-w", value,
-        "-l", spec["label"],
-    )
-    detail = (stderr or stdout or "").strip()
-    return ok, detail or "ok"
-
-
-def keychain_secret_delete(name):
-    spec = _secret_spec(name)
-    ok, stdout, stderr = _security_cmd(
-        "delete-generic-password",
-        "-s", spec["service"],
-        "-a", spec["account"],
-    )
-    detail = (stderr or stdout or "").strip()
-    return ok, detail or "ok"
+    path = pathlib.Path(spec["path"])
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return True, str(path)
+    except OSError as exc:
+        return False, str(exc)
+    return True, str(path)
 
 
 def secret_status(name):
     spec = _secret_spec(name)
-    value = keychain_secret_get(name)
-    source = "keychain" if value and _legacy_secret_value(spec) != value else ("file" if value else "missing")
+    value = secret_value(name)
     return {
         "name": name,
         "label": spec["label"],
         "present": bool(value),
-        "source": source,
+        "source": "file" if value else "missing",
         "env_var": spec.get("env_var"),
         "path": str(spec["path"]),
     }
@@ -1356,7 +1306,7 @@ def environment_health(*, refresh=False):
                 "project": None,
                 "severity": "error",
                 "summary": "GH_TOKEN unavailable",
-                "detail": "missing GitHub token in env, keychain, and config/gh-token",
+                "detail": "missing GitHub token in env and config/gh-token",
             }
         )
     if not load_telegram_bot_token():
@@ -1367,7 +1317,7 @@ def environment_health(*, refresh=False):
                 "project": None,
                 "severity": "error",
                 "summary": "telegram bot token unavailable",
-                "detail": "store a token via `orchestrator.py creds set telegram-bot-token` or config/telegram.json",
+                "detail": "store a token in config/telegram.token or config/telegram.json",
             }
         )
     if not load_claude_env_blob() and not (STATE_ROOT / "config" / "claude.env").exists():
@@ -1378,7 +1328,7 @@ def environment_health(*, refresh=False):
                 "project": None,
                 "severity": "warning",
                 "summary": "claude env blob unavailable",
-                "detail": "store shared Claude env via `orchestrator.py creds set claude-env` or config/claude.env",
+                "detail": "store shared Claude env in config/claude.env",
             }
         )
     if not telegram_allowed_chat_ids():
@@ -9583,13 +9533,13 @@ def main(argv=None):
         if args.action == "status":
             print(json.dumps(secret_status(args.secret), sort_keys=True))
         elif args.action == "get":
-            print(keychain_secret_get(args.secret))
+            print(secret_value(args.secret))
         elif args.action == "set":
             value = args.value if args.value is not None else sys.stdin.read()
-            ok, detail = keychain_secret_set(args.secret, value.rstrip("\n"))
+            ok, detail = secret_set(args.secret, value.rstrip("\n"))
             print(json.dumps({"ok": ok, "detail": detail, "secret": args.secret}, sort_keys=True))
         elif args.action == "delete":
-            ok, detail = keychain_secret_delete(args.secret)
+            ok, detail = secret_delete(args.secret)
             print(json.dumps({"ok": ok, "detail": detail, "secret": args.secret}, sort_keys=True))
     elif args.cmd == "telegram-register":
         print(json.dumps(telegram_register_operator(args.chat_id, args.name), sort_keys=True))
