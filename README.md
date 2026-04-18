@@ -8,6 +8,9 @@ Always-on task orchestrator for agent-driven engineering work across canonical r
 # inspect state
 python3 bin/orchestrator.py status
 
+# reserve an isolated operator worktree before editing this repo
+python3 bin/orchestrator.py reserve-operator-worktree --name "runtime-guard-fix"
+
 # enqueue a manual codex task for lvc-standard
 python3 bin/orchestrator.py enqueue \
   --engine codex \
@@ -45,6 +48,16 @@ python3 bin/orchestrator.py cleanup-worktrees [--dry-run]
 # generate a status report (also pushed via telegram bot when running)
 python3 bin/orchestrator.py report morning
 ```
+
+## Repo Workspace Policy
+
+For `devmini-orchestrator` itself, do not use the canonical checkout as an edit workspace for ordinary work. Reserve a dedicated operator worktree first:
+
+```bash
+python3 bin/orchestrator.py reserve-operator-worktree --name "<short-purpose>"
+```
+
+That helper refuses by default if an active self-repair feature already owns the orchestrator control plane. Override only when you intentionally want to intervene in an already-active self-repair lane.
 
 ## Architecture
 

@@ -4815,6 +4815,63 @@ def _latest_successful_canary(project_name=None):
     return rows[0] if rows else None
 
 
+def list_self_repair_features(*, project_name=None, statuses=None):
+    feats = []
+    allowed = set(statuses or ())
+    for feature in list_features():
+        if not is_self_repair_feature(feature):
+            continue
+        if project_name is not None and feature.get("project") != project_name:
+            continue
+        if allowed and feature.get("status") not in allowed:
+            continue
+        feats.append(feature)
+    feats.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+    return feats
+
+
+def reserve_orchestrator_operator_worktree(name, *, allow_with_self_repair=False):
+    """Create a dedicated manual worktree for operator changes on this repo.
+
+    Refuses when a self-repair feature is already open unless explicitly
+    overridden. This keeps prompted/manual edits out of a control-plane surface
+    already owned by autonomous repair.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "-", (name or "").strip().lower()).strip("-")
+    if not slug:
+        raise ValueError("worktree name must contain at least one alphanumeric character")
+
+    repo = STATE_ROOT
+    if repo_status(repo).get("dirty"):
+        raise RuntimeError("canonical orchestrator checkout is dirty; commit or stash before reserving an operator worktree")
+
+    active_self_repairs = list_self_repair_features(
+        project_name="devmini-orchestrator",
+        statuses=("open", "finalizing"),
+    )
+    if active_self_repairs and not allow_with_self_repair:
+        owner = active_self_repairs[0]
+        raise RuntimeError(
+            "active self-repair already owns the orchestrator control plane: "
+            f"{owner.get('feature_id')} {owner.get('summary') or ''}".strip()
+        )
+
+    branch = f"operator/{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}-{slug}"
+    wt_root = DEV_ROOT / "worktrees" / "devmini-orchestrator-ops"
+    wt_root.mkdir(parents=True, exist_ok=True)
+    wt_path = wt_root / branch.replace("/", "-")
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "worktree", "add", "-b", branch, str(wt_path), "main"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or "git worktree add failed").strip()[:300])
+    return {"branch": branch, "worktree": str(wt_path)}
+
+
 def update_feature(feature_id, mutator):
     """Load feature, apply mutator, write atomically. Returns the updated dict."""
     path = feature_path(feature_id)
@@ -7921,6 +7978,9 @@ def main(argv=None):
     p_self.add_argument("--evidence", required=True)
     p_self.add_argument("--issue-kind", default="runtime_bug")
     p_self.add_argument("--source", default="cli")
+    p_wt = sub.add_parser("reserve-operator-worktree")
+    p_wt.add_argument("--name", required=True)
+    p_wt.add_argument("--allow-with-self-repair", action="store_true")
 
     args = ap.parse_args(argv)
 
@@ -8046,6 +8106,12 @@ def main(argv=None):
             evidence=args.evidence,
             issue_kind=args.issue_kind,
             source=args.source,
+        )
+        print(json.dumps(out, sort_keys=True))
+    elif args.cmd == "reserve-operator-worktree":
+        out = reserve_orchestrator_operator_worktree(
+            args.name,
+            allow_with_self_repair=args.allow_with_self_repair,
         )
         print(json.dumps(out, sort_keys=True))
 
