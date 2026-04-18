@@ -79,6 +79,31 @@ def _run_bounded(cmd, *, timeout, cwd=None, env=None, stdout=None, stderr=None, 
         raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout, output=out, stderr=err) from exc
 
 
+def _claude_subprocess_env(extra_env=None):
+    env = os.environ.copy()
+    blob = o.load_claude_env_blob() or ""
+    for raw in blob.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[:1] == value[-1:] and value[:1] in ("'", '"'):
+            value = value[1:-1]
+        if key not in env or not env[key]:
+            env[key] = value
+    if extra_env:
+        env.update(extra_env)
+    return env
+
+
 def fail_task(task_id, from_state, reason, *, blocker_code=None, summary=None, detail=None, retryable=None, mutator=None):
     def mut(task):
         task["finished_at"] = o.now_iso()
@@ -1478,6 +1503,7 @@ def run_claude_memory_synthesis(task, cfg, timeout, log_path):
         try:
             proc = _run_bounded(
                 cmd, stdout=subprocess.PIPE, stderr=logf, text=True, timeout=timeout,
+                env=_claude_subprocess_env(),
                 cwd="/tmp",
             )
         except subprocess.TimeoutExpired:
@@ -1817,6 +1843,7 @@ def _run_review_agent(kind, *, prompt, worktree, timeout, logf, last_msg_path):
         proc = _run_bounded(
             cmd,
             cwd=cwd,
+            env=_claude_subprocess_env() if kind == "claude" else None,
             stdout=stdout_target,
             stderr=subprocess.STDOUT,
             text=True,
@@ -2084,6 +2111,7 @@ def run_claude_template_gen(task, cfg, task_type, timeout, log_path):
         try:
             proc = _run_bounded(
                 cmd, stdout=subprocess.PIPE, stderr=logf, text=True, timeout=timeout,
+                env=_claude_subprocess_env(),
                 cwd="/tmp",  # avoid CLAUDE.md auto-discovery at worker invocation
             )
         except subprocess.TimeoutExpired:
@@ -2194,6 +2222,7 @@ def run_claude_template_refine(task, cfg, task_type, timeout, log_path):
         try:
             proc = _run_bounded(
                 cmd, stdout=subprocess.PIPE, stderr=logf, text=True, timeout=timeout,
+                env=_claude_subprocess_env(),
                 cwd="/tmp",
             )
         except subprocess.TimeoutExpired:
@@ -2503,6 +2532,7 @@ def _run_self_repair_council(
         stderr=subprocess.PIPE,
         text=True,
         timeout=timeout,
+        env=_claude_subprocess_env(),
         cwd=str(worktree),
     )
     raw = proc.stdout or ""
@@ -3093,6 +3123,7 @@ def run_claude_planner(task, cfg, timeout, log_path):
         try:
             proc = _run_bounded(
                 cmd, stdout=subprocess.PIPE, stderr=logf, text=True, timeout=timeout,
+                env=_claude_subprocess_env(),
                 cwd="/tmp",  # avoid CLAUDE.md auto-discovery
             )
         except subprocess.TimeoutExpired:
