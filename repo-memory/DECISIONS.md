@@ -56,7 +56,7 @@ _Architectural decisions with enough context that a future agent can tell whethe
 - **Failed tasks are not cleaned.** Target tasks in `failed/` have their worktrees preserved by policy — a human may want to salvage state before anything is removed.
 - **Cleanup is idempotent** by the `cleaned_at` check, so a failed mid-run (e.g. `git worktree remove` crashes) can be retried safely on the next tick.
 
-**Consequences:** The orchestrator now has a full closed loop for deliverable changes: codex produces a branch, smoke gates it, reviewer approves it, QA pushes + PRs it with a `@codex` mention, and when a human merges or closes, cleanup harvests the local state within an hour. Pass-1 delivery latency drops from "manual forever" to "~3600s after a human decision". The `cleaned_at` stamp gives us a simple audit trail — `queue/done/` retains every task file as a historical record, with cleanup visible via a field rather than a file move. Rules out silent state drift from accumulated worktrees on a 16GB M4; `/Volumes/devssd/worktrees/` bloat is bounded by the PR decision latency rather than the task count. Also rules out race conditions between the orchestrator and a human manually cleaning up — `git worktree remove` and `git branch -D` are idempotent and both tolerate absence.
+**Consequences:** The orchestrator now has a full closed loop for deliverable changes: codex produces a branch, smoke gates it, reviewer approves it, QA pushes + PRs it with a `@codex` mention, and when a human merges or closes, cleanup harvests the local state within an hour. Pass-1 delivery latency drops from "manual forever" to "~3600s after a human decision". The `cleaned_at` stamp gives us a simple audit trail — `queue/done/` retains every task file as a historical record, with cleanup visible via a field rather than a file move. Rules out silent state drift from accumulated worktrees on a 16GB M4; `${DEV_ROOT}/worktrees/` bloat is bounded by the PR decision latency rather than the task count. Also rules out race conditions between the orchestrator and a human manually cleaning up — `git worktree remove` and `git branch -D` are idempotent and both tolerate absence.
 
 **Known gap caught during rollout:** `gh auth status` reported an invalid token for account `joshorig` when this landed. The code handles it gracefully (PR create fails, target stays `done` with `pr_create_failure`, pr-body.md is still written for a human fallback), but until `gh auth login -h github.com` is re-run, pattern C effectively degrades to pattern B. This is documented so the next person is not surprised that `pr_url` is null on otherwise-successful tasks.
 
@@ -112,7 +112,7 @@ Config: `"auto_push": false` explicitly set on all three projects (`lvc-standard
 
 **Context:** JMH-running slices (smoke gradle test + solver reasoning) were hitting the 600s wall mid-build and getting reaped as timeouts. The failures were miscounted as topology errors in pass-1 stats.
 
-**Decision:** Bumped `slots.codex.timeout_sec` to 1800 in `config/orchestrator.json` and the `DEFAULT_TIMEOUTS` fallback in `worker.py`. Per-task `engine_args.timeout_sec` override still honored.
+**Decision:** Bumped `slots.codex.timeout_sec` to 1800 in orchestrator config and the `DEFAULT_TIMEOUTS` fallback in `worker.py`. Per-task `engine_args.timeout_sec` override still honored.
 
 **Consequences:** Slower worst-case wall time but no more false topology errors. Launchd throttle on the codex worker plist unchanged (15s between respawns).
 

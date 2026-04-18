@@ -18,7 +18,7 @@ _Pinned reading and open questions that inform architectural decisions. Not a re
 
 ## Engineering memory skills (local)
 
-- **Location:** `/Volumes/devssd/repos/skills/engineering-memory/`
+- **Location:** configured locally via `config/context-sources.json` or vendored under `skills/engineering-memory/`
 - **Why it matters:** Source of the `repo-memory/` convention this file is part of. Also houses `CLAUDE.md` and `CODEX.md` policy docs that tell each LLM how to behave when called from a worker slot. When those files change, `worker.py` prompt assembly needs to be re-checked.
 - **Key tools reused:** `create_agent_worktree.sh`, `cleanup_agent_worktree.sh`, `rebuild_memory_indexes.sh`, `doc_drift_report.sh`.
 

@@ -4,6 +4,18 @@ _Append-only log. New entries go at the top. One entry per completed task or mil
 
 ---
 
+## 2026-04-18 — R-025..R-029 completion + repo sanitization baseline
+
+**Summary:** Closed out the remaining autonomy-hardening roadmap cluster and removed tracked host-specific config from the public repo surface. The runtime now attempts bounded environment repair before self-repair, planner/reviewer/QA prompts consume role-aware token-savior + policy context, planner/reviewer/QA all use explicit council panels, semantic QA audits expected validation scope against observed log signals, and review-thread auto-resolution now requires diff-aware local evidence rather than a weak “task ran” heuristic.
+
+**Changed:**
+- `bin/orchestrator.py` — added tracked-example + local-override config loading, local external context-source loading, bounded `repair_environment()` actions, `repair-environment` CLI/Telegram surface, and workflow-check integration so environment issues attempt repair before reopening through self-repair.
+- `bin/worker.py` — replaced hardcoded external roots with configurable context sources; added token-savior retrieval into planner/reviewer/QA memory packs; upgraded normal planner output to record council panel/dissent metadata; upgraded reviewer and semantic QA prompts to run compact internal council passes; added explicit QA scope expectation/log-signal auditing; hardened review-thread resolution with diff-aware evidence capture.
+- `config/orchestrator.example.json`, `config/context-sources.example.json`, `.gitignore`, `README.md`, `AGENTS.md`, `CLAUDE.md`, `bin/{gh_env.sh,start_tmux_agents.sh,telegram_poll_stub.sh,telegram_bot.py}` — switched the repo to tracked examples + gitignored local overrides and removed tracked machine-specific absolute paths from public docs/scripts.
+- `repo-memory/{CURRENT_STATE,ROADMAP,RESEARCH,DECISIONS}.md` — updated autonomy status, roadmap completion, and sanitized remaining absolute-path references in tracked memory.
+
+**Validation:** `python3 -m py_compile bin/orchestrator.py bin/worker.py bin/telegram_bot.py`, `python3 -m doctest -o ELLIPSIS bin/orchestrator.py`, `python3 -m doctest -o ELLIPSIS bin/worker.py`, and `python3 bin/orchestrator.py repair-environment`.
+
 ## 2026-04-16 — trade-research-platform canary prep: project-aware review + historian wiring
 
 **Summary:** Brought `trade-research-platform` up to canary-ready orchestrator shape without yet re-enabling planner traffic. The runtime now has dedicated TRP historian and reviewer BRAID templates, reviewer selection is project-aware instead of forcing TRP diffs through the lvc review contract, TRP delivery is configured for autonomous push/PR once enabled, and the TRP repo now carries the unresolved-bot-review GitHub workflow backstop used by the autonomous PR-feedback loop.
@@ -13,7 +25,7 @@ _Append-only log. New entries go at the top. One entry per completed task or mil
 - `bin/worker.py` — `run_claude_reviewer()` now loads/records the per-project reviewer template instead of hard-wiring `lvc-reviewer-pass`.
 - `braid/generators/trp-reviewer-pass.prompt.md`, `braid/templates/trp-reviewer-pass.mmd` — new mixed-surface TRP review contract covering UI/API/runtime checks.
 - `braid/templates/trp-historian-update.mmd`, `braid/index.json` — landed the missing live historian template/registry entry so the first TRP planner cycle does not immediately burn a template-missing repair loop.
-- `config/orchestrator.json` — flipped TRP `auto_push` on so an intentional canary can exercise the full branch push/PR/re-review path once planner is re-enabled.
+- orchestrator config — flipped TRP `auto_push` on so an intentional canary can exercise the full branch push/PR/re-review path once planner is re-enabled.
 - `trade-research-platform/repo-memory/*.md` and `.github/workflows/unresolved-bot-review.yml` — corrected stale setup notes and added the PR-thread merge backstop.
 
 **Validation:** `python3 -m py_compile bin/orchestrator.py bin/worker.py`, `python3 -m doctest -o ELLIPSIS bin/orchestrator.py bin/worker.py`, `python3 bin/orchestrator.py lint-templates --template trp-historian-update`, `python3 bin/orchestrator.py lint-templates --template trp-reviewer-pass`, and live `python3 bin/orchestrator.py status` all pass. TRP remains planner-disabled intentionally, but is now structurally ready for a controlled canary.
@@ -98,7 +110,7 @@ _Append-only log. New entries go at the top. One entry per completed task or mil
 **Summary:** Increased the codex slot timeout from 30 minutes to 60 minutes and taught `workflow-check` to auto-retry `llm_timeout` frontier blockers within the existing bounded attempt budget.
 
 **Changed:**
-- `config/orchestrator.json` — `slots.codex.timeout_sec` raised from `1800` to `3600`.
+- orchestrator config — `slots.codex.timeout_sec` raised from `1800` to `3600`.
 - `bin/worker.py` — updated the codex default timeout fallback to `3600` seconds.
 - `bin/orchestrator.py` — added `llm_timeout_retry` to `WORKFLOW_REPAIR_POLICY`, mapping `frontier_task_blocked + llm_timeout` to `retry_task`.
 - `README.md` — updated the codex slot documentation to reflect the new 60-minute wall clock.
@@ -126,7 +138,7 @@ _Append-only log. New entries go at the top. One entry per completed task or mil
 - `bin/orchestrator.py` — planner dispatch, canary dispatch, and `atomic_claim()` now gate on blocking environment issues instead of claiming work that cannot run safely.
 - `bin/orchestrator.py` — `status`, `report`, `workflow-check`, Telegram `/env`, and investigation context now surface environment degradation explicitly.
 - `bin/orchestrator.py` — added `enqueue-self-repair` plus Telegram `/self_repair`, `self_repair` feature metadata, and direct codex task creation for the orchestrator repo using the new `orchestrator-self-repair` BRAID template.
-- `config/orchestrator.json` — added `environment_health`, `self_repair`, and a manual-only `devmini-orchestrator` project entry with orchestrator-local QA scripts.
+- orchestrator config — added `environment_health`, `self_repair`, and a manual-only `devmini-orchestrator` project entry with orchestrator-local QA scripts.
 - `qa/{smoke,regression}.sh` — added orchestrator self-test scripts that run py-compile, doctests, `workflow-check`, canary tick, and report generation.
 - `braid/templates/orchestrator-self-repair.mmd` and `braid/generators/orchestrator-self-repair.prompt.md` — added the dedicated self-repair graph/template pair.
 - `README.md`, `bin/telegram_bot.py`, and `repo-memory/CURRENT_STATE.md` — documented the new env-health and self-repair surfaces and updated current-state descriptions.
@@ -145,7 +157,7 @@ _Append-only log. New entries go at the top. One entry per completed task or mil
 - `bin/orchestrator.py` — added `synthetic_canary` config defaults, dict-aware `load_config()` merging, `create_feature(..., canary=...)`, `is_canary_feature()`, `list_canary_features()`, `_latest_canary_feature()`, `_canary_interval_due()`, and `tick_canary_workflows(force=False)`.
 - `bin/orchestrator.py` — canary features now flow through the normal planner task path (`tick-canary` creates a feature + planner task with synthetic roadmap payload), and feature/workflow summaries now carry `canary` metadata.
 - `bin/orchestrator.py` — `status`, `report`, `features`, and `workflow-check` reports now mark canary features explicitly; `workflow-check` also has canary-specific freshness/staleness issue classes (`canary_missing_recent_success`, `canary_stale`) plus an `enqueue_canary` repair action.
-- `config/orchestrator.json` — enabled the first synthetic canary lane on `lvc-standard` with a 6-hour interval, 24-hour success SLA, 2-hour max frontier age, and a bounded safety-oriented roadmap body.
+- orchestrator config — enabled the first synthetic canary lane on `lvc-standard` with a 6-hour interval, 24-hour success SLA, 2-hour max frontier age, and a bounded safety-oriented roadmap body.
 - `README.md` — documented `tick-canary-workflows` and the new `canary-workflows` launchd scheduler role.
 - `~/Library/LaunchAgents/com.devmini.orchestrator.canary-workflows.plist` — installed and loaded a 6-hour launchd job that runs `python3 bin/orchestrator.py tick-canary-workflows`.
 
@@ -208,7 +220,7 @@ protection.
 
 **Follow-on:**
 - Push is a no-op for now — the orchestrator repo has no remote configured, so commit `1c13b8c` lives on local `main` only. Configure a remote (`git remote add origin …`) or confirm local-only is intentional.
-- Pass-2 gap: `drift_threshold` is a global default in `CONFIG_DEFAULTS`. Per-project override via the `projects` table in `config/orchestrator.json` is the obvious extension; not yet wired.
+- Pass-2 gap: `drift_threshold` is a global default in `CONFIG_DEFAULTS`. Per-project override via the `projects` table in orchestrator config was the obvious extension; not yet wired at that point.
 - No metric yet for how often the running guard catches duplicate dispatch; currently only observable via `state/runtime/transitions.log` stamps.
 
 ---
@@ -415,7 +427,7 @@ protection.
 - `bin/orchestrator.py` — added `_workflow_policy_matches(...)` and `_workflow_policy_decision(...)` so repair choice is data-driven instead of being embedded in the diagnostic flow.
 - `bin/orchestrator.py` — task repair selection in workflow-check now runs through the policy engine, and planner-empty / ready-for-finalize / final-PR-blocked issue kinds also resolve through that same path.
 - `bin/orchestrator.py` — retry resets and workflow-check repair attempts emit explicit runtime events (`retry_reset`, `repair_attempt`), which are folded into the shared workflow summary.
-- `config/orchestrator.json` — added `workflow_repair_policy: \"default\"` so the selected repair-policy set is explicit in config.
+- orchestrator config — added `workflow_repair_policy: \"default\"` so the selected repair-policy set is explicit in config.
 
 **Validation:** `python3 -m py_compile bin/orchestrator.py bin/worker.py bin/telegram_bot.py` passed and `python3 bin/orchestrator.py workflow-check` still completes cleanly. The current unresolved frontier on `feature-20260415-101058-14d56c` correctly stays advisory-only because no policy rule matches its timeout/failure shape yet.
 
@@ -475,7 +487,7 @@ protection.
 
 **Changed:**
 - `bin/worker.py` — added `classify_slice()` post-validator with anti-pattern + positive-keyword lists. Validated against pass-1 ground truth: 8/8 known misclassifications reject, 11/11 correct classifications accept.
-- `config/orchestrator.json` — `slots.codex.timeout_sec` 600 → 1800 to fit JMH-heavy slices.
+- orchestrator config — `slots.codex.timeout_sec` 600 → 1800 to fit JMH-heavy slices.
 - `README.md`, `repo-memory/{CURRENT_STATE,RECENT_WORK,DECISIONS,FAILURES,RESEARCH}.md`, `.gitignore` — repo bootstrap.
 
 **BRAID stats snapshot:** historian 61/0, reviewer 86/1, operator 14/4 (real ≤3/14 after flake correction).

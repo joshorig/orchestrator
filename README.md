@@ -77,9 +77,9 @@ Environment normalization is now part of the runtime. `env-health` checks requir
 |---|---|---|---|
 | `claude` | BRAID **generator** | 1800s | Decomposes parent tasks into codex slices; generates Mermaid reasoning graphs for new task types. Runs rarely — templates amortize across N executions. |
 | `codex` | BRAID **solver** | 3600s | Executes bounded implementation slices inside an assigned worktree, traversing a cached Mermaid graph received as system context. Signals `BRAID_OK` or `BRAID_TOPOLOGY_ERROR` via output trailer. |
-| `qa` | Contract runner | 900s | Executes `<repo>/qa/smoke.sh` or `<repo>/qa/regression.sh`. No LLM involved. |
+| `qa` | Contract runner | 900s | Executes `<repo>/qa/smoke.sh` or `<repo>/qa/regression.sh`, then the semantic QA gate audits whether the validation scope was adequate for the change. |
 
-Concurrency is enforced in `config/orchestrator.json`: one active task per slot at a time. Workers follow the one-task-then-exit model — launchd handles throttling via `ThrottleInterval`.
+Concurrency is enforced by the merged orchestrator config (`config/orchestrator.example.json` plus optional local override): one active task per slot at a time. Workers follow the one-task-then-exit model — launchd handles throttling via `ThrottleInterval`.
 
 ### BRAID templates
 
@@ -135,7 +135,7 @@ When a task PR on a feature branch needs attention, `pr-sweep` enqueues a codex 
 - **Actionable review comments** from auto-handle authors (`chatgpt-codex-connector`, `copilot`, `github-advanced-security`).
 - **Conflicts or stale bases** — `gh` reports `mergeable=CONFLICTING` or `mergeStateStatus` in `DIRTY`/`BEHIND`.
 - **Failed required checks** — `gh` reports `mergeStateStatus=BLOCKED` or `UNSTABLE` and `statusCheckRollup` contains failed / errored / timed-out checks. The failing check names and URLs are injected into the repair prompt.
-- **Drift** — `gh` still says `MERGEABLE`, but the worktree HEAD is `drift_threshold` or more commits behind its base (default 5, optional per-project override in `config/orchestrator.json`). `pr-sweep` synthesises `mergeStateStatus=BEHIND` so the sync fires before the delta widens.
+- **Drift** — `gh` still says `MERGEABLE`, but the worktree HEAD is `drift_threshold` or more commits behind its base (default 5, optional per-project override in local orchestrator config). `pr-sweep` synthesises `mergeStateStatus=BEHIND` so the sync fires before the delta widens.
 
 Allowlisted bot top-level comments are not treated as actionable just because of author alone; summary/praise comments such as "Didn't find any major issues" are ignored unless they contain an explicit finding marker. On conflict/drift dispatch the task's `engine_args.conflict_preview` carries a `[CONFLICT PREVIEW]` block (conflict list + diff stats + recent base log, 4000-char budget) that `worker.py` injects into the codex prompt so the solver sees the rebase surface before it starts. The parent task's `pr_sweep.conflict_task_id` pins the active guard slice; subsequent sweeps of the same parent skip dispatch while that guard task is still in `queued`/`claimed`/`running`, so a slow codex rebase can't triple-enqueue.
 
@@ -176,7 +176,10 @@ braid/
   generators/*.prompt.md    # the prompts that produced them (tracked)
   index.json                # live usage + topology_error counters (gitignored)
 config/
-  orchestrator.json         # slots, projects, timeouts (tracked)
+  orchestrator.example.json # tracked example baseline
+  orchestrator.local.json   # real local machine config (gitignored)
+  context-sources.example.json # tracked example for external skills/memory roots
+  context-sources.json      # real local external-root config (gitignored)
   telegram.example.json     # template for operators to copy (tracked)
   telegram.json             # real bot token + allowed chat ids (gitignored, chmod 600)
   gh-token.example          # template for GitHub PAT file (tracked)
@@ -196,9 +199,9 @@ telegram/                   # runtime — legacy stub inbox/outbox (gitignored)
 tmux/                       # runtime — session state (gitignored)
 ```
 
-### `braid/index.json` schema
+### `braid/index.json` runtime schema
 
-The live counter file (gitignored) holds one entry per task type:
+The live runtime counter file (untracked, gitignored) holds one entry per task type:
 
 ```json
 {
@@ -304,5 +307,5 @@ Future agent tasks that edit files in this repo MUST:
 ## Links
 
 - BRAID paper: [arXiv:2512.15959](https://arxiv.org/abs/2512.15959) (Amcalar & Cinar, 2025)
-- Engineering memory skills: `/Volumes/devssd/repos/skills/engineering-memory/`
-- Canonical repos served by this orchestrator: `lvc-standard`, `dag-framework`, `trade-research-platform` (see `config/orchestrator.json`)
+- External engineering skills / council / token-savior roots are configured locally via `config/context-sources.json` (or vendored into `skills/` / `vendor/`).
+- Canonical repos served by this orchestrator are configured locally via `config/orchestrator.local.json`.

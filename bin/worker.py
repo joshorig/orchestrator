@@ -7,9 +7,8 @@ Design choices:
 - Bounded runs: claim ONE task, execute it, exit. No in-process loop.
 - Atomic claim via os.rename (orchestrator.atomic_claim).
 - Worktree isolation: worker.py manages git worktrees directly rather than
-  calling engineering-memory/tooling/create_agent_worktree.sh, because that
-  script hardcodes $HOME/dev paths and doesn't match /Volumes/devssd/repos.
-  Fixing the shared script is a pass-2 task.
+  calling an external helper script. That keeps worktree setup aligned with
+  the repo's local config and avoids hardcoded host-specific paths.
 - BRAID template resolution: codex slot only. Missing template → block task,
   enqueue claude regeneration, exit. Present template → load as system context.
 - Trailer parsing: codex is invoked with `-o <last_msg_file>` which writes the
@@ -37,8 +36,6 @@ import orchestrator as o  # noqa: E402
 
 WORKTREES_ROOT = o.DEV_ROOT / "worktrees"
 QA_ARTIFACTS_ROOT = o.DEV_ROOT / "qa-artifacts"
-COUNCIL_ROOT = pathlib.Path("/Volumes/devssd/repos/oss/council-of-high-intelligence")
-COUNCIL_AGENT_DIR = COUNCIL_ROOT / "agents"
 SELF_REPAIR_COUNCIL_DEFAULT = ("socrates", "feynman", "ada", "torvalds")
 
 # Default per-slot timeouts in seconds. Overridable via
@@ -1051,9 +1048,41 @@ def deploy_self_repair(target, project, worktree, log_path, *, restart_launch_ag
 
 # --- memory context ---------------------------------------------------------
 
-ENGINEERING_SKILLS_ROOT = pathlib.Path("/Volumes/devssd/repos/skills/engineering-memory/skills")
 CONTEXT_RULE_FILES = ("AGENTS.md", "CLAUDE.md", "CODEX.md", "WARP.md")
 ULL_PROJECTS = {"lvc-standard", "dag-framework", "trade-research-platform"}
+
+
+def _context_sources():
+    return o.load_context_sources()
+
+
+def _engineering_skills_root():
+    root = (_context_sources().get("engineering_skills_root") or "").strip()
+    return pathlib.Path(root) if root else None
+
+
+def _council_agent_dir():
+    root = (_context_sources().get("council_root") or "").strip()
+    if not root:
+        return None
+    return pathlib.Path(root) / "agents"
+
+
+def _load_token_savior_memory():
+    root = (_context_sources().get("token_savior_root") or "").strip()
+    if not root:
+        return None
+    src = pathlib.Path(root) / "src"
+    if not src.exists():
+        return None
+    src_str = str(src)
+    if src_str not in sys.path:
+        sys.path.insert(0, src_str)
+    try:
+        from token_savior import memory_db  # type: ignore
+    except Exception:
+        return None
+    return memory_db
 
 
 def _read_text_if_exists(path, *, tail_lines=None, max_chars=None):
@@ -1087,8 +1116,11 @@ def _project_policy_context(project_name, project_path):
         skill_names.append("ui-development-design")
 
     for skill_name in skill_names:
+        skills_root = _engineering_skills_root()
+        if skills_root is None:
+            continue
         body = _read_text_if_exists(
-            ENGINEERING_SKILLS_ROOT / skill_name / "SKILL.md",
+            skills_root / skill_name / "SKILL.md",
             tail_lines=220,
             max_chars=8000,
         )
@@ -1097,7 +1129,55 @@ def _project_policy_context(project_name, project_path):
     return "\n\n".join(parts)
 
 
-def read_memory_context(project_name, project_path):
+def _format_token_savior_rows(rows, *, limit=5):
+    out = []
+    for row in (rows or [])[:limit]:
+        title = row.get("title") or row.get("goal") or "(untitled)"
+        rtype = row.get("type") or "memory"
+        excerpt = row.get("excerpt") or row.get("conclusion") or row.get("excerpt_text") or ""
+        excerpt = str(excerpt).strip().replace("\n", " ")
+        if len(excerpt) > 220:
+            excerpt = excerpt[:220] + "..."
+        out.append(f"- [{rtype}] {title} — {excerpt}".rstrip(" — "))
+    return "\n".join(out)
+
+
+def _token_savior_context(project_name, project_path, *, role=None, query=None):
+    memory_db = _load_token_savior_memory()
+    if memory_db is None:
+        return ""
+    project_root = str(pathlib.Path(project_path).resolve())
+    query = (query or "").strip()
+    parts = []
+    try:
+        recent = memory_db.get_recent_index(project_root, limit=6)
+        if recent:
+            parts.append("### token-savior recent\n" + _format_token_savior_rows(recent, limit=6))
+    except Exception:
+        pass
+    if query:
+        try:
+            found = memory_db.observation_search(project_root, query, limit=6)
+            if found:
+                parts.append("### token-savior search\n" + _format_token_savior_rows(found, limit=6))
+        except Exception:
+            pass
+        try:
+            reasoning = memory_db.reasoning_search(project_root, query, limit=3)
+            if reasoning:
+                parts.append("### token-savior reasoning\n" + _format_token_savior_rows(reasoning, limit=3))
+        except Exception:
+            pass
+        try:
+            sessions = memory_db.session_summary_search(project_root, query, limit=3)
+            if sessions:
+                parts.append("### token-savior session summaries\n" + _format_token_savior_rows(sessions, limit=3))
+        except Exception:
+            pass
+    return "\n\n".join(parts)
+
+
+def read_memory_context(project_name, project_path, *, role=None, query=None):
     memdir = pathlib.Path(project_path) / "repo-memory"
     parts = []
     for name in ("CURRENT_STATE.md", "RECENT_WORK.md", "DECISIONS.md", "FAILURES.md", "RESEARCH.md"):
@@ -1112,6 +1192,9 @@ def read_memory_context(project_name, project_path):
     policy = _project_policy_context(project_name, project_path)
     if policy:
         parts.append(f"### POLICY\n{policy}")
+    token_ctx = _token_savior_context(project_name, project_path, role=role, query=query)
+    if token_ctx:
+        parts.append(token_ctx)
     return "\n\n".join(parts) if parts else "(no repo-memory or policy context available)"
 
 
@@ -1533,34 +1616,142 @@ def _comment_marker_still_present(worktree, comment):
     return any(tok in body for tok in supported)
 
 
+def _comment_resolution_evidence(worktree, comment):
+    rel = comment.get("path")
+    if not rel:
+        return None
+    path = pathlib.Path(worktree) / rel
+    if not path.exists():
+        return None
+    try:
+        body = path.read_text(errors="replace")
+    except OSError:
+        return None
+    body_lower = body.lower()
+    comment_body = (comment.get("body") or "").lower()
+    line_no = int(comment.get("line") or 0) if str(comment.get("line") or "").isdigit() else 0
+    line_text = ""
+    if line_no > 0:
+        lines = body.splitlines()
+        if line_no <= len(lines):
+            line_text = lines[line_no - 1].lower()
+
+    # Require that the current branch head actually touched the commented file.
+    touched = False
+    try:
+        touched = subprocess.run(
+            ["git", "-C", str(worktree), "diff", "--name-only", "HEAD~1", "HEAD", "--", rel],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        ).stdout.strip() != ""
+    except subprocess.TimeoutExpired:
+        touched = False
+    if not touched:
+        return None
+
+    if "synchronized" in comment_body:
+        if "synchronized" in body_lower or "synchronized" in line_text:
+            return None
+        return {"kind": "keyword_removed", "keyword": "synchronized", "path": rel, "line": line_no}
+
+    backticked = [m.group(1).strip().lower() for m in re.finditer(r"`([^`]{2,120})`", comment.get("body") or "")]
+    supported = [tok for tok in backticked if re.fullmatch(r"[a-z0-9_./:-]+", tok)]
+    if supported:
+        remaining = [tok for tok in supported if tok in body_lower]
+        if remaining:
+            return None
+        return {"kind": "marker_removed", "markers": supported, "path": rel, "line": line_no}
+
+    if any(tok in comment_body for tok in ("todo", "fixme", "xxx")):
+        if any(tok in body_lower for tok in ("todo", "fixme", "xxx")):
+            return None
+        return {"kind": "todo_removed", "path": rel, "line": line_no}
+    return None
+
+
 def _eligible_thread_comments_for_auto_resolution(worktree, comments):
     eligible = []
     for comment in comments or []:
         thread_id = comment.get("thread_id")
         if not thread_id:
             continue
-        if _comment_marker_still_present(worktree, comment):
+        evidence = _comment_resolution_evidence(worktree, comment)
+        if evidence is None:
             continue
-        eligible.append(comment)
+        eligible.append({**comment, "resolution_evidence": evidence})
     return eligible
+
+
+def _qa_scope_expectations(project_name, changed_files, diff_text):
+    expectations = []
+    if isinstance(changed_files, str):
+        files = [line.strip().lower() for line in changed_files.splitlines() if line.strip() and not line.startswith("(")]
+    else:
+        files = [str(path).lower() for path in (changed_files or [])]
+    diff_lower = (diff_text or "").lower()
+
+    if any(path.endswith(".java") for path in files):
+        expectations.append("unit-or-gradle-tests")
+    if project_name in ULL_PROJECTS and any(path.endswith(".java") for path in files):
+        expectations.append("benchmark-or-jmh")
+        expectations.append("concurrency-policy-review")
+    if any(path.endswith((".ts", ".tsx", ".js", ".jsx")) for path in files):
+        expectations.append("typecheck")
+        expectations.append("lint")
+    if any(path.endswith((".tsx", ".jsx")) or "/app/" in path or "/components/" in path for path in files):
+        expectations.append("playwright-or-ui-smoke")
+        expectations.append("a11y-or-ui-assertions")
+    if "snapshot" in diff_lower or "contract" in diff_lower or any("snapshot" in path for path in files):
+        expectations.append("api-contract")
+    if any(path.endswith(".md") for path in files):
+        expectations.append("docs-sync")
+    return sorted(set(expectations))
+
+
+def _qa_log_scope_signals(log_tail):
+    text = (log_tail or "").lower()
+    checks = {
+        "benchmark-or-jmh": any(tok in text for tok in ("jmh", "benchmark")),
+        "unit-or-gradle-tests": any(tok in text for tok in ("gradle test", "pytest", "unit", "tests passed", "> test", "mvn test")),
+        "typecheck": any(tok in text for tok in ("typecheck", "tsc", "typescript")),
+        "lint": "lint" in text,
+        "playwright-or-ui-smoke": any(tok in text for tok in ("playwright", "ui smoke", "e2e", "browser")),
+        "a11y-or-ui-assertions": any(tok in text for tok in ("a11y", "accessibility", "axe")),
+        "api-contract": any(tok in text for tok in ("contract", "snapshot", "openapi")),
+        "docs-sync": any(tok in text for tok in ("docs", "readme", "repo-memory")),
+        "concurrency-policy-review": any(tok in text for tok in ("review", "qa gate", "semantic qa", "ull")),
+    }
+    return checks
 
 
 def _run_semantic_qa_gate(project_name, project_path, worktree, base_ref, target, qa_log_path, timeout):
     changed_files, diff_text = _git_diff_summary(worktree, base_ref, max_diff_chars=20000)
     log_tail = _read_text_if_exists(qa_log_path, tail_lines=120, max_chars=12000)
-    context = read_memory_context(project_name, project_path)
+    context = read_memory_context(project_name, project_path, role="qa", query=target.get("summary") or "")
+    scope_expectations = _qa_scope_expectations(project_name, changed_files, diff_text)
+    scope_signals = _qa_log_scope_signals(log_tail)
+    panel = _config_council_panel(o.load_config(), "qa_panel", ("feynman", "kahneman", "ada"))
+    council_ctx = "\n\n".join(_council_member_context(member) for member in panel)
     prompt = (
         "You are the final semantic QA gate before autonomous push.\n"
         "Decide whether the executed QA scope is sufficient for the changed code.\n"
+        "Run a compact internal council across the provided QA panel before deciding.\n"
         "- Review the changed files, diff summary, repo policy, and the QA log tail.\n"
         "- Fail if QA missed an obvious required scope such as benchmarks, contract tests, replay checks, or UI smoke/a11y for touched areas.\n"
         "- Fail if the log shows only partial validation relative to the changed surfaces.\n"
         "- Approve only if the executed QA appears adequate for this slice.\n\n"
+        "[QA COUNCIL PERSONAS]\n"
+        f"{council_ctx}\n"
+        "[END QA COUNCIL PERSONAS]\n\n"
         f"TARGET: {target.get('task_id')}\n"
         f"SUMMARY: {target.get('summary', '')}\n"
         f"WORKTREE: {worktree}\n"
         f"FILES CHANGED vs {base_ref}:\n{changed_files}\n\n"
         f"[DIFF]\n{diff_text}\n\n"
+        f"[EXPECTED QA SCOPE]\n{scope_expectations or ['smoke']}\n\n"
+        f"[OBSERVED QA SIGNALS]\n{json.dumps(scope_signals, sort_keys=True)}\n\n"
         f"[QA LOG TAIL]\n{log_tail or '(log unavailable)'}\n\n"
         f"[PROJECT CONTEXT]\n{context}\n\n"
         "Emit EXACTLY one final line:\n"
@@ -1857,7 +2048,10 @@ def planner_template_roles(project_name):
 
 
 def _council_member_context(member):
-    path = COUNCIL_AGENT_DIR / f"council-{member}.md"
+    agent_dir = _council_agent_dir()
+    if agent_dir is None:
+        return f"## {member}\nPersona root unavailable.\n"
+    path = agent_dir / f"council-{member}.md"
     if not path.exists():
         return f"## {member}\nPersona file missing at {path}\n"
     lines = path.read_text().splitlines()
@@ -1867,6 +2061,48 @@ def _council_member_context(member):
         if line.strip() == "## Output Format (Council Round 2)":
             break
     return f"## {member}\n" + "\n".join(kept).strip() + "\n"
+
+
+def _config_council_panel(cfg, key, fallback):
+    council_cfg = (cfg.get("council") or {}) if cfg else {}
+    panel = tuple(council_cfg.get(key) or ())
+    return panel or tuple(fallback)
+
+
+def planner_council_prompt(task, project, memory_ctx, cfg):
+    roadmap_entry = (task.get("engine_args") or {}).get("roadmap_entry") or {}
+    panel = _config_council_panel(cfg, "planner_panel", ("aristotle", "socrates", "meadows"))
+    council_ctx = "\n\n".join(_council_member_context(member) for member in panel)
+    allowed_templates = ", ".join(f'"{name}"' for name in planner_template_roles(project["name"]).keys())
+    system_prompt = (
+        "You are the planner council for the devmini orchestrator.\n"
+        "Run a compact internal council before emitting implementation slices.\n"
+        "Output ONLY one JSON object with keys:\n"
+        "  panel: list[str]\n"
+        "  key_agreements: list[str]\n"
+        "  dissent: list[str]\n"
+        "  execution_path: string\n"
+        "  slices: list[object]\n"
+        "Each slice object must include summary and braid_template, and may include depends_on.\n"
+        "Use only valid braid_template values for this project.\n\n"
+        "[COUNCIL PERSONAS]\n"
+        f"{council_ctx}\n"
+        "[END COUNCIL PERSONAS]"
+    )
+    user_prompt = (
+        f"PROJECT: {project['name']}\n\n"
+        f"ROADMAP ENTRY ID: {roadmap_entry.get('id') or '-'}\n"
+        f"ROADMAP TITLE: {roadmap_entry.get('title') or '-'}\n\n"
+        "[ROADMAP BODY]\n"
+        f"{roadmap_entry.get('body') or '(none)'}\n\n"
+        "[PROJECT MEMORY]\n"
+        f"{memory_ctx}\n\n"
+        "Decide the smallest safe next execution plan.\n"
+        "Keep at most 3 slices.\n"
+        f"Allowed braid_template values: {allowed_templates}\n"
+        "Preserve dissent when a risky slice is rejected or narrowed.\n"
+    )
+    return system_prompt, user_prompt, panel
 
 
 def self_repair_council_prompt(task, project, memory_ctx):
@@ -2331,18 +2567,13 @@ def run_claude_planner(task, cfg, timeout, log_path):
                   blocker_code="runtime_unknown_project", summary="unknown project", retryable=False)
         return
 
-    memory_ctx = read_memory_context(project["name"], project["path"])
     roadmap_entry = (task.get("engine_args") or {}).get("roadmap_entry") or {}
+    planner_query = " ".join(filter(None, [roadmap_entry.get("title"), roadmap_entry.get("body"), task.get("summary")]))
+    memory_ctx = read_memory_context(project["name"], project["path"], role="planner", query=planner_query)
     if planner_mode == "self-repair-plan":
         system_prompt, user_prompt, council_members = self_repair_council_prompt(task, project, memory_ctx)
     else:
-        council_members = ()
-        system_prompt = planner_system_prompt(project["name"], roadmap_entry.get("body", ""))
-        user_prompt = (
-            f"PROJECT: {project['name']}\n\n"
-            f"PARENT TASK: {task['summary']}\n\n"
-            f"MEMORY:\n{memory_ctx}\n"
-        )
+        system_prompt, user_prompt, council_members = planner_council_prompt(task, project, memory_ctx, cfg)
 
     cmd = [
         "claude",
@@ -2398,17 +2629,35 @@ def run_claude_planner(task, cfg, timeout, log_path):
                       blocker_code="model_output_invalid", summary="planner output invalid", retryable=False)
             return
     else:
-        m = re.search(r"\[.*\]", raw, re.DOTALL)
-        if not m:
-            fail_task(task_id, "running", "no json array in output",
-                      blocker_code="model_output_invalid", summary="planner output invalid", retryable=False)
-            return
-        try:
-            slices = json.loads(m.group(0))
-        except json.JSONDecodeError:
-            fail_task(task_id, "running", "malformed json array",
-                      blocker_code="model_output_invalid", summary="planner output invalid", retryable=False)
-            return
+        plan = None
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if m:
+            try:
+                candidate = json.loads(m.group(0))
+            except json.JSONDecodeError:
+                candidate = None
+            if isinstance(candidate, dict) and isinstance(candidate.get("slices"), list):
+                plan = candidate
+                slices = candidate.get("slices") or []
+        if plan is None:
+            m = re.search(r"\[.*\]", raw, re.DOTALL)
+            if not m:
+                fail_task(task_id, "running", "no json array/object in output",
+                          blocker_code="model_output_invalid", summary="planner output invalid", retryable=False)
+                return
+            try:
+                slices = json.loads(m.group(0))
+            except json.JSONDecodeError:
+                fail_task(task_id, "running", "malformed json array",
+                          blocker_code="model_output_invalid", summary="planner output invalid", retryable=False)
+                return
+            plan = {
+                "panel": list(council_members),
+                "key_agreements": [],
+                "dissent": [],
+                "execution_path": "planner-council",
+                "slices": slices,
+            }
 
     # Template → role for codex slices. Slices with a template outside this set
     # are dropped — the planner prompt instructs claude to skip ill-fitting work
@@ -2424,18 +2673,21 @@ def run_claude_planner(task, cfg, timeout, log_path):
     enqueued = []
     dropped = []
     sibling_task_ids = []
-    self_repair_engine_args = {}
+    council_meta = {
+        "panel": list(plan.get("panel") or council_members),
+        "key_agreements": list(plan.get("key_agreements") or []),
+        "dissent": list(plan.get("dissent") or []),
+        "execution_path": plan.get("execution_path") or "",
+    }
+    shared_engine_args = {}
     if planner_mode == "self-repair-plan":
-        self_repair_engine_args = {
+        shared_engine_args = {
             "self_repair": dict((task.get("engine_args") or {}).get("self_repair") or {}),
             "evidence": (task.get("engine_args") or {}).get("evidence") or "",
-            "council": {
-                "panel": list(plan.get("panel") or council_members),
-                "key_agreements": list(plan.get("key_agreements") or []),
-                "dissent": list(plan.get("dissent") or []),
-                "execution_path": plan.get("execution_path") or "",
-            },
+            "council": council_meta,
         }
+    elif council_meta["panel"]:
+        shared_engine_args = {"council": council_meta}
     for idx, s in enumerate(slices[:3]):
         raw_tpl = s.get("braid_template")
         summ = s.get("summary", "")
@@ -2461,7 +2713,7 @@ def run_claude_planner(task, cfg, timeout, log_path):
             parent_task_id=task_id,
             feature_id=feature_id,
             depends_on=[],
-            engine_args=dict(self_repair_engine_args),
+            engine_args=dict(shared_engine_args),
         )
         raw_depends = s.get("depends_on")
         resolved = []
@@ -2502,13 +2754,8 @@ def run_claude_planner(task, cfg, timeout, log_path):
 
     def mut(t):
         t["artifacts"] = t.get("artifacts", []) + enqueued
-        if planner_mode == "self-repair-plan":
-            t["council"] = {
-                "panel": list(plan.get("panel") or council_members),
-                "key_agreements": list(plan.get("key_agreements") or []),
-                "dissent": list(plan.get("dissent") or []),
-                "execution_path": plan.get("execution_path") or "",
-            }
+        if council_meta["panel"]:
+            t["council"] = council_meta
         t["finished_at"] = o.now_iso()
         t["log_path"] = str(log_path)
     o.move_task(task_id, "running", "done", reason=f"decomposed into {len(enqueued)}", mutator=mut)
@@ -2562,8 +2809,11 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
                   blocker_code="qa_target_missing", summary="review target worktree missing", retryable=False)
         return
     changed_files, diff_text = _git_diff_summary(target_wt, target_base)
-    memory_ctx = read_memory_context(project["name"], project["path"])
+    review_query = " ".join(filter(None, [target.get("summary"), changed_files]))
+    memory_ctx = read_memory_context(project["name"], project["path"], role="reviewer", query=review_query)
     policy_findings = _policy_findings_for_diff(project_name, target_wt, target_base)
+    review_panel = _config_council_panel(cfg, "review_panel", ("socrates", "kahneman", "torvalds"))
+    council_ctx = "\n\n".join(_council_member_context(member) for member in review_panel)
 
     codex_prompt = (
         "[BRAID REVIEW GRAPH — traverse deterministically.]\n"
@@ -2596,11 +2846,16 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
         "[BRAID REVIEW GRAPH — traverse deterministically.]\n"
         f"{graph_body}\n"
         "[END GRAPH]\n\n"
-        "You are the adversarial second reviewer before autonomous push.\n"
+        "You are the council-backed second reviewer before autonomous push.\n"
+        "- Run an internal two-round council across the provided panel before deciding.\n"
+        "- Preserve dissent in your body; do not flatten disagreement away.\n"
         "- Assume the first reviewer may have missed something important.\n"
         "- Hunt for reasons this branch should NOT be pushed yet.\n"
         "- Pay extra attention to ULL rules, locking, hidden allocations, weak benchmarks, API drift, and missing QA coverage.\n"
         "- Do not modify files. Review only.\n\n"
+        "[COUNCIL PERSONAS]\n"
+        f"{council_ctx}\n"
+        "[END COUNCIL PERSONAS]\n\n"
         f"REVIEW TARGET: {target_id}\n"
         f"TARGET SUMMARY: {target.get('summary','')}\n"
         f"TARGET WORKTREE: {target_wt}\n"
@@ -2705,6 +2960,7 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
         t["reviewed_at"] = o.now_iso()
         t["reviewed_by"] = task_id
         t["policy_review_findings"] = policy_findings
+        t["review_council_panel"] = list(review_panel)
 
     if final_verdict == "approve":
         o.move_task(target_id, "awaiting-review", "awaiting-qa",
@@ -3437,6 +3693,16 @@ def run_pr_feedback_task(task, cfg):
         eligible_thread_comments = _eligible_thread_comments_for_auto_resolution(wt, comments or [])
         thread_ids = [c.get("thread_id") for c in eligible_thread_comments if c.get("thread_id")]
         resolved_count = 0
+        resolution_evidence = [
+            {
+                "thread_id": c.get("thread_id"),
+                "comment_id": c.get("id"),
+                "path": c.get("path"),
+                "line": c.get("line"),
+                "evidence": c.get("resolution_evidence"),
+            }
+            for c in eligible_thread_comments
+        ]
         if thread_ids:
             resolved_count, failed_count = o._resolve_review_threads(
                 project["path"], thread_ids,
@@ -3464,6 +3730,7 @@ def run_pr_feedback_task(task, cfg):
             t["pr_feedback_new_sha"] = new_sha
             if thread_ids:
                 t["resolved_thread_count"] = resolved_count
+                t["resolved_thread_evidence"] = resolution_evidence
             if pr_number:
                 if review_ok:
                     t["review_requested_at"] = o.now_iso()

@@ -3,7 +3,7 @@
 
 Transport: long-polling `getUpdates`. Never a webhook (no public ports per security principles).
 
-Config: /Volumes/devssd/orchestrator/config/telegram.json (chmod 600, gitignored).
+Config: config/telegram.json beneath the orchestrator repo root (chmod 600, gitignored).
 If the file is absent or clearly a placeholder, the bot logs and exits cleanly so launchd
 does not respawn into an error loop.
 
@@ -11,7 +11,7 @@ Commands are dispatched through orchestrator.dispatch_telegram_command — share
 legacy file-stub poller for parity. Any unknown command returns the help string; we never
 execute arbitrary shell.
 
-Push notifications: the bot tails /Volumes/devssd/orchestrator/reports/ on startup. When a
+Push notifications: the bot tails the repo-local reports/ directory on startup. When a
 new morning/evening report markdown file appears (tracked via a state file to avoid
 re-pushing across restarts), push it to every allowed chat.
 """

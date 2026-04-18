@@ -23,7 +23,7 @@ Parallelism, visual graph ingestion, and broader fleet rollout stay secondary un
 ## What exists today (pass 1+2 — three-repo slice + feature-branch delivery)
 
 - Full state machine in `bin/orchestrator.py` with all nine task states, atomic rename-based claim, append-only `transitions.log`, and dead-pid reaper.
-- `bin/worker.py` implements all three slots (`claude`, `codex`, `qa`) plus planner decomposition, slice post-validation classifier, and the pr-feedback task mode. One task per run, timeout-gated from `config/orchestrator.json`.
+- `bin/worker.py` implements all three slots (`claude`, `codex`, `qa`) plus planner decomposition, slice post-validation classifier, and the pr-feedback task mode. One task per run, timeout-gated from merged orchestrator config (`config/orchestrator.example.json` plus local override).
 - Real `bin/telegram_bot.py` (python-telegram-bot, long-polling, allowlist-gated) with command handlers and 60-second report-push job.
 - **Feature-branch delivery model** (commit `cc23abd`, hardened in 2026-04-14 worktree): `tick_planner` emits feature headers under `state/features/`, codex tasks inherit `feature_id`, `atomic_claim` serializes siblings within a feature, task PRs target `feature/<id>`, `pr-sweep` auto-merges clean task PRs and enqueues pr-feedback tasks for actionable review comments, failed required checks, drift, and conflicts, and `finalizing` feature PRs can also trigger follow-up codex slices for review comments, failed checks, or `main` merge conflicts while `feature-finalize` keeps the feature→main PR itself human-reviewed.
 - **6-slot codex fleet**: `worker.codex` + `worker.codex-{2..6}` launchd plists all invoke `worker.py codex`; per-feature serialization means siblings queue while features run in parallel. No per-project cap — any one project can theoretically occupy all 6 slots.
@@ -67,8 +67,8 @@ Parallelism, visual graph ingestion, and broader fleet rollout stay secondary un
 
 - **Control-plane contract is still too implicit**: task/feature/blocker semantics are split across mutable JSON fields, free-text logs, prompt trailers, and code-path-specific heuristics. This is the largest blocker to reliable autonomous operation.
 - **Retry semantics are lossy/stale**: requeued tasks can carry historical terminal metadata into a new live attempt. That is survivable for humans but dangerous for automation and reporting.
-- **Workflow diagnosis/repair is materially more explicit now, but not fully autonomous**: typed blockers, event-backed summaries, declarative repair policy, canary incidents, and environment-health issues all land in one control plane, but unknown orchestrator bugs still require a manual self-repair trigger rather than a fully automatic repair branch.
-- **Environment drift is typed, but not yet autonomously remediated enough**: host and canonical-repo problems are now named via `env-health` and `workflow-check`, but the runtime still diagnoses more environment failures than it repairs. The intended target is autonomous environment recovery with human involvement only when bounded repair paths are exhausted.
+- **Workflow diagnosis/repair is now materially closer to autonomous operation**: typed blockers, event-backed summaries, declarative repair policy, canary incidents, bounded environment repair, and the council-backed self-repair lane all land in one control plane. Remaining work is mostly breadth and operational hardening, not missing first-class repair paths.
+- **Environment drift is no longer diagnosis-only**: `workflow-check` can now invoke bounded environment repair actions (`GH_TOKEN` reload, launch agent reload, worktrees-root creation, git fetch-state repair) before reopening the loop through self-repair. Irreparable cases still surface explicitly for guarded follow-up.
 - **`lvc-implement-operator` legacy error count**: the 14 topology errors in `braid/index.json` were accumulated under the old R4-violating subgraph shape. The template was regenerated in commit `74d50e0` into a flat shape with distinct `ReviseCheck<N>` per gate and is lint-clean. Counter is not reset by design (append-only stat); watch for the counter to **stop growing** on the next operator task rather than expecting a drop. If it grows, the generator prompt fix did not fully take and further investigation is needed.
 - **TRP regression does not exercise the real stack**: Playwright webServer is the Vite dev server, not a compose-started backend. JVM test + JMH are run but not integrated with a live UI. A hand-off prompt has been drafted to add a `compose-stack` Playwright project + EXIT-trapped compose lifecycle stage to `qa/regression.sh`. Not yet executed.
 - **Documentation drift on task-PR merge policy**: the implementation auto-merges clean feature-branch task PRs without requiring a formal `APPROVED` review decision; the human review gate is the final feature PR to `main`. README + repo-memory should describe that contract explicitly to avoid future "fixes" that add an approval gate the runtime never intended.
@@ -89,7 +89,7 @@ Parallelism, visual graph ingestion, and broader fleet rollout stay secondary un
 | `pr-address-feedback` | 0 | 0 | Hand-authored; no live runs yet |
 | `memory-synthesis` | 0 | 0 | Hand-authored; weekly schedule, no runs yet |
 
-`braid/index.json` is live and mutates on every task claim, so it is gitignored (the hash is tracked in the file, the counters are not). Query via `cat braid/index.json` or via the status CLI.
+`braid/index.json` is live runtime state and mutates on task claims and template lifecycle events, so it is intentionally untracked and gitignored. Query via `cat braid/index.json` or via the status CLI.
 
 ## Hard invariants (do not violate)
 
