@@ -78,6 +78,56 @@ _Append-only. Top-to-bottom is priority order. Status mutates in place; entries 
 - **Depends on:** [R-017], [R-020], [R-021], [R-022].
 - **Notes:** This is how the system eventually handles "issue requires a fix to the workflow" safely instead of treating it as out-of-band operator work.
 
+### [R-025] Autonomous environment repair, not just environment diagnosis
+- **Status:** TODO
+- **Feature id:** null
+- **Goal:** Environment issues must be treated as workflow work the runtime can clear autonomously, not merely reported as blocking host drift.
+- **Scope:** Extend `env-health` + `workflow-check` from typed diagnosis into bounded repair actions for canonical environment failures: repo fetch/write permission issues, launchd env drift, missing/invalid auth material, stale worktree roots, and repo-local permission repair where safe. Route recoverable cases through self-repair and bounded command repair paths before escalation; keep explicit evidence on what was changed.
+- **Out of scope:** Full host reprovisioning, privileged OS reconfiguration without guardrails, arbitrary shell self-modification.
+- **Acceptance:** A routine environment failure no longer sits indefinitely in `runtime_env_dirty`; the runtime either clears it autonomously with an auditable repair action or opens a guarded self-repair lane with concrete evidence instead of waiting for human diagnosis.
+- **Depends on:** [R-020], [R-022], [R-023].
+- **Notes:** "Autonomous means autonomous" applies here. Environment repair is part of the workflow contract, not an external excuse path.
+
+### [R-026] Engineering-memory and token-savior context injection for planner / solver / reviewer
+- **Status:** TODO
+- **Feature id:** null
+- **Goal:** Planner, codex solvers, reviewers, and QA gates should consume durable project memory and skill/policy context consistently rather than relying mostly on `repo-memory` snapshots and prompt-local heuristics.
+- **Scope:** Promote engineering-memory skills and token-savior memory retrieval to first-class runtime context sources; define per-role retrieval packs (planner, implementer, reviewer, QA); include prior failures, reasoning traces, and relevant policy slices; keep retrieval read-only and bounded so prompts stay stable and auditable.
+- **Out of scope:** Letting token-savior mutate orchestrator task state, unbounded context dumping, replacing `repo-memory` as the human-readable source of truth.
+- **Acceptance:** For a repeated failure class, the planner/reviewer/QA prompts include the relevant prior observations automatically; ULL invariants, doc-sync rules, and repo-specific constraints are injected without relying on ad-hoc repo file discovery.
+- **Depends on:** [R-017], [R-019].
+- **Notes:** This is the next step after the current direct engineering-memory skill injection. The remaining gap is durable retrieval and role-specific packing, especially from token-savior's new memory surface.
+
+### [R-027] Council-backed planning and review deliberation
+- **Status:** TODO
+- **Feature id:** null
+- **Goal:** Replace single-threaded pre-push judgment with bounded multi-perspective deliberation where the decision is consequential, especially in planner decomposition and internal review.
+- **Scope:** Integrate the local council-of-high-intelligence workflow as a structured Claude-side deliberation pass for planning and reviewer escalation modes; define when to run a quick triad versus a full council; preserve dissent instead of flattening to consensus; keep outputs machine-usable by the existing workflow gates.
+- **Out of scope:** Always-on 18-seat debate for every task, unbounded spawn fan-out, replacing Codex implementation slices with council simulation.
+- **Acceptance:** Planner and/or reviewer runs can invoke a bounded council mode that materially changes decisions on risky slices, and the runtime records which panel/profile was used plus the dissenting concerns that informed the gate.
+- **Depends on:** [R-020], [R-026].
+- **Notes:** The current second-reviewer pass is useful but still shallow. This roadmap item is about making high-consequence review and planning decisions genuinely multi-perspective.
+
+### [R-028] Semantic QA scope audit and gate completeness
+- **Status:** TODO
+- **Feature id:** null
+- **Goal:** QA must prove not just that a script passed, but that the right validation surface was exercised for the specific change.
+- **Scope:** Expand the current semantic QA gate into a first-class contract auditor: inspect changed files, expected validation classes, actual executed commands/logs/artifacts, and project-specific QA invariants; fail when benchmark, replay, API-contract, Playwright, a11y, or docs-validation scope is missing for the touched surface.
+- **Out of scope:** Replacing project QA scripts, expensive full regression on every tiny change, subjective style review under the QA label.
+- **Acceptance:** A branch cannot pass QA if the executed validation was too narrow for the touched code, even when smoke scripts exit 0; QA logs and gate output make the missing scope explicit and retryable.
+- **Depends on:** [R-017], [R-026].
+- **Notes:** This closes the gap where a branch can look "green" while having skipped the meaningful validation for the change.
+
+### [R-029] Stronger unresolved-review closure semantics
+- **Status:** TODO
+- **Feature id:** null
+- **Goal:** A review thread should only be auto-resolved when the runtime can prove the cited issue is gone at the pushed head, not merely because a repair task ran.
+- **Scope:** Replace heuristic thread-resolution checks with stronger evidence: current-file inspection, diff-aware marker matching, optional thread-body classification, and required re-review after each push; record exactly why a thread was considered resolved and keep unresolved when proof is weak.
+- **Out of scope:** Perfect semantic understanding of every human review comment, auto-closing human threads without evidence, suppressing valid dissent.
+- **Acceptance:** Cases like PR21's `synchronized` objection cannot be auto-resolved while the offending construct remains in the code; every autonomous push triggers fresh review and unresolved comments persist until the runtime has real evidence the condition is gone.
+- **Depends on:** [R-020], [R-027], [R-028].
+- **Notes:** The current local marker check is a hardening step, not the endpoint. This roadmap item is the full reliability target for autonomous review-thread handling.
+
 ### [R-001] Planner cap + planner_enabled toggle + telegram controls
 - **Status:** DONE (commit `b63b6c4`, 2026-04-14)
 - **Feature id:** null

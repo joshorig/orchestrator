@@ -64,10 +64,11 @@
       "ok",
       "ok",
       "ok",
+      "ok",
       "ok"
     ],
     "topology_errors": 1,
-    "uses": 185
+    "uses": 186
   },
   "memory-synthesis": {
     "created_at": "2026-04-14T00:30:00",
@@ -131,10 +132,12 @@
     "recent_outcomes": [
       "ok",
       "ok",
+      "ok",
+      "ok",
       "ok"
     ],
     "topology_errors": 0,
-    "uses": 4
+    "uses": 6
   },
   "trp-historian-update": {
     "created_at": "2026-04-16T23:30:00",

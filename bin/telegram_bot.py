@@ -69,11 +69,14 @@ def log_reject(chat_id, text, reason):
 
 def load_pushed_state():
     if not PUSHED_STATE_PATH.exists():
-        return {"pushed": []}
+        return {"pushed": [], "workflow_check": {}}
     try:
-        return json.loads(PUSHED_STATE_PATH.read_text())
+        state = json.loads(PUSHED_STATE_PATH.read_text())
     except (OSError, json.JSONDecodeError):
-        return {"pushed": []}
+        return {"pushed": [], "workflow_check": {}}
+    state.setdefault("pushed", [])
+    state.setdefault("workflow_check", {})
+    return state
 
 
 def save_pushed_state(state):
@@ -81,6 +84,11 @@ def save_pushed_state(state):
     tmp = PUSHED_STATE_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, indent=2, sort_keys=True))
     os.rename(tmp, PUSHED_STATE_PATH)
+
+
+def workflow_check_fingerprint(body):
+    m = re.search(r"^Fingerprint:\s*`([0-9a-f]{64})`", body, re.MULTILINE)
+    return m.group(1) if m else None
 
 
 def build_handlers(cfg):
@@ -283,12 +291,20 @@ def build_handlers(cfg):
             return
         state = load_pushed_state()
         pushed = set(state.get("pushed", []))
+        wf_state = state.setdefault("workflow_check", {})
+        latest_workflow_fingerprint = wf_state.get("last_fingerprint")
         o.REPORT_DIR.mkdir(parents=True, exist_ok=True)
         new = []
         for p in sorted(o.REPORT_DIR.glob("*.md")):
             if p.name in pushed:
                 continue
             body = p.read_text()
+            if p.name.startswith("workflow-check_"):
+                fingerprint = workflow_check_fingerprint(body)
+                if fingerprint and fingerprint == latest_workflow_fingerprint:
+                    pushed.add(p.name)
+                    new.append(p.name)
+                    continue
             msg, use_html = format_report_message(p.name, body)
             for chat_id in allowed:
                 try:
@@ -304,6 +320,12 @@ def build_handlers(cfg):
                         await ctx.bot.send_message(chat_id=chat_id, text=fallback)
                     except Exception as exc2:
                         log.warning("push plain retry failed to %s: %s", chat_id, exc2)
+            if p.name.startswith("workflow-check_"):
+                fingerprint = workflow_check_fingerprint(body)
+                if fingerprint:
+                    wf_state["last_fingerprint"] = fingerprint
+                    wf_state["last_report"] = p.name
+                    wf_state["last_sent_at"] = dt.datetime.now().isoformat(timespec="seconds")
             new.append(p.name)
         if new:
             pushed.update(new)

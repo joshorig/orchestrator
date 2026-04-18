@@ -115,6 +115,7 @@ BLOCKER_CODES = (
     "qa_contract_error",
     "qa_target_missing",
     "qa_smoke_failed",
+    "qa_scope_inadequate",
     "auto_commit_failed",
     "delivery_push_failed",
 )
@@ -240,6 +241,13 @@ WORKFLOW_REPAIR_POLICY = (
         "diagnosis": "QA smoke failed; allow one bounded retry before escalation",
     },
     {
+        "name": "qa_scope_retry",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "qa_scope_inadequate",
+        "action": "retry_task",
+        "diagnosis": "semantic QA judged the executed validation scope inadequate; retry after fixes or broader validation",
+    },
+    {
         "name": "template_graph_wait",
         "kind": "frontier_task_blocked",
         "blocker_code": "template_graph_error",
@@ -289,6 +297,14 @@ WORKFLOW_REPAIR_POLICY = (
         "blocker_code": "qa_contract_error",
         "action": None,
         "diagnosis": "QA contract or script configuration is missing; repair config before retrying",
+    },
+    {
+        "name": "qa_target_missing_retry",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "qa_target_missing",
+        "action": "retry_task",
+        "diagnosis": "target exists but moved to a different queue state; retry with the updated lifecycle logic",
+        "when": "qa_target_relocated",
     },
     {
         "name": "qa_target_missing_report",
@@ -1783,7 +1799,7 @@ AUTO_HANDLE_COMMENT_AUTHORS = {
     "github-advanced-security",
 }
 
-PR_SWEEP_MAX_FEEDBACK_ROUNDS = 10
+PR_SWEEP_MAX_FEEDBACK_ROUNDS = 20
 
 
 def _pr_body_has_orchestrator_mention(body):
@@ -6802,6 +6818,16 @@ def _workflow_policy_matches(policy, issue, task, project):
     if when == "project_main_still_dirty":
         repo = repo_status(project["path"])
         return not (repo.get("exists") and not repo.get("dirty"))
+    if when == "qa_target_relocated":
+        detail = str((issue.get("blocker") or {}).get("detail") or "")
+        m = re.search(r"target ([A-Za-z0-9_-]+) ", detail)
+        if not m:
+            return False
+        found = find_task(m.group(1), states=("queued", "awaiting-review", "awaiting-qa", "done", "failed"))
+        if not found:
+            return False
+        state, _ = found
+        return state != "queued"
     return True
 
 
@@ -6911,7 +6937,6 @@ def _workflow_issue_from_summary(feature, workflow, config):
             return {
                 **issue,
             }
-        return None
 
     if frontier.get("state") == "missing" and frontier.get("task_id"):
         child_id = frontier["task_id"]
@@ -7024,12 +7049,34 @@ def _write_workflow_check_report(issues, *, reaped=0):
     ts = dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     out = REPORT_DIR / f"workflow-check_{ts}.md"
+    fingerprint_rows = []
+    for issue in issues:
+        blocker = issue.get("blocker") or {}
+        frontier = (issue.get("workflow") or {}).get("frontier") or {}
+        fingerprint_rows.append({
+            "feature_id": issue.get("feature_id"),
+            "project": issue.get("project"),
+            "summary": issue.get("summary"),
+            "kind": issue.get("kind"),
+            "issue_key": issue.get("issue_key"),
+            "task_id": issue.get("task_id"),
+            "task_state": issue.get("task_state"),
+            "blocker_code": blocker.get("code"),
+            "diagnosis": issue.get("diagnosis"),
+            "policy": issue.get("policy"),
+            "action": issue.get("action"),
+            "frontier_reason": frontier.get("reason"),
+        })
+    fingerprint = hashlib.sha256(
+        json.dumps(sorted(fingerprint_rows, key=lambda row: row.get("issue_key") or ""), sort_keys=True).encode("utf-8")
+    ).hexdigest()
     lines = [
         "# Workflow Check Report",
         "",
         f"Generated: {now_iso()}",
         f"Issues found: {len(issues)}",
         f"Reaper recoveries run first: {reaped}",
+        f"Fingerprint: `{fingerprint}`",
         "",
     ]
     for issue in issues:

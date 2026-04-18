@@ -956,19 +956,68 @@ def create_pr(target, project, branch, pr_body_path, log_path, base_branch="main
 
 # --- memory context ---------------------------------------------------------
 
-def read_memory_context(project_path):
+ENGINEERING_SKILLS_ROOT = pathlib.Path("/Volumes/devssd/repos/skills/engineering-memory/skills")
+CONTEXT_RULE_FILES = ("AGENTS.md", "CLAUDE.md", "CODEX.md", "WARP.md")
+ULL_PROJECTS = {"lvc-standard", "dag-framework", "trade-research-platform"}
+
+
+def _read_text_if_exists(path, *, tail_lines=None, max_chars=None):
+    path = pathlib.Path(path)
+    if not path.exists():
+        return ""
+    try:
+        body = path.read_text().strip()
+    except OSError:
+        return ""
+    if tail_lines:
+        lines = body.splitlines()
+        body = "\n".join(lines[-tail_lines:])
+    if max_chars and len(body) > max_chars:
+        body = body[:max_chars] + "\n...[truncated]..."
+    return body
+
+
+def _project_policy_context(project_name, project_path):
+    project_root = pathlib.Path(project_path)
+    parts = []
+    for name in CONTEXT_RULE_FILES:
+        body = _read_text_if_exists(project_root / name, tail_lines=220, max_chars=12000)
+        if body:
+            parts.append(f"### {name}\n{body}")
+
+    skill_names = ["claude-code-cowork", "codex-delegation"]
+    if project_name in ULL_PROJECTS:
+        skill_names.extend(["ull-java-core", "ull-performance"])
+    if project_name == "trade-research-platform":
+        skill_names.append("ui-development-design")
+
+    for skill_name in skill_names:
+        body = _read_text_if_exists(
+            ENGINEERING_SKILLS_ROOT / skill_name / "SKILL.md",
+            tail_lines=220,
+            max_chars=8000,
+        )
+        if body:
+            parts.append(f"### engineering-memory/{skill_name}\n{body}")
+    return "\n\n".join(parts)
+
+
+def read_memory_context(project_name, project_path):
     memdir = pathlib.Path(project_path) / "repo-memory"
     parts = []
-    for name in ("CURRENT_STATE.md", "RECENT_WORK.md", "DECISIONS.md"):
+    for name in ("CURRENT_STATE.md", "RECENT_WORK.md", "DECISIONS.md", "FAILURES.md", "RESEARCH.md"):
         f = memdir / name
-        if f.exists():
-            body = f.read_text().strip()
-            if name == "RECENT_WORK.md":
-                # Keep only the last ~20 lines — tasks don't need ancient history.
-                lines = body.splitlines()
-                body = "\n".join(lines[-20:])
+        if not f.exists():
+            continue
+        tail_lines = 20 if name == "RECENT_WORK.md" else None
+        max_chars = 8000 if name == "CURRENT_STATE.md" else 6000
+        body = _read_text_if_exists(f, tail_lines=tail_lines, max_chars=max_chars)
+        if body:
             parts.append(f"### {name}\n{body}")
-    return "\n\n".join(parts) if parts else "(no repo-memory available)"
+    policy = _project_policy_context(project_name, project_path)
+    if policy:
+        parts.append(f"### POLICY\n{policy}")
+    return "\n\n".join(parts) if parts else "(no repo-memory or policy context available)"
 
 
 def recent_work_entries(text, limit=50):
@@ -1246,6 +1295,201 @@ def run_claude_memory_synthesis(task, cfg, timeout, log_path):
     o.move_task(task_id, "running", "done", reason="memory synthesis applied", mutator=mut_done)
 
 
+def _git_diff_summary(worktree, base_ref, *, max_diff_chars=30000):
+    changed_files = f"(no files changed vs {base_ref})"
+    diff_text = f"(empty diff vs {base_ref})"
+    try:
+        changed_files = (
+            subprocess.run(
+                ["git", "-C", worktree, "diff", base_ref, "--name-only"],
+                capture_output=True, text=True, timeout=30,
+            ).stdout.strip() or changed_files
+        )
+        stat = subprocess.run(
+            ["git", "-C", worktree, "diff", base_ref, "--stat"],
+            capture_output=True, text=True, timeout=30,
+        ).stdout
+        body = subprocess.run(
+            ["git", "-C", worktree, "diff", base_ref],
+            capture_output=True, text=True, timeout=30,
+        ).stdout
+        if len(body) > max_diff_chars:
+            body = body[:max_diff_chars] + "\n\n[...diff truncated...]\n"
+        diff_text = (stat + "\n\n" + body).strip() or diff_text
+    except subprocess.TimeoutExpired:
+        diff_text = "(git diff timed out)"
+    return changed_files, diff_text
+
+
+def _changed_java_files(worktree, base_ref):
+    try:
+        proc = subprocess.run(
+            ["git", "-C", worktree, "diff", base_ref, "--name-only", "--", "*.java"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return []
+    if proc.returncode != 0:
+        return []
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
+def _policy_findings_for_diff(project_name, worktree, base_ref):
+    findings = []
+    if project_name not in ULL_PROJECTS:
+        return findings
+    for rel in _changed_java_files(worktree, base_ref):
+        path = pathlib.Path(worktree) / rel
+        try:
+            body = path.read_text(errors="replace")
+        except OSError:
+            continue
+        if re.search(r"\bsynchronized\b", body):
+            findings.append(
+                f"{rel}: contains `synchronized`; ULL/hot-path code must avoid monitor-based locking."
+            )
+    return findings
+
+
+def _run_review_agent(kind, *, prompt, worktree, timeout, logf, last_msg_path):
+    if kind == "codex":
+        cmd = [
+            "codex", "exec",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--skip-git-repo-check",
+            "-C", str(worktree),
+            "--ephemeral",
+            "-o", str(last_msg_path),
+            prompt,
+        ]
+        cwd = None
+        stdout_target = logf
+    elif kind == "claude":
+        cmd = [
+            "claude",
+            "-p", prompt,
+            "--dangerously-skip-permissions",
+            "--output-format", "text",
+            "--model", "sonnet",
+            "--max-budget-usd", "1.00",
+            "--no-session-persistence",
+        ]
+        cwd = str(worktree)
+        stdout_target = subprocess.PIPE
+    else:
+        raise ValueError(f"unknown review agent {kind}")
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=cwd,
+            stdout=stdout_target,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return {"error": f"{kind} timeout {timeout}s"}
+    if kind == "claude":
+        raw = proc.stdout or ""
+        last_msg_path.write_text(raw)
+        logf.write(raw)
+    else:
+        raw = last_msg_path.read_text(errors="replace") if last_msg_path.exists() else ""
+    if proc.returncode != 0:
+        return {"error": f"{kind} exit {proc.returncode}", "raw": raw}
+
+    verdict = None
+    for line in reversed([l.strip() for l in raw.splitlines() if l.strip()][-20:]):
+        if line.startswith("BRAID_OK: APPROVE") or line.startswith("BRAID_OK: QA_SUFFICIENT"):
+            verdict = "approve"
+            break
+        if line.startswith("BRAID_OK: REQUEST_CHANGE") or line.startswith("BRAID_OK: QA_INSUFFICIENT"):
+            verdict = "request_change"
+            break
+        if line.startswith("BRAID_TOPOLOGY_ERROR"):
+            verdict = "topology_error"
+            break
+    if verdict is None:
+        return {"error": f"{kind} verdict missing", "raw": raw}
+    return {"verdict": verdict, "raw": raw}
+
+
+def _comment_marker_still_present(worktree, comment):
+    rel = comment.get("path")
+    if not rel:
+        return True
+    path = pathlib.Path(worktree) / rel
+    if not path.exists():
+        return True
+    try:
+        body = path.read_text(errors="replace").lower()
+    except OSError:
+        return True
+    comment_body = (comment.get("body") or "").lower()
+    if "synchronized" in comment_body:
+        return "synchronized" in body
+    if "todo" in comment_body or "fixme" in comment_body or "xxx" in comment_body:
+        return any(tok in body for tok in ("todo", "fixme", "xxx"))
+    backticked = [m.group(1).strip().lower() for m in re.finditer(r"`([^`]{2,80})`", comment.get("body") or "")]
+    supported = [tok for tok in backticked if re.fullmatch(r"[a-z0-9_./:-]+", tok)]
+    if not supported:
+        return True
+    return any(tok in body for tok in supported)
+
+
+def _eligible_thread_comments_for_auto_resolution(worktree, comments):
+    eligible = []
+    for comment in comments or []:
+        thread_id = comment.get("thread_id")
+        if not thread_id:
+            continue
+        if _comment_marker_still_present(worktree, comment):
+            continue
+        eligible.append(comment)
+    return eligible
+
+
+def _run_semantic_qa_gate(project_name, project_path, worktree, base_ref, target, qa_log_path, timeout):
+    changed_files, diff_text = _git_diff_summary(worktree, base_ref, max_diff_chars=20000)
+    log_tail = _read_text_if_exists(qa_log_path, tail_lines=120, max_chars=12000)
+    context = read_memory_context(project_name, project_path)
+    prompt = (
+        "You are the final semantic QA gate before autonomous push.\n"
+        "Decide whether the executed QA scope is sufficient for the changed code.\n"
+        "- Review the changed files, diff summary, repo policy, and the QA log tail.\n"
+        "- Fail if QA missed an obvious required scope such as benchmarks, contract tests, replay checks, or UI smoke/a11y for touched areas.\n"
+        "- Fail if the log shows only partial validation relative to the changed surfaces.\n"
+        "- Approve only if the executed QA appears adequate for this slice.\n\n"
+        f"TARGET: {target.get('task_id')}\n"
+        f"SUMMARY: {target.get('summary', '')}\n"
+        f"WORKTREE: {worktree}\n"
+        f"FILES CHANGED vs {base_ref}:\n{changed_files}\n\n"
+        f"[DIFF]\n{diff_text}\n\n"
+        f"[QA LOG TAIL]\n{log_tail or '(log unavailable)'}\n\n"
+        f"[PROJECT CONTEXT]\n{context}\n\n"
+        "Emit EXACTLY one final line:\n"
+        "  BRAID_OK: QA_SUFFICIENT — <one-line reason>\n"
+        "  BRAID_OK: QA_INSUFFICIENT — <one-line reason>\n"
+        "  BRAID_TOPOLOGY_ERROR: <reason>\n"
+    )
+    last_msg_path = o.LOGS_DIR / f"{target.get('task_id')}.qa-gate.last.txt"
+    qa_timeout = max(min(timeout, 3600), 1200)
+    with open(qa_log_path, "a") as logf:
+        logf.write("\n# semantic qa gate\n")
+        result = _run_review_agent(
+            "codex",
+            prompt=prompt,
+            worktree=worktree,
+            timeout=qa_timeout,
+            logf=logf,
+            last_msg_path=last_msg_path,
+        )
+        if result.get("raw"):
+            logf.write(f"\n# semantic qa verdict\n{result['raw']}\n")
+    return result
+
+
 def run_claude_template_gen(task, cfg, task_type, timeout, log_path):
     task_id = task["task_id"]
     gen_prompt_path = o.BRAID_GENERATORS / f"{task_type}.prompt.md"
@@ -1259,7 +1503,7 @@ def run_claude_template_gen(task, cfg, task_type, timeout, log_path):
     if project_name and project_name != "manual":
         try:
             project = o.get_project(cfg, project_name)
-            memory_ctx = read_memory_context(project["path"])
+            memory_ctx = read_memory_context(project["name"], project["path"])
         except KeyError:
             memory_ctx = "(unknown project)"
 
@@ -1365,7 +1609,7 @@ def run_claude_template_refine(task, cfg, task_type, timeout, log_path):
     if project_name and project_name != "manual":
         try:
             project = o.get_project(cfg, project_name)
-            memory_ctx = read_memory_context(project["path"])
+            memory_ctx = read_memory_context(project["name"], project["path"])
         except KeyError:
             memory_ctx = "(unknown project)"
 
@@ -1552,7 +1796,9 @@ def planner_system_prompt(project_name, roadmap_entry_body=""):
     )
     return (
         "You are the BRAID generator for devmini. Your job: read the project memory "
-        "and propose at most 3 bounded CODEX execution slices for the next actionable work.\n\n"
+        "and propose at most 3 bounded CODEX execution slices for the next actionable work.\n"
+        "Before emitting slices, do a brief internal council pass across architecture, "
+        "performance/risk, and delivery perspectives so unsafe work is filtered out early.\n\n"
         f"{roadmap_block}"
         "Only the following braid_template values are valid for codex slices in this project:\n"
         f"{implementer_desc}{historian_desc}"
@@ -1797,7 +2043,7 @@ def parse_braid_refine(trailer):
     # detail for template repair; keep them bounded, but well above terse edge labels.
     if not condition or len(condition) > 600:
         return None
-    if any(ch in condition for ch in "\r\n`"):
+    if any(ch in condition for ch in "\r\n"):
         return None
     return {"node_id": node_id, "condition": condition}
 
@@ -1933,7 +2179,7 @@ def run_claude_planner(task, cfg, timeout, log_path):
                   blocker_code="runtime_unknown_project", summary="unknown project", retryable=False)
         return
 
-    memory_ctx = read_memory_context(project["path"])
+    memory_ctx = read_memory_context(project["name"], project["path"])
     roadmap_entry = (task.get("engine_args") or {}).get("roadmap_entry") or {}
     system_prompt = planner_system_prompt(project["name"], roadmap_entry.get("body", ""))
     user_prompt = (
@@ -2069,12 +2315,11 @@ def run_claude_planner(task, cfg, timeout, log_path):
 
 
 def run_claude_reviewer(task, cfg, timeout, log_path):
-    """Codex reviewer: deep pre-push review of the awaiting-review target.
+    """Dual internal review gate before QA/push.
 
-    Uses the reviewer BRAID template plus full read access to the target
-    worktree so the reviewer can inspect touched files, adjacent code, call
-    sites, and tests before approving. The target moves to awaiting-qa only on
-    APPROVE; REQUEST_CHANGE enqueues review-feedback on the same worktree.
+    Pass 1 is a Codex review with direct worktree access. Pass 2 is a Claude
+    adversarial review over the same worktree. The target only advances to QA
+    if both approve and no hard policy checks fail.
     """
     task_id = task["task_id"]
     project_name = task.get("project")
@@ -2116,38 +2361,17 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
         fail_task(task_id, "claimed", f"review target worktree missing: {target_wt}",
                   blocker_code="qa_target_missing", summary="review target worktree missing", retryable=False)
         return
-    diff_text = "(no worktree available)"
-    changed_files = f"(no files changed vs {target_base})"
-    try:
-        changed_files = (
-            subprocess.run(
-                ["git", "-C", target_wt, "diff", target_base, "--name-only"],
-                capture_output=True, text=True, timeout=30,
-            ).stdout.strip() or changed_files
-        )
-        stat = subprocess.run(
-            ["git", "-C", target_wt, "diff", target_base, "--stat"],
-            capture_output=True, text=True, timeout=30,
-        ).stdout
-        body = subprocess.run(
-            ["git", "-C", target_wt, "diff", target_base],
-            capture_output=True, text=True, timeout=30,
-        ).stdout
-        if len(body) > 30000:
-            body = body[:30000] + "\n\n[...diff truncated at 30k chars...]\n"
-        diff_text = (stat + "\n\n" + body).strip() or f"(empty diff vs {target_base})"
-    except subprocess.TimeoutExpired:
-        diff_text = "(git diff timed out)"
+    changed_files, diff_text = _git_diff_summary(target_wt, target_base)
+    memory_ctx = read_memory_context(project["name"], project["path"])
+    policy_findings = _policy_findings_for_diff(project_name, target_wt, target_base)
 
-    memory_ctx = read_memory_context(project["path"])
-
-    review_prompt = (
+    codex_prompt = (
         "[BRAID REVIEW GRAPH — traverse deterministically.]\n"
         f"{graph_body}\n"
         "[END GRAPH]\n\n"
-        "You are Codex acting as the internal pre-push reviewer. Perform a deep review "
-        "of the worktree before it is allowed to proceed to QA/push.\n"
+        "You are the primary internal reviewer before any autonomous push.\n"
         "- Read the changed files, surrounding implementation, related call sites, and relevant tests/benchmarks.\n"
+        "- Treat repo policy and engineering-memory skills as binding constraints.\n"
         "- Focus on regressions, missing invariants, concurrency/performance hazards, incomplete tests, and contract mismatches.\n"
         "- Do not modify files. Review only.\n"
         "- If the diff is insufficient, inspect the repository directly from the worktree.\n\n"
@@ -2156,24 +2380,44 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
         f"TARGET WORKTREE: {target_wt}\n"
         f"FILES CHANGED vs {target_base}:\n{changed_files}\n\n"
         f"[DIFF vs {target_base}]\n{diff_text}\n\n"
-        f"[PROJECT MEMORY]\n{memory_ctx}\n\n"
-        "Emit EXACTLY one of these as the final line of your response:\n"
+        + (
+            "[PRE-CHECK POLICY FINDINGS]\n"
+            + "\n".join(f"- {item}" for item in policy_findings)
+            + "\n\n"
+            if policy_findings else ""
+        )
+        + f"[PROJECT CONTEXT]\n{memory_ctx}\n\n"
+        "Emit EXACTLY one final line:\n"
         "  BRAID_OK: APPROVE — <one-line justification>\n"
         "  BRAID_OK: REQUEST_CHANGE — <one-line reason>\n"
         "  BRAID_TOPOLOGY_ERROR: <reason graph could not be traversed>\n"
     )
-
-    last_msg_path = o.LOGS_DIR / f"{task_id}.last.txt"
-    review_timeout = max(timeout, 1800)
-    cmd = [
-        "codex", "exec",
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--skip-git-repo-check",
-        "-C", str(target_wt),
-        "--ephemeral",
-        "-o", str(last_msg_path),
-        review_prompt,
-    ]
+    claude_prompt = (
+        "[BRAID REVIEW GRAPH — traverse deterministically.]\n"
+        f"{graph_body}\n"
+        "[END GRAPH]\n\n"
+        "You are the adversarial second reviewer before autonomous push.\n"
+        "- Assume the first reviewer may have missed something important.\n"
+        "- Hunt for reasons this branch should NOT be pushed yet.\n"
+        "- Pay extra attention to ULL rules, locking, hidden allocations, weak benchmarks, API drift, and missing QA coverage.\n"
+        "- Do not modify files. Review only.\n\n"
+        f"REVIEW TARGET: {target_id}\n"
+        f"TARGET SUMMARY: {target.get('summary','')}\n"
+        f"TARGET WORKTREE: {target_wt}\n"
+        f"FILES CHANGED vs {target_base}:\n{changed_files}\n\n"
+        f"[DIFF vs {target_base}]\n{diff_text}\n\n"
+        + (
+            "[PRE-CHECK POLICY FINDINGS]\n"
+            + "\n".join(f"- {item}" for item in policy_findings)
+            + "\n\n"
+            if policy_findings else ""
+        )
+        + f"[PROJECT CONTEXT]\n{memory_ctx}\n\n"
+        "Emit EXACTLY one final line:\n"
+        "  BRAID_OK: APPROVE — <one-line justification>\n"
+        "  BRAID_OK: REQUEST_CHANGE — <one-line reason>\n"
+        "  BRAID_TOPOLOGY_ERROR: <reason graph could not be traversed>\n"
+    )
 
     def mut_running(t):
         t["started_at"] = o.now_iso()
@@ -2186,39 +2430,69 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
     with log_path.open("w") as logf:
         logf.write(f"# codex reviewer task={task_id} target={target_id}\n")
         logf.write(f"# template={reviewer_template} hash={graph_hash}\n\n")
-        try:
-            proc = subprocess.run(
-                cmd, stdout=logf, stderr=subprocess.STDOUT, text=True, timeout=review_timeout,
-            )
-        except subprocess.TimeoutExpired:
+        review_timeout = max(timeout, 2400)
+        codex_last_msg_path = o.LOGS_DIR / f"{task_id}.codex.last.txt"
+        codex_result = _run_review_agent(
+            "codex",
+            prompt=codex_prompt,
+            worktree=target_wt,
+            timeout=review_timeout,
+            logf=logf,
+            last_msg_path=codex_last_msg_path,
+        )
+        if codex_result.get("error"):
             o.braid_template_record_use(reviewer_template, topology_error=True)
-            fail_task(task_id, "running", f"codex reviewer timeout {review_timeout}s",
-                      blocker_code="llm_timeout", summary="codex reviewer timeout", retryable=True)
+            blocker = "llm_timeout" if "timeout" in codex_result["error"] else "llm_exit_error"
+            fail_task(task_id, "running", codex_result["error"],
+                      blocker_code=blocker, summary="codex reviewer failed", retryable=True)
             return
-        if last_msg_path.exists():
-            logf.write(f"\n# reviewer last message:\n{last_msg_path.read_text(errors='replace')}\n")
+        if codex_result.get("verdict") == "topology_error":
+            o.braid_template_record_use(reviewer_template, topology_error=True)
+            fail_task(task_id, "running", "reviewer topology error",
+                      blocker_code="template_graph_error", summary="reviewer topology error", retryable=True)
+            return
+        combined_findings = codex_result.get("raw", "")
+        final_verdict = codex_result.get("verdict")
 
-    if proc.returncode != 0:
-        fail_task(task_id, "running", f"codex reviewer exit {proc.returncode}",
-                  blocker_code="llm_exit_error", summary="codex reviewer exit error", retryable=True)
-        return
+        if final_verdict == "approve":
+            logf.write("\n# claude adversarial reviewer\n")
+            claude_last_msg_path = o.LOGS_DIR / f"{task_id}.claude.last.txt"
+            claude_result = _run_review_agent(
+                "claude",
+                prompt=claude_prompt,
+                worktree=target_wt,
+                timeout=review_timeout,
+                logf=logf,
+                last_msg_path=claude_last_msg_path,
+            )
+            if claude_result.get("error"):
+                o.braid_template_record_use(reviewer_template, topology_error=True)
+                blocker = "llm_timeout" if "timeout" in claude_result["error"] else "llm_exit_error"
+                fail_task(task_id, "running", claude_result["error"],
+                          blocker_code=blocker, summary="claude reviewer failed", retryable=True)
+                return
+            if claude_result.get("verdict") == "topology_error":
+                o.braid_template_record_use(reviewer_template, topology_error=True)
+                fail_task(task_id, "running", "claude reviewer topology error",
+                          blocker_code="template_graph_error", summary="claude reviewer topology error", retryable=True)
+                return
+            combined_findings = (combined_findings + "\n\n" + claude_result.get("raw", "")).strip()
+            final_verdict = claude_result.get("verdict")
 
-    raw = last_msg_path.read_text(errors="replace") if last_msg_path.exists() else ""
-    verdict = None
-    for line in reversed([l.strip() for l in raw.splitlines() if l.strip()][-15:]):
-        if line.startswith("BRAID_OK: APPROVE"):
-            verdict = "approve"; break
-        if line.startswith("BRAID_OK: REQUEST_CHANGE"):
-            verdict = "request_change"; break
-        if line.startswith("BRAID_TOPOLOGY_ERROR"):
-            verdict = "topology_error"; break
+        if final_verdict == "approve" and policy_findings:
+            final_verdict = "request_change"
+            combined_findings = (
+                combined_findings
+                + "\n\nPolicy gate findings:\n"
+                + "\n".join(f"- {item}" for item in policy_findings)
+            )
 
-    if verdict is None:
+    if final_verdict is None:
         fail_task(task_id, "running", "no review verdict trailer",
                   blocker_code="model_output_invalid", summary="review verdict missing", retryable=False)
         return
 
-    if verdict == "topology_error":
+    if final_verdict == "topology_error":
         o.braid_template_record_use(reviewer_template, topology_error=True)
         fail_task(task_id, "running", "reviewer topology error",
                   blocker_code="template_graph_error", summary="reviewer topology error", retryable=True)
@@ -2227,20 +2501,21 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
     o.braid_template_record_use(reviewer_template, topology_error=False)
 
     def mut_target(t):
-        t["review_verdict"] = verdict
+        t["review_verdict"] = final_verdict
         t["reviewed_at"] = o.now_iso()
         t["reviewed_by"] = task_id
+        t["policy_review_findings"] = policy_findings
 
-    if verdict == "approve":
+    if final_verdict == "approve":
         o.move_task(target_id, "awaiting-review", "awaiting-qa",
                     reason=f"approved by {task_id}", mutator=mut_target)
     else:
-        _handle_review_request_change(task_id, project_name, target, raw[:6000], mut_target)
+        _handle_review_request_change(task_id, project_name, target, combined_findings[:12000], mut_target)
 
     def mut_self(t):
         t["finished_at"] = o.now_iso()
     o.move_task(task_id, "running", "done",
-                reason=f"reviewed {target_id} -> {verdict}", mutator=mut_self)
+                reason=f"reviewed {target_id} -> {final_verdict}", mutator=mut_self)
 
 
 def _handle_review_request_change(reviewer_task_id, project_name, target, review_findings, mut_target):
@@ -2336,12 +2611,12 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
                   blocker_code="runtime_precondition_failed", summary="review-feedback missing target_task_id", retryable=False)
         return
 
-    target_file = o.queue_dir("queued") / f"{target_id}.json"
-    target = o.read_json(target_file, None)
-    if target is None:
-        fail_task(task_id, "claimed", f"review-feedback: target {target_id} not in queued/",
+    found = o.find_task(target_id, states=("queued", "awaiting-review", "awaiting-qa", "done", "failed"))
+    if not found:
+        fail_task(task_id, "claimed", f"review-feedback: target {target_id} not found in queue",
                   blocker_code="qa_target_missing", summary="review-feedback target missing", retryable=False)
         return
+    target_state, target = found
 
     wt_str = task.get("worktree") or target.get("worktree")
     if not wt_str or not pathlib.Path(wt_str).exists():
@@ -2382,7 +2657,7 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
     lock_fh = None
     try:
         lock_fh = acquire_lock(f"{project['name']}.lock", mode="shared", timeout_sec=60)
-        memory_ctx = read_memory_context(project["path"])
+        memory_ctx = read_memory_context(project["name"], project["path"])
         diff_text = _git(wt, "diff", base_branch).stdout or ""
         if len(diff_text) > 30000:
             diff_text = diff_text[:30000] + "\n\n[...diff truncated at 30k chars...]\n"
@@ -2501,7 +2776,7 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
             t["review_feedback_rounds"] = int(round_no or t.get("review_feedback_rounds", 0))
             if info not in ("", "clean"):
                 t["artifacts"] = t.get("artifacts", []) + [info]
-        o.move_task(target_id, "queued", "awaiting-review",
+        o.move_task(target_id, target_state, "awaiting-review",
                     reason=f"review feedback applied ({task_id})", mutator=mut_target)
 
         def mut_done(t):
@@ -2581,6 +2856,7 @@ def build_pr_feedback_prompt(*, target, graph_body, base_branch, conflicts, comm
     for i, c in enumerate(comments or [], 1):
         comment_blocks.append(
             f"### Comment {i} by @{c.get('author','?')} at {c.get('created_at','?')}\n"
+            f"path={c.get('path','?')} line={c.get('line','?')} thread_id={c.get('thread_id','?')}\n"
             f"{c.get('body','').strip()}"
         )
     comments_text = "\n\n".join(comment_blocks) or "(no review comments — rebase-only run)"
@@ -2618,6 +2894,7 @@ def build_pr_feedback_prompt(*, target, graph_body, base_branch, conflicts, comm
         f"- The base branch `{base_branch}` has already been fetched from origin.\n"
         f"- If there are conflicts, rebase onto origin/{base_branch} and resolve them.\n"
         "- Apply fixes requested by the review comments.\n"
+        "- Treat each review comment as unresolved until the offending condition is actually gone in the current branch head.\n"
         "- If a failed check points at workflow or CI breakage, repair the underlying cause in the branch.\n"
         "- Commit your changes using the existing agent git identity if needed.\n"
         "- Do NOT push — worker.py will re-run smoke and push with --force-with-lease "
@@ -2641,6 +2918,7 @@ def build_feature_pr_feedback_prompt(*, task, graph_body, comments, pr_number, c
     for i, c in enumerate(comments or [], 1):
         comment_blocks.append(
             f"### Comment {i} by @{c.get('author','?')} at {c.get('created_at','?')}\n"
+            f"path={c.get('path','?')} line={c.get('line','?')} thread_id={c.get('thread_id','?')}\n"
             f"{c.get('body','').strip()}"
         )
     comments_text = "\n\n".join(comment_blocks) or "(no review comments — conflict-only run)"
@@ -2673,6 +2951,7 @@ def build_feature_pr_feedback_prompt(*, task, graph_body, comments, pr_number, c
         "- If there are conflicts, merge `origin/main` into your current branch and resolve them.\n"
         "- Do NOT rebase this branch onto `main`; the follow-up PR must still target the feature branch.\n"
         "- Apply fixes requested by the feature PR review comments.\n"
+        "- Treat each review comment as unresolved until the offending condition is actually gone in the current branch head.\n"
         "- If a failed check points at workflow or CI breakage, repair the underlying cause in the feature branch.\n"
         "- Commit your changes using the existing agent git identity if needed.\n\n"
         "[OUTPUT CONTRACT]\n"
@@ -2955,9 +3234,8 @@ def run_pr_feedback_task(task, cfg):
         # Case 3.5 forever. Failures are logged but not fatal: the fix
         # is already pushed, and a stuck unresolved thread is a re-check,
         # not a regression.
-        thread_ids = [
-            c.get("thread_id") for c in (comments or []) if c.get("thread_id")
-        ]
+        eligible_thread_comments = _eligible_thread_comments_for_auto_resolution(wt, comments or [])
+        thread_ids = [c.get("thread_id") for c in eligible_thread_comments if c.get("thread_id")]
         resolved_count = 0
         if thread_ids:
             resolved_count, failed_count = o._resolve_review_threads(
@@ -2968,6 +3246,9 @@ def run_pr_feedback_task(task, cfg):
                     f"\n# resolveReviewThread: {resolved_count} resolved, "
                     f"{failed_count} failed ({len(set(thread_ids))} unique thread(s))\n"
                 )
+        elif comments:
+            with log_path.open("a") as lf:
+                lf.write("\n# resolveReviewThread: skipped; no thread comment passed local resolution checks\n")
 
         review_ok = review_reason = None
         if pr_number:
@@ -3116,7 +3397,7 @@ def run_codex_slot(task, cfg):
             project["path"], task_id, base_branch=base_branch,
         )
 
-        memory_ctx = read_memory_context(project["path"])
+        memory_ctx = read_memory_context(project["name"], project["path"])
         if mode == "feature-pr-feedback":
             prompt = build_feature_pr_feedback_prompt(
                 task=task,
@@ -3323,6 +3604,7 @@ def build_codex_prompt(task, graph_body, memory_ctx):
         "Edit existing files in place — do NOT create new files at the worktree root.\n\n"
         "[PROJECT MEMORY]\n"
         f"{memory_ctx}\n\n"
+        "Treat the policy/rule content in the context above as binding, not advisory.\n\n"
         "[OUTPUT CONTRACT]\n"
         "Emit exactly one of these as the final line of your response:\n"
         "  BRAID_OK: <one-line summary of what you did>\n"
@@ -3550,6 +3832,76 @@ def run_qa_slot(task, cfg):
                 # state. Tasks set by run_codex_slot carry `base_branch` — fall
                 # back to deriving it from feature_id for older records.
                 target_base = target.get("base_branch") or base_branch_for_task(target)
+                qa_gate = _run_semantic_qa_gate(
+                    project["name"],
+                    project["path"],
+                    target_wt,
+                    target_base,
+                    target,
+                    log_path,
+                    timeout,
+                )
+                qa_gate_raw = (qa_gate.get("raw") or "")[:12000]
+                if qa_gate.get("error"):
+                    def mut_target_gate_fail(t):
+                        t["finished_at"] = o.now_iso()
+                        t["qa_failure"] = qa_gate["error"]
+                        t["qa_gate_output"] = qa_gate_raw
+                        o.set_task_blocker(
+                            t,
+                            "qa_scope_inadequate",
+                            summary="semantic QA gate failed",
+                            detail=qa_gate["error"],
+                            source="worker",
+                            retryable=True,
+                        )
+                    o.move_task(target_id, "awaiting-qa", "failed",
+                                reason="semantic qa gate failed", mutator=mut_target_gate_fail)
+                    def mut_driver_gate_fail(t):
+                        t["finished_at"] = o.now_iso()
+                    o.move_task(task_id, "running", "done",
+                                reason=f"semantic qa gate failed for {target_id}", mutator=mut_driver_gate_fail)
+                    return
+                if qa_gate.get("verdict") == "topology_error":
+                    def mut_target_gate_topology(t):
+                        t["finished_at"] = o.now_iso()
+                        t["qa_gate_output"] = qa_gate_raw
+                        o.set_task_blocker(
+                            t,
+                            "template_graph_error",
+                            summary="semantic QA gate topology error",
+                            detail=qa_gate_raw or "semantic QA gate topology error",
+                            source="worker",
+                            retryable=True,
+                        )
+                    o.move_task(target_id, "awaiting-qa", "failed",
+                                reason="semantic qa topology error", mutator=mut_target_gate_topology)
+                    def mut_driver_gate_topology(t):
+                        t["finished_at"] = o.now_iso()
+                    o.move_task(task_id, "running", "done",
+                                reason=f"semantic qa topology error for {target_id}", mutator=mut_driver_gate_topology)
+                    return
+                if qa_gate.get("verdict") != "approve":
+                    def mut_target_scope_fail(t):
+                        t["finished_at"] = o.now_iso()
+                        t["qa_failure"] = "semantic QA scope inadequate"
+                        t["qa_gate_output"] = qa_gate_raw
+                        o.set_task_blocker(
+                            t,
+                            "qa_scope_inadequate",
+                            summary="QA scope inadequate for change",
+                            detail=qa_gate_raw or "semantic QA scope inadequate",
+                            source="worker",
+                            retryable=True,
+                        )
+                    o.move_task(target_id, "awaiting-qa", "failed",
+                                reason="semantic qa scope inadequate", mutator=mut_target_scope_fail)
+                    def mut_driver_scope_fail(t):
+                        t["finished_at"] = o.now_iso()
+                    o.move_task(task_id, "running", "done",
+                                reason=f"semantic qa scope inadequate for {target_id}", mutator=mut_driver_scope_fail)
+                    return
+
                 # Pattern B: always write pr-body.md; push only if opted-in.
                 pr_body_path = None
                 try:
@@ -3645,6 +3997,7 @@ def run_qa_slot(task, cfg):
                     def mut_target_ok(t):
                         t["finished_at"] = o.now_iso()
                         t["qa_passed_at"] = o.now_iso()
+                        t["qa_gate_output"] = qa_gate_raw
                         if pr_body_path:
                             t["pr_body_path"] = str(pr_body_path)
                         if pushed_info:
