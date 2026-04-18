@@ -4,7 +4,7 @@ These rules apply to every agent operating in this repository, whether autonomou
 
 ## Canonical Checkout
 
-- Do not edit the canonical checkout at `/Volumes/devssd/orchestrator` directly for ordinary implementation work.
+- Do not edit the canonical checkout directly for ordinary implementation work.
 - Treat canonical `main` as runtime infrastructure, not as a scratch workspace.
 - Only deployment/promotion steps may intentionally write to canonical `main`.
 

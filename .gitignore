@@ -2,6 +2,8 @@
 config/telegram.json
 config/gh-token
 config/*.env
+config/orchestrator.local.json
+config/context-sources.json
 
 # Live BRAID stats — mutates per task claim, regenerable from logs
 braid/index.json

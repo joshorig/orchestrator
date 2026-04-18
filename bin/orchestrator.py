@@ -32,9 +32,12 @@ import tempfile
 import time
 import uuid
 
-DEV_ROOT = pathlib.Path(os.environ.get("DEV_ROOT", "/Volumes/devssd"))
-STATE_ROOT = DEV_ROOT / "orchestrator"
-CONFIG_PATH = STATE_ROOT / "config" / "orchestrator.json"
+STATE_ROOT = pathlib.Path(__file__).resolve().parent.parent
+DEV_ROOT = pathlib.Path(os.environ.get("DEV_ROOT", str(STATE_ROOT.parent)))
+CONFIG_LOCAL_PATH = STATE_ROOT / "config" / "orchestrator.local.json"
+CONFIG_EXAMPLE_PATH = STATE_ROOT / "config" / "orchestrator.example.json"
+CONTEXT_SOURCES_LOCAL_PATH = STATE_ROOT / "config" / "context-sources.json"
+CONTEXT_SOURCES_EXAMPLE_PATH = STATE_ROOT / "config" / "context-sources.example.json"
 GH_TOKEN_PATH = STATE_ROOT / "config" / "gh-token"
 QUEUE_ROOT = STATE_ROOT / "queue"
 AGENT_STATE_DIR = STATE_ROOT / "state" / "agents"
@@ -330,11 +333,18 @@ WORKFLOW_REPAIR_POLICY = (
         "diagnosis": "QA target state or worktree is missing; inspect queue/worktree lifecycle before retrying",
     },
     {
-        "name": "runtime_env_dirty_report",
+        "name": "runtime_env_dirty_repair",
         "kind": "environment_degraded",
         "blocker_code": "runtime_env_dirty",
-        "action": None,
-        "diagnosis": "runtime environment is degraded; wait for environment health to recover",
+        "action": "repair_environment",
+        "diagnosis": "runtime environment is degraded; attempt bounded autonomous repair first",
+    },
+    {
+        "name": "delivery_auth_repair",
+        "kind": "environment_degraded",
+        "blocker_code": "delivery_auth_expired",
+        "action": "repair_environment",
+        "diagnosis": "delivery auth is degraded; attempt bounded autonomous repair first",
     },
     {
         "name": "runtime_precondition_report",
@@ -467,6 +477,18 @@ CONFIG_DEFAULTS = {
         "council_members": ("socrates", "feynman", "ada", "torvalds"),
         "restart_launch_agents": True,
     },
+    "council": {
+        "enabled": True,
+        "planner_panel": ("aristotle", "socrates", "meadows"),
+        "review_panel": ("socrates", "kahneman", "torvalds"),
+        "qa_panel": ("feynman", "kahneman", "ada"),
+    },
+}
+CONTEXT_SOURCE_DEFAULTS = {
+    "engineering_skills_root": "",
+    "council_root": "",
+    "token_savior_root": "",
+    "token_savior_python": "",
 }
 
 BRAID_RECENT_OUTCOMES_MAX = 50
@@ -514,15 +536,62 @@ def load_gh_token_env():
 load_gh_token_env()
 
 
+def _read_json_if_exists(path):
+    if not pathlib.Path(path).exists():
+        return {}
+    return json.loads(pathlib.Path(path).read_text())
+
+
+def _deep_merge_dicts(base, override):
+    merged = dict(base)
+    for key, value in (override or {}).items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dicts(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def load_config():
-    data = json.loads(CONFIG_PATH.read_text())
+    base_path = CONFIG_EXAMPLE_PATH
+    if not base_path.exists():
+        raise FileNotFoundError(f"missing orchestrator config example: {CONFIG_EXAMPLE_PATH}")
+    data = _read_json_if_exists(base_path)
+    if CONFIG_LOCAL_PATH.exists():
+        data = _deep_merge_dicts(data, _read_json_if_exists(CONFIG_LOCAL_PATH))
     for key, value in CONFIG_DEFAULTS.items():
         if isinstance(value, dict):
-            merged = dict(value)
-            merged.update(data.get(key) or {})
-            data[key] = merged
+            data[key] = _deep_merge_dicts(value, data.get(key) or {})
         else:
             data.setdefault(key, value)
+    return data
+
+
+def load_context_sources():
+    data = dict(CONTEXT_SOURCE_DEFAULTS)
+    if CONTEXT_SOURCES_EXAMPLE_PATH.exists():
+        data = _deep_merge_dicts(data, _read_json_if_exists(CONTEXT_SOURCES_EXAMPLE_PATH))
+    if CONTEXT_SOURCES_LOCAL_PATH.exists():
+        data = _deep_merge_dicts(data, _read_json_if_exists(CONTEXT_SOURCES_LOCAL_PATH))
+
+    env_overrides = {
+        "engineering_skills_root": os.environ.get("ORCH_ENGINEERING_SKILLS_ROOT", "").strip(),
+        "council_root": os.environ.get("ORCH_COUNCIL_ROOT", "").strip(),
+        "token_savior_root": os.environ.get("ORCH_TOKEN_SAVIOR_ROOT", "").strip(),
+        "token_savior_python": os.environ.get("ORCH_TOKEN_SAVIOR_PYTHON", "").strip(),
+    }
+    for key, value in env_overrides.items():
+        if value:
+            data[key] = value
+
+    fallbacks = {
+        "engineering_skills_root": STATE_ROOT / "skills" / "engineering-memory" / "skills",
+        "council_root": STATE_ROOT / "vendor" / "council-of-high-intelligence",
+        "token_savior_root": STATE_ROOT / "vendor" / "token-savior",
+    }
+    for key, path in fallbacks.items():
+        if not data.get(key) and path.exists():
+            data[key] = str(path)
     return data
 
 
@@ -556,6 +625,21 @@ def _launchctl_loaded_labels():
         if parts:
             labels.add(parts[-1])
     return labels
+
+
+def _launchctl_setenv(name, value):
+    try:
+        proc = subprocess.run(
+            ["launchctl", "setenv", name, value],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, str(exc)
+    detail = (proc.stderr or proc.stdout or "").strip()
+    return proc.returncode == 0, detail or "ok"
 
 
 def _git_ok(repo_path, *args):
@@ -625,6 +709,120 @@ def _project_main_preflight_issue(project):
             "detail": detail[:200] or f"{project['path']} local main has commits not in origin/main",
         }
     return None
+
+
+def _repair_project_fetch_state(project):
+    repo_path = pathlib.Path(project["path"])
+    ok, git_dir_text = _git_ok(repo_path, "rev-parse", "--git-dir")
+    if not ok:
+        return {"fixed": False, "action": "git_dir_unavailable", "detail": git_dir_text[:200]}
+    git_dir = pathlib.Path(git_dir_text)
+    if not git_dir.is_absolute():
+        git_dir = (repo_path / git_dir).resolve()
+    fetch_head = git_dir / "FETCH_HEAD"
+    repaired = []
+    try:
+        if fetch_head.exists():
+            fetch_head.chmod(fetch_head.stat().st_mode | 0o600)
+            repaired.append("chmod FETCH_HEAD")
+    except OSError:
+        pass
+    try:
+        if fetch_head.exists():
+            fetch_head.unlink()
+            repaired.append("remove FETCH_HEAD")
+    except OSError:
+        pass
+    ok, detail = _git_ok(repo_path, "fetch", "origin", "main")
+    return {
+        "fixed": ok,
+        "action": "git_fetch_retry",
+        "detail": detail[:200],
+        "changes": repaired,
+    }
+
+
+def repair_environment():
+    """Attempt bounded autonomous fixes for known environment failures."""
+    cfg = load_config()
+    health = environment_health(refresh=True)
+    attempts = []
+
+    for issue in health.get("issues", []):
+        if issue.get("severity") != "error":
+            continue
+        code = issue.get("code")
+        summary = issue.get("summary") or ""
+        project_name = issue.get("project")
+        project = None
+        if project_name:
+            try:
+                project = get_project(cfg, project_name)
+            except KeyError:
+                project = None
+
+        result = {"fixed": False, "issue": issue}
+        if code == "delivery_auth_expired" and "GH_TOKEN unavailable" in summary:
+            token_loaded = load_gh_token_env()
+            launchctl_ok = False
+            launchctl_detail = ""
+            if token_loaded and os.environ.get("GH_TOKEN", "").strip():
+                launchctl_ok, launchctl_detail = _launchctl_setenv("GH_TOKEN", os.environ["GH_TOKEN"])
+            result = {
+                "fixed": token_loaded,
+                "action": "load_gh_token",
+                "detail": launchctl_detail or ("ok" if token_loaded else "GH_TOKEN still unavailable"),
+                "changes": ["launchctl setenv GH_TOKEN"] if launchctl_ok else [],
+                "issue": issue,
+            }
+        elif code == "runtime_env_dirty" and summary == "worktrees root missing":
+            worktrees_root = DEV_ROOT / "worktrees"
+            worktrees_root.mkdir(parents=True, exist_ok=True)
+            result = {
+                "fixed": worktrees_root.exists(),
+                "action": "mkdir_worktrees_root",
+                "detail": str(worktrees_root),
+                "changes": [str(worktrees_root)],
+                "issue": issue,
+            }
+        elif code == "runtime_env_dirty" and summary == "required launchd job not loaded":
+            label = (issue.get("detail") or "").strip()
+            plist = pathlib.Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
+            if plist.exists():
+                proc = subprocess.run(
+                    ["launchctl", "load", str(plist)],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+                result = {
+                    "fixed": proc.returncode == 0,
+                    "action": "load_launch_agent",
+                    "detail": (proc.stderr or proc.stdout or "").strip()[:240] or label,
+                    "changes": [str(plist)] if proc.returncode == 0 else [],
+                    "issue": issue,
+                }
+            else:
+                result = {
+                    "fixed": False,
+                    "action": "missing_launch_agent_plist",
+                    "detail": str(plist),
+                    "issue": issue,
+                }
+        elif code == "runtime_env_dirty" and summary == "fetch origin main failed" and project is not None:
+            repair = _repair_project_fetch_state(project)
+            result = {**repair, "issue": issue}
+
+        attempts.append(result)
+
+    refreshed = environment_health(refresh=True)
+    return {
+        "attempted": len(attempts),
+        "attempts": attempts,
+        "ok": refreshed.get("ok", False),
+        "remaining_error_count": len([i for i in refreshed.get("issues", []) if i.get("severity") == "error"]),
+    }
 
 
 def environment_health(*, refresh=False):
@@ -1604,8 +1802,10 @@ def _atomic_claim_doctest_case(dep_state):
     with tempfile.TemporaryDirectory() as tmp:
         old_root = atomic_claim.__globals__["QUEUE_ROOT"]
         old_now = atomic_claim.__globals__["now_iso"]
+        old_env_ok = atomic_claim.__globals__["project_environment_ok"]
         atomic_claim.__globals__["QUEUE_ROOT"] = pathlib.Path(tmp)
         atomic_claim.__globals__["now_iso"] = lambda: "2026-04-14T12:00:00"
+        atomic_claim.__globals__["project_environment_ok"] = lambda *args, **kwargs: True
         try:
             for state in STATES:
                 _ = queue_dir(state)
@@ -1624,6 +1824,7 @@ def _atomic_claim_doctest_case(dep_state):
         finally:
             atomic_claim.__globals__["QUEUE_ROOT"] = old_root
             atomic_claim.__globals__["now_iso"] = old_now
+            atomic_claim.__globals__["project_environment_ok"] = old_env_ok
 
 
 def project_hard_stopped(project_name):
@@ -7400,30 +7601,31 @@ def _environment_health_issues():
     for issue in environment_health(refresh=True).get("issues", []):
         if issue.get("severity") != "error":
             continue
-        issues.append(
-            {
-                "feature_id": f"env:{issue.get('project') or 'global'}",
-                "project": issue.get("project") or "global",
-                "summary": issue.get("summary") or "environment degraded",
-                "issue_key": f"env:{issue.get('project') or 'global'}:{issue.get('code')}:{issue.get('summary')}",
-                "kind": "environment_degraded",
-                "task_id": None,
-                "task_state": "idle",
-                "blocker": make_blocker(
-                    issue.get("code") or "runtime_env_dirty",
-                    summary=issue.get("summary"),
-                    detail=issue.get("detail"),
-                    source="environment-health",
-                    retryable=False,
-                ),
-                "diagnosis": issue.get("detail") or issue.get("summary") or "environment degraded",
-                "workflow": {},
-                "task": None,
-                "attempts": 0,
-                "max_attempts": 0,
-                "outcome": "diagnosed only",
-            }
-        )
+        envelope = {
+            "feature_id": f"env:{issue.get('project') or 'global'}",
+            "project": issue.get("project") or "global",
+            "summary": issue.get("summary") or "environment degraded",
+            "issue_key": f"env:{issue.get('project') or 'global'}:{issue.get('code')}:{issue.get('summary')}",
+            "kind": "environment_degraded",
+            "task_id": None,
+            "task_state": "idle",
+            "blocker": make_blocker(
+                issue.get("code") or "runtime_env_dirty",
+                summary=issue.get("summary"),
+                detail=issue.get("detail"),
+                source="environment-health",
+                retryable=False,
+            ),
+            "diagnosis": issue.get("detail") or issue.get("summary") or "environment degraded",
+            "workflow": {},
+            "task": None,
+            "attempts": 0,
+            "max_attempts": 0,
+            "outcome": "diagnosed only",
+        }
+        pseudo_project = {"name": issue.get("project") or "global", "path": get_project(load_config(), issue["project"])["path"] if issue.get("project") and any(p["name"] == issue["project"] for p in load_config().get("projects", [])) else str(STATE_ROOT)}
+        envelope["action"], envelope["diagnosis"], envelope["policy"] = _workflow_policy_decision(envelope, None, pseudo_project)
+        issues.append(envelope)
     return issues
 
 
@@ -7433,13 +7635,44 @@ def tick_workflow_check():
     write_agent_status("workflow-check", "running", "Scanning feature workflows for blockers.")
 
     reaped = reap()
-    issues = _environment_health_issues()
+    issues = []
     action_cache = {}
 
     def cached_action(name, fn):
         if name not in action_cache:
             action_cache[name] = fn()
         return action_cache[name]
+
+    for env_issue in _environment_health_issues():
+        outcome = "diagnosed only"
+        if env_issue.get("action") == "repair_environment":
+            repair = cached_action("repair_environment", repair_environment)
+            still_present = any(
+                row.get("issue_key") == env_issue.get("issue_key")
+                for row in _environment_health_issues()
+            )
+            if still_present:
+                out = cached_action(
+                    "self_repair:environment",
+                    lambda: enqueue_self_repair(
+                        summary=_workflow_issue_self_repair_summary(env_issue),
+                        evidence=_workflow_issue_self_repair_evidence(env_issue),
+                        issue_kind=env_issue.get("kind") or "environment_degraded",
+                        source="workflow-check",
+                    ),
+                )
+                outcome = (
+                    f"environment repair attempted={repair.get('attempted', 0)} "
+                    f"remaining={repair.get('remaining_error_count', 0)}; "
+                    f"self-repair result: {json.dumps(out, sort_keys=True)}"
+                )
+            else:
+                outcome = (
+                    f"environment repair attempted={repair.get('attempted', 0)} "
+                    f"remaining={repair.get('remaining_error_count', 0)}"
+                )
+        env_issue["outcome"] = outcome
+        issues.append(env_issue)
 
     canary_issue = _canary_freshness_issue(cfg)
     if canary_issue:
@@ -7839,6 +8072,8 @@ def dispatch_telegram_command(text):
         return f"cleanup: checked={checked} cleaned={cleaned} skipped={skipped}"
     if text in ("/env", "env", "/env-health", "env-health"):
         return environment_health_text(refresh=True)
+    if text in ("/env-repair", "env-repair"):
+        return json.dumps(repair_environment(), sort_keys=True)
     if text == "/ask" or text == "ask":
         return "usage: /ask <question>"
     if text.startswith("/ask ") or text.startswith("ask "):
@@ -7877,7 +8112,7 @@ def dispatch_telegram_command(text):
         )
     return (
         "unknown command. allowed: /status /tasks /task <task_id> /queue /planner /reviewer /qa "
-        "/cleanup /env /ask <question> /regression <project> /report morning|evening /enqueue <summary> "
+        "/cleanup /env /env-repair /ask <question> /regression <project> /report morning|evening /enqueue <summary> "
         "/self_repair <summary> | <evidence>"
     )
 
@@ -7926,6 +8161,7 @@ def main(argv=None):
 
     p_env = sub.add_parser("env-health")
     p_env.add_argument("--refresh", action="store_true")
+    sub.add_parser("repair-environment")
 
     p_audit = sub.add_parser("tick-template-audit")
     p_audit.add_argument("--today", default=None)
@@ -8030,6 +8266,8 @@ def main(argv=None):
         print(json.dumps(out, sort_keys=True))
     elif args.cmd == "env-health":
         print(environment_health_text(refresh=args.refresh))
+    elif args.cmd == "repair-environment":
+        print(json.dumps(repair_environment(), sort_keys=True))
     elif args.cmd == "tick-template-audit":
         print(tick_template_audit(today=args.today))
     elif args.cmd == "workflow-check":

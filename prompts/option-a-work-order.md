@@ -25,11 +25,11 @@ flowchart TD;
 ## Shared context (inject into every subagent)
 
 ```yaml
-project_root: /Volumes/devssd/orchestrator
+project_root: ${ORCH_ROOT}
 canonical_repos:
-  lvc-standard:           /Volumes/devssd/repos/ull/lvc-standard
-  dag-framework:          /Volumes/devssd/repos/ull/dag_framework
-  trade-research-platform: /Volumes/devssd/repos/apps/trade-research-platform
+  lvc-standard:            ${LVC_STANDARD_ROOT}
+  dag-framework:           ${DAG_FRAMEWORK_ROOT}
+  trade-research-platform: ${TRP_ROOT}
 git_identity:
   name:  devmini-orchestrator
   email: devmini-orchestrator@joshorig.com
@@ -68,7 +68,7 @@ token_savior_bootstrap: &ts
 
 **Subagent instructions:**
 ```
-1. token_savior_bootstrap: *ts on /Volumes/devssd/orchestrator
+1. token_savior_bootstrap: *ts on ${ORCH_ROOT}
 2. Read braid/generators/lvc-implement-operator.prompt.md (in full — small file).
 3. Edit the generator prompt:
    a. Add mandatory rule: "One distinct Revise node per Check gate. Name them ReviseCheck1, ReviseCheck2, ..., ReviseCheckN. Shared Revise nodes across gates are FORBIDDEN — this is BRAID paper Appendix A.4 principle 4, enforced locally as lint rule R4."
@@ -107,14 +107,14 @@ token_savior_bootstrap: &ts
 
 **Subagent instructions:**
 ```
-1. token_savior_bootstrap: *ts on /Volumes/devssd/orchestrator
+1. token_savior_bootstrap: *ts on ${ORCH_ROOT}
 2. Discovery (no wholesale reads):
    mcp__token-savior__find_symbol(name="tick_planner")         # bin/orchestrator.py
    mcp__token-savior__find_symbol(name="run_claude_planner")   # bin/worker.py
    mcp__token-savior__find_symbol(name="classify_slice")       # bin/worker.py
    mcp__token-savior__find_symbol(name="create_feature")       # bin/orchestrator.py
    Read each via get_function_source only.
-3. Read config/orchestrator.json (small) for project->type mapping.
+3. Read local orchestrator config (small) for project->type mapping.
 4. Extend tick_planner:
    - Per project, when emitting a feature header + seed task, set braid_template to the project-specific historian task type:
        lvc-standard            → lvc-historian-update
@@ -159,7 +159,7 @@ token_savior_bootstrap: &ts
 
 **Subagent instructions:**
 ```
-1. token_savior_bootstrap: *ts on /Volumes/devssd/orchestrator
+1. token_savior_bootstrap: *ts on ${ORCH_ROOT}
 2. Discovery:
    mcp__token-savior__find_symbol(name="tick_reports")
    mcp__token-savior__find_symbol(name="report_command")
@@ -182,7 +182,7 @@ token_savior_bootstrap: &ts
 6. launchd plist:
    ~/Library/LaunchAgents/com.devmini.orchestrator.ppd-report.plist
    StartCalendarInterval: 07:45 daily
-   ProgramArguments: /opt/homebrew/bin/python3 /Volumes/devssd/orchestrator/bin/ppd_report.py
+   ProgramArguments: /opt/homebrew/bin/python3 ${ORCH_ROOT}/bin/ppd_report.py
 7. Smoke test:
    python3 bin/ppd_report.py --dry-run
    Expect: reports/ppd-<today>.md created with >=1 row per template, one row per slot.

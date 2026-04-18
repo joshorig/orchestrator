@@ -79,7 +79,7 @@ _Append-only. Top-to-bottom is priority order. Status mutates in place; entries 
 - **Notes:** This is how the system eventually handles "issue requires a fix to the workflow" safely instead of treating it as out-of-band operator work.
 
 ### [R-025] Autonomous environment repair, not just environment diagnosis
-- **Status:** TODO
+- **Status:** DONE (bounded env repair path landed in workflow-check + CLI, 2026-04-18)
 - **Feature id:** null
 - **Goal:** Environment issues must be treated as workflow work the runtime can clear autonomously, not merely reported as blocking host drift.
 - **Scope:** Extend `env-health` + `workflow-check` from typed diagnosis into bounded repair actions for canonical environment failures: repo fetch/write permission issues, launchd env drift, missing/invalid auth material, stale worktree roots, and repo-local permission repair where safe. Route recoverable cases through self-repair and bounded command repair paths before escalation; keep explicit evidence on what was changed.
@@ -89,7 +89,7 @@ _Append-only. Top-to-bottom is priority order. Status mutates in place; entries 
 - **Notes:** "Autonomous means autonomous" applies here. Environment repair is part of the workflow contract, not an external excuse path.
 
 ### [R-026] Engineering-memory and token-savior context injection for planner / solver / reviewer
-- **Status:** TODO
+- **Status:** DONE (role-aware memory retrieval + external context-source config landed, 2026-04-18)
 - **Feature id:** null
 - **Goal:** Planner, codex solvers, reviewers, and QA gates should consume durable project memory and skill/policy context consistently rather than relying mostly on `repo-memory` snapshots and prompt-local heuristics.
 - **Scope:** Promote engineering-memory skills and token-savior memory retrieval to first-class runtime context sources; define per-role retrieval packs (planner, implementer, reviewer, QA); include prior failures, reasoning traces, and relevant policy slices; keep retrieval read-only and bounded so prompts stay stable and auditable.
@@ -99,7 +99,7 @@ _Append-only. Top-to-bottom is priority order. Status mutates in place; entries 
 - **Notes:** This is the next step after the current direct engineering-memory skill injection. The remaining gap is durable retrieval and role-specific packing, especially from token-savior's new memory surface.
 
 ### [R-027] Council-backed planning and review deliberation
-- **Status:** TODO
+- **Status:** DONE (planner/reviewer/QA council panels recorded in runtime, 2026-04-18)
 - **Feature id:** null
 - **Goal:** Replace single-threaded pre-push judgment with bounded multi-perspective deliberation where the decision is consequential, especially in planner decomposition and internal review.
 - **Scope:** Integrate the local council-of-high-intelligence workflow as a structured Claude-side deliberation pass for planning and reviewer escalation modes; define when to run a quick triad versus a full council; preserve dissent instead of flattening to consensus; keep outputs machine-usable by the existing workflow gates.
@@ -109,7 +109,7 @@ _Append-only. Top-to-bottom is priority order. Status mutates in place; entries 
 - **Notes:** The current second-reviewer pass is useful but still shallow. This roadmap item is about making high-consequence review and planning decisions genuinely multi-perspective.
 
 ### [R-028] Semantic QA scope audit and gate completeness
-- **Status:** TODO
+- **Status:** DONE (scope expectations + log-signal audit enforced in semantic QA gate, 2026-04-18)
 - **Feature id:** null
 - **Goal:** QA must prove not just that a script passed, but that the right validation surface was exercised for the specific change.
 - **Scope:** Expand the current semantic QA gate into a first-class contract auditor: inspect changed files, expected validation classes, actual executed commands/logs/artifacts, and project-specific QA invariants; fail when benchmark, replay, API-contract, Playwright, a11y, or docs-validation scope is missing for the touched surface.
@@ -119,7 +119,7 @@ _Append-only. Top-to-bottom is priority order. Status mutates in place; entries 
 - **Notes:** This closes the gap where a branch can look "green" while having skipped the meaningful validation for the change.
 
 ### [R-029] Stronger unresolved-review closure semantics
-- **Status:** TODO
+- **Status:** DONE (diff-aware thread-resolution evidence + re-review-after-push enforcement, 2026-04-18)
 - **Feature id:** null
 - **Goal:** A review thread should only be auto-resolved when the runtime can prove the cited issue is gone at the pushed head, not merely because a repair task ran.
 - **Scope:** Replace heuristic thread-resolution checks with stronger evidence: current-file inspection, diff-aware marker matching, optional thread-body classification, and required re-review after each push; record exactly why a thread was considered resolved and keep unresolved when proof is weak.
@@ -161,7 +161,7 @@ _Append-only. Top-to-bottom is priority order. Status mutates in place; entries 
 ### [R-004] drift_threshold per-project override
 - **Status:** DONE (commit pending in orchestrator worktree, 2026-04-14)
 - **Feature id:** null
-- **Goal:** `config/orchestrator.json` projects table supports an optional `drift_threshold` that overrides the global `CONFIG_DEFAULTS["drift_threshold"] = 5` for a single project.
+- **Goal:** the orchestrator project config supports an optional `drift_threshold` that overrides the global `CONFIG_DEFAULTS["drift_threshold"] = 5` for a single project.
 - **Scope:** Extend the project schema with optional `drift_threshold`, thread through `load_config()` so it lands alongside the other per-project config, update `pr_sweep` to read project-level first and fall back to the global default, new inline doctest covering override + fallback paths.
 - **Out of scope:** Per-PR overrides, dynamic threshold tuning based on merge latency, UI for the override.
 - **Acceptance:** Landed in worktree: `pr_sweep` now reads `project["drift_threshold"]` first and falls back to the global default, with doctest coverage proving a project-local threshold of 10 suppresses a drift-sync dispatch that the global default of 5 would have triggered.
@@ -274,7 +274,7 @@ _Append-only. Top-to-bottom is priority order. Status mutates in place; entries 
 `_workflow_issue_from_summary()` now computes `feature_status` once and handles two classes of incidents outside the `open`-only branch: missing frontier child files and blocked/failed/abandoned frontier tasks remain diagnosable even after a feature leaves the simple open path, and `_feature_ready_for_finalize(feature)` now emits a `ready_for_finalize` issue before the open-state early return swallows it. This closes a control-plane blind spot where workflow-check could miss finalize-ready features or post-open frontier failures because the diagnosis logic was nested too narrowly under `status == "open"`. In the same change, `braid/templates/pr-address-feedback.mmd` was regenerated and its `braid/index.json` metadata refreshed so the PR-feedback self-heal lane matches the current conflict/check/comment routing contract, including explicit malformed/unreachable topology exits. This is a hardening pass on the trusted-runtime path, not a new product feature: the orchestrator should now surface finalize/repair work more deterministically and the BRAID template used for review-thread repair is aligned with the runtime's actual branch structure.
 
 ### [R-009] trade-research-platform regression — real-stack compose replay (equities + crypto), Option A corrected — 2026-04-14 (trp commit `dd04de7`, PR #27)
-`qa/regression.sh` now runs the full Playwright sweep against a compose-started backend (Option A corrected), replacing the Vite-dev-server shortcut. New `qa/docker-compose.regression.yml` brings up the replay-backed stack, the runner trap-tears-down on every failure path, and the sweep covers both equities and crypto fixtures end-to-end alongside the existing JMH + gradle-test + typecheck + lint + contract stages. Verified green on the `20260414-041636` run: `qa-artifacts/trade-research-platform/regression/20260414-041636/status.txt` reads `regression OK` and the artifact set includes `e2e-compose.log`, `e2e-full.log`, `playwright-report/`, `screens/`, `jmh-results.json`, `jmh-full.log`, `fixture-build.log`, `contract.log`, `diff.md`, `gradle-test.log`, `unit.log`, `typecheck.log`, `lint.log`, and the compose-logs directory. Satisfies the original R-009 acceptance criteria: compose comes up, full sweep runs against live backend, teardown survives every path, artifacts land under `/Volumes/devssd/qa-artifacts/trade-research-platform/regression/<ts>/`. Pass-2 crypto-specific Playwright assertions and cross-browser matrix remain out of scope for this entry — those sit with the trp project's own roadmap.
+`qa/regression.sh` now runs the full Playwright sweep against a compose-started backend (Option A corrected), replacing the Vite-dev-server shortcut. New `qa/docker-compose.regression.yml` brings up the replay-backed stack, the runner trap-tears-down on every failure path, and the sweep covers both equities and crypto fixtures end-to-end alongside the existing JMH + gradle-test + typecheck + lint + contract stages. Verified green on the `20260414-041636` run: `qa-artifacts/trade-research-platform/regression/20260414-041636/status.txt` reads `regression OK` and the artifact set includes `e2e-compose.log`, `e2e-full.log`, `playwright-report/`, `screens/`, `jmh-results.json`, `jmh-full.log`, `fixture-build.log`, `contract.log`, `diff.md`, `gradle-test.log`, `unit.log`, `typecheck.log`, `lint.log`, and the compose-logs directory. Satisfies the original R-009 acceptance criteria: compose comes up, full sweep runs against live backend, teardown survives every path, artifacts land under `${DEV_ROOT}/qa-artifacts/trade-research-platform/regression/<ts>/`. Pass-2 crypto-specific Playwright assertions and cross-browser matrix remain out of scope for this entry — those sit with the trp project's own roadmap.
 
 ### [R-014] pr-sweep self-heal on unresolved bot review threads — 2026-04-14 (commits `f06bf27`, `de95220`, `211e153`)
 Closed a merge-gate gap found live on lvc-standard PR #13: external review bots (allowlist: `chatgpt-codex-connector`) leave review-thread comments that `gh pr view --json comments` does NOT expose, so Case 2's REST-comment scan never saw them and Case 4 merged straight through with the threads unresolved. New `_unresolved_bot_review_threads` helper queries the GraphQL `reviewThreads { isResolved, comments { databaseId, author, body, url, createdAt } }` edge; Case 2.5 blocks merge AND dispatches a `pr-address-feedback` round against the offending comments (mirrors Case 2's dispatch contract — `PR_SWEEP_MAX_FEEDBACK_ROUNDS` cap, `handled_comment_ids` dedup, alert-on-cap escalation). `_resolve_review_threads` helper runs the `resolveReviewThread` mutation per unique `thread_id` after the fix lands (chatgpt-codex-connector does NOT auto-resolve its own threads, so the orchestrator has to) and is called from `worker.run_pr_feedback_task` after the push, stamping `resolved_thread_count` on the child task. Mirror GH-side gate at `.github/workflows/unresolved-bot-review.yml` in lvc-standard (feature commit `2a187bf`, cherry-pick to main tracked as [R-016]) runs the same GraphQL query as a required status check — the belt to Case 2.5's braces. Ordering fix in `211e153` moves Case 2.5 above Case 3's BLOCKED/UNSTABLE silent-stamp: the GH Action required check makes the PR UNSTABLE on the very condition the gate is meant to heal, so Case 3 was swallowing the self-heal signal before it ever reached Case 2.5 — the initial `de95220` dispatch code was unreachable until the reorder. Verified end-to-end on PR #14: Case 2.5 dispatched `task-20260414-192316-855e57` → codex pushed `bea658da3e4fd0a88c1157109af4095412e490f2` → `resolveReviewThread: 1 resolved, 0 failed` → next pr-sweep tick saw `isResolved=true`, fell through to Case 4, auto-merged into `feature/feature-20260414-045850-b7d47e` → `pr_final_state: MERGED`, subsequent ticks idle at `0 checked`. Doctests 58/58 green throughout. Follow-ons: [R-015] durable gh auth (the keychain-backed OAuth token the whole self-heal path depends on), [R-016] cherry-pick the backstop workflow to lvc-standard main.

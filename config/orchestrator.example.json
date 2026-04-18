@@ -1,0 +1,64 @@
+{
+  "slots": {
+    "claude": { "timeout_sec": 3600, "max_budget_usd": 0.5 },
+    "codex": { "timeout_sec": 7200 },
+    "qa": { "timeout_sec": 1800 }
+  },
+  "concurrency": {
+    "coding_workers": 1,
+    "review_workers": 1,
+    "qa_workers": 1
+  },
+  "workflow_check_max_attempts": 8,
+  "workflow_repair_policy": "default",
+  "synthetic_canary": {
+    "enabled": false,
+    "project": "example-project",
+    "interval_hours": 6,
+    "success_sla_hours": 24,
+    "max_frontier_age_hours": 2,
+    "summary": "Synthetic workflow canary",
+    "roadmap_entry_id": "R-021-CANARY",
+    "roadmap_title": "Synthetic workflow canary",
+    "roadmap_body": "Goal: validate the orchestrator end-to-end path with one tiny, safe slice."
+  },
+  "environment_health": {
+    "cache_sec": 60,
+    "required_launchd_labels": [
+      "planner",
+      "reviewer",
+      "qa-scheduler",
+      "reaper",
+      "pr-sweep",
+      "feature-finalize",
+      "workflow-check",
+      "telegram-bot",
+      "canary-workflows"
+    ]
+  },
+  "self_repair": {
+    "enabled": true,
+    "project": "devmini-orchestrator"
+  },
+  "council": {
+    "enabled": true,
+    "planner_panel": ["aristotle", "socrates", "meadows"],
+    "review_panel": ["socrates", "kahneman", "torvalds"],
+    "qa_panel": ["feynman", "kahneman", "ada"]
+  },
+  "projects": [
+    {
+      "name": "example-project",
+      "path": "/absolute/path/to/project",
+      "type": "application",
+      "playwright": true,
+      "auto_push": false,
+      "qa": {
+        "smoke": "qa/smoke.sh",
+        "regression": "qa/regression.sh",
+        "regression_days": ["sun"],
+        "regression_threshold_pct": 3
+      }
+    }
+  ]
+}

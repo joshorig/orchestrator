@@ -5,11 +5,13 @@
 
 set -euo pipefail
 
-DEV_ROOT="${DEV_ROOT:-/Volumes/devssd}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STATE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+DEV_ROOT="${DEV_ROOT:-$(cd "${STATE_ROOT}/.." && pwd)}"
 TMUX=/opt/homebrew/bin/tmux
 PY=/opt/homebrew/bin/python3
-ORCH="${DEV_ROOT}/orchestrator/bin/orchestrator.py"
-LOGS="${DEV_ROOT}/orchestrator/logs"
+ORCH="${STATE_ROOT}/bin/orchestrator.py"
+LOGS="${STATE_ROOT}/logs"
 
 if ! [ -x "$TMUX" ]; then
     echo "FATAL: tmux not found at $TMUX" >&2
@@ -31,6 +33,6 @@ fi
 
 # Window 3: free shell pane
 "$TMUX" new-window -t devmini -n shell
-"$TMUX" send-keys -t devmini:shell "cd ${DEV_ROOT} && clear" C-m
+"$TMUX" send-keys -t devmini:shell "cd ${STATE_ROOT} && clear" C-m
 
 echo "devmini session created"

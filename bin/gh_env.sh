@@ -5,8 +5,9 @@
 
 set -euo pipefail
 
-DEV_ROOT="${DEV_ROOT:-/Volumes/devssd}"
-TOKEN_FILE="${DEV_ROOT}/orchestrator/config/gh-token"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STATE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+TOKEN_FILE="${STATE_ROOT}/config/gh-token"
 
 if ! [ -f "$TOKEN_FILE" ]; then
   echo "gh-token missing: $TOKEN_FILE" >&2
