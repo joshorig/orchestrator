@@ -89,7 +89,7 @@ Parallelism, visual graph ingestion, and broader fleet rollout stay secondary un
 | `pr-address-feedback` | 0 | 0 | Hand-authored; no live runs yet |
 | `memory-synthesis` | 0 | 0 | Hand-authored; weekly schedule, no runs yet |
 
-`braid/index.json` is live and mutates on every task claim, so it is gitignored (the hash is tracked in the file, the counters are not). Query via `cat braid/index.json` or via the status CLI.
+`braid/index.json` is live runtime state and mutates on task claims and template lifecycle events, so it is intentionally untracked and gitignored. Query via `cat braid/index.json` or via the status CLI.
 
 ## Hard invariants (do not violate)
 

@@ -199,9 +199,9 @@ telegram/                   # runtime — legacy stub inbox/outbox (gitignored)
 tmux/                       # runtime — session state (gitignored)
 ```
 
-### `braid/index.json` schema
+### `braid/index.json` runtime schema
 
-The live counter file (gitignored) holds one entry per task type:
+The live runtime counter file (untracked, gitignored) holds one entry per task type:
 
 ```json
 {

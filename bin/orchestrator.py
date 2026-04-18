@@ -9,7 +9,7 @@ Storage layout:
   state/agents/<slot>.json            last-known status per slot
   braid/templates/<task_type>.mmd     cached Mermaid reasoning graphs
   braid/generators/<task_type>.prompt.md
-  braid/index.json                    template registry
+  braid/index.json                    live template registry (runtime state, untracked)
 
 This file is both a CLI entry point and a module. worker.py imports helpers.
 """
