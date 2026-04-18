@@ -59,6 +59,16 @@ python3 bin/orchestrator.py reserve-operator-worktree --name "<short-purpose>"
 
 That helper refuses by default if an active self-repair feature already owns the orchestrator control plane. Override only when you intentionally want to intervene in an already-active self-repair lane.
 
+The reserved worktree hydrates the local ignored config needed for operator work (`config/gh-token`, local orchestrator/context config, Telegram token, Claude env) by linking or copying it from the canonical checkout.
+
+Open an operator PR with repo-managed auth using:
+
+```bash
+python3 bin/orchestrator.py open-operator-pr --repo .
+```
+
+This defaults to a ready-for-review PR and first merges `origin/main` into the operator branch automatically. Use `--draft` only when you intentionally want to pause review, and `--no-sync-main` only when you do not want the pre-open branch refresh.
+
 ## Architecture
 
 ### State machine

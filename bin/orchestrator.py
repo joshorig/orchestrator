@@ -39,6 +39,13 @@ CONFIG_EXAMPLE_PATH = STATE_ROOT / "config" / "orchestrator.example.json"
 CONTEXT_SOURCES_LOCAL_PATH = STATE_ROOT / "config" / "context-sources.json"
 CONTEXT_SOURCES_EXAMPLE_PATH = STATE_ROOT / "config" / "context-sources.example.json"
 GH_TOKEN_PATH = STATE_ROOT / "config" / "gh-token"
+GITIGNORED_OPERATOR_CONFIGS = (
+    "config/gh-token",
+    "config/orchestrator.local.json",
+    "config/context-sources.json",
+    "config/telegram.json",
+    "config/claude.env",
+)
 QUEUE_ROOT = STATE_ROOT / "queue"
 AGENT_STATE_DIR = STATE_ROOT / "state" / "agents"
 RUNTIME_DIR = STATE_ROOT / "state" / "runtime"
@@ -540,17 +547,70 @@ def load_gh_token_env():
     token = os.environ.get("GH_TOKEN", "").strip()
     if token:
         return True
-    try:
-        token = GH_TOKEN_PATH.read_text().splitlines()[0].strip()
-    except (OSError, IndexError):
-        return False
+    token = ""
+    candidates = [GH_TOKEN_PATH]
+    canonical = canonical_orchestrator_root() / "config" / "gh-token"
+    if canonical != GH_TOKEN_PATH:
+        candidates.append(canonical)
+    for path in candidates:
+        try:
+            token = path.read_text().splitlines()[0].strip()
+        except (OSError, IndexError):
+            continue
+        if token:
+            break
     if not token:
         return False
     os.environ["GH_TOKEN"] = token
     return True
 
+def canonical_orchestrator_root():
+    """Best-effort canonical checkout path for this repo, preferring branch main."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(STATE_ROOT), "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, check=False, timeout=30,
+        )
+        if proc.returncode == 0:
+            current_path = None
+            current_branch = None
+            for raw in (proc.stdout or "").splitlines() + [""]:
+                line = raw.strip()
+                if line.startswith("worktree "):
+                    current_path = pathlib.Path(line.split(" ", 1)[1]).resolve()
+                    current_branch = None
+                elif line.startswith("branch "):
+                    current_branch = line.split(" ", 1)[1]
+                elif not line and current_path is not None:
+                    if current_branch == "refs/heads/main":
+                        return current_path
+                    current_path = None
+                    current_branch = None
+    except Exception:
+        pass
+    fallback = DEV_ROOT / "orchestrator"
+    return fallback.resolve() if fallback.exists() else STATE_ROOT
+
 
 load_gh_token_env()
+
+
+def gh_subprocess_env(extra_env=None):
+    """Return a subprocess env with GitHub token vars populated when available."""
+    env = os.environ.copy()
+    token = env.get("GH_TOKEN", "").strip()
+    if not token:
+        load_gh_token_env()
+        token = os.environ.get("GH_TOKEN", "").strip()
+        if token:
+            env["GH_TOKEN"] = token
+    if token:
+        env.setdefault("GH_TOKEN", token)
+        env.setdefault("GITHUB_TOKEN", token)
+        env.setdefault("GH_HOST", "github.com")
+    if extra_env:
+        env.update(extra_env)
+    return env
 
 
 def _read_json_if_exists(path):
@@ -2436,6 +2496,112 @@ def _parse_pr_create_output(stdout_text):
         if m:
             pr_number = int(m.group(1))
     return pr_url, pr_number
+
+
+def sync_operator_branch_with_main(repo_path, *, branch=None):
+    """Fetch origin/main and merge it into the operator branch before PR open.
+
+    Uses `-X ours` so branch-local operator changes win on conflicting hunks
+    while still absorbing the rest of upstream main automatically.
+    """
+    repo = pathlib.Path(repo_path).resolve()
+    env = gh_subprocess_env()
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True, text=True, check=False, timeout=30,
+    )
+    current = (branch or proc.stdout or "").strip()
+    if not current or current in ("HEAD", "main"):
+        return {"ok": False, "reason": f"refuse to sync branch {current or '(unknown)'}"}
+
+    fetch = subprocess.run(
+        ["git", "-C", str(repo), "fetch", "origin", "main"],
+        capture_output=True, text=True, check=False, timeout=120, env=env,
+    )
+    if fetch.returncode != 0:
+        return {"ok": False, "reason": (fetch.stderr or fetch.stdout or "git fetch failed").strip()[:400]}
+
+    behind = subprocess.run(
+        ["git", "-C", str(repo), "merge-base", "--is-ancestor", "origin/main", current],
+        capture_output=True, text=True, check=False, timeout=30,
+    )
+    if behind.returncode == 0:
+        return {"ok": True, "reason": "already_up_to_date", "branch": current}
+
+    merge = subprocess.run(
+        ["git", "-C", str(repo), "merge", "--no-edit", "-X", "ours", "origin/main"],
+        capture_output=True, text=True, check=False, timeout=120,
+    )
+    if merge.returncode != 0:
+        subprocess.run(
+            ["git", "-C", str(repo), "merge", "--abort"],
+            capture_output=True, text=True, check=False, timeout=30,
+        )
+        return {"ok": False, "reason": (merge.stderr or merge.stdout or "git merge failed").strip()[:400], "branch": current}
+
+    push = subprocess.run(
+        ["git", "-C", str(repo), "push", "origin", current],
+        capture_output=True, text=True, check=False, timeout=120, env=env,
+    )
+    if push.returncode != 0:
+        return {"ok": False, "reason": (push.stderr or push.stdout or "git push failed").strip()[:400], "branch": current}
+    return {"ok": True, "reason": "merged_origin_main", "branch": current}
+
+
+def open_operator_pr(*, repo_path=None, base_branch="main", head_branch=None, title=None, body_file=None, draft=False, sync_main=True):
+    """Open a PR for the current operator branch using repo-managed GH token.
+
+    Defaults to a ready-for-review PR. Use `draft=True` only when you want to
+    pause autonomous delivery intentionally.
+    """
+    repo = pathlib.Path(repo_path or os.getcwd()).resolve()
+    if shutil.which("gh") is None:
+        return {"ok": False, "reason": "gh CLI not installed"}
+    env = gh_subprocess_env()
+    if not env.get("GH_TOKEN", "").strip():
+        return {"ok": False, "reason": f"GH_TOKEN unavailable in {GH_TOKEN_PATH}"}
+    if head_branch is None:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, check=False, timeout=30,
+        )
+        head_branch = (proc.stdout or "").strip()
+    if not head_branch or head_branch in ("HEAD", "main"):
+        return {"ok": False, "reason": f"refuse to open PR from branch {head_branch or '(unknown)'}"}
+    sync_result = {"ok": True, "reason": "sync_skipped", "branch": head_branch}
+    if sync_main:
+        sync_result = sync_operator_branch_with_main(repo, branch=head_branch)
+        if not sync_result.get("ok"):
+            return {"ok": False, "reason": sync_result.get("reason"), "sync": sync_result}
+    if title is None:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "log", "-1", "--pretty=%s"],
+            capture_output=True, text=True, check=False, timeout=30,
+        )
+        title = ((proc.stdout or "").strip() or head_branch)[:120]
+    cmd = ["gh", "pr", "create", "--head", head_branch, "--base", base_branch, "--title", title]
+    if draft:
+        cmd.append("--draft")
+    if body_file:
+        cmd.extend(["--body-file", str(body_file)])
+    else:
+        cmd.append("--fill")
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(repo),
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "reason": "gh pr create timeout", "sync": sync_result}
+    if proc.returncode != 0:
+        return {"ok": False, "reason": (proc.stderr or proc.stdout or "gh pr create failed").strip()[:400], "sync": sync_result}
+    pr_url, pr_number = _parse_pr_create_output(proc.stdout or "")
+    return {"ok": True, "pr_url": pr_url, "pr_number": pr_number, "head_branch": head_branch, "base_branch": base_branch, "sync": sync_result}
 
 
 def pr_sweep(dry_run=False):
@@ -5107,214 +5273,22 @@ def list_self_repair_features(*, project_name=None, statuses=None):
     return feats
 
 
-def _active_self_repair_feature(project_name="devmini-orchestrator"):
-    rows = list_self_repair_features(project_name=project_name, statuses=("open", "finalizing"))
-    return rows[0] if rows else None
-
-
-def _self_repair_issue_key(*, issue_key=None, issue_kind="runtime_bug", summary="", evidence="", source="manual"):
-    if issue_key:
-        return str(issue_key)
-    raw = json.dumps(
-        {
-            "issue_kind": issue_kind,
-            "summary": (summary or "").strip(),
-            "evidence": (evidence or "").strip(),
-            "source": source,
-        },
-        sort_keys=True,
-    ).encode("utf-8")
-    return f"sha256:{hashlib.sha256(raw).hexdigest()}"
-
-
-def _self_repair_issue_live(issue):
-    task_id = (issue or {}).get("planner_task_id")
-    if not task_id:
-        return False
-    found = find_task(task_id)
-    return bool(found and found[0] not in ("done", "failed", "abandoned"))
-
-
-def _self_repair_pending_issues(feature):
-    issues = list(((feature or {}).get("self_repair") or {}).get("issues") or [])
-    return [issue for issue in issues if issue.get("status") in (None, "pending", "scheduled")]
-
-
-def _self_repair_has_active_work(feature):
-    feature_id = (feature or {}).get("feature_id")
-    if not feature_id:
-        return False
-    for item in _feature_related_tasks(feature_id):
-        if item.get("state") not in ("done", "abandoned"):
-            return True
-    return False
-
-
-def _self_repair_mark_issue(feature_id, issue_key, **updates):
-    def mut(feature):
-        sr = feature.setdefault("self_repair", {})
-        issues = sr.setdefault("issues", [])
-        for issue in issues:
-            if issue.get("issue_key") == issue_key:
-                issue.update(updates)
-                break
-    return update_feature(feature_id, mut)
-
-
-def _enqueue_self_repair_issue_task(feature, issue):
-    feature_id = feature["feature_id"]
-    repair_cfg = (feature.get("self_repair") or {}).copy()
-    task = new_task(
-        role="planner",
-        engine="claude",
-        project=feature["project"],
-        summary=f"Council-plan self-repair: {(issue.get('summary') or feature.get('summary') or '')[:210]}",
-        source=f"self-repair:{issue.get('source') or 'workflow-check'}",
-        braid_template="orchestrator-self-repair",
-        feature_id=feature_id,
-        engine_args={
-            "mode": "self-repair-plan",
-            "self_repair": {
-                "enabled": True,
-                "issue_kind": issue.get("issue_kind") or repair_cfg.get("issue_kind") or "runtime_bug",
-                "source": issue.get("source") or repair_cfg.get("source") or "manual",
-                "deploy_mode": repair_cfg.get("deploy_mode", "local-main"),
-                "council_members": list(repair_cfg.get("council_members") or ()),
-                "restart_launch_agents": bool(repair_cfg.get("restart_launch_agents", True)),
-            },
-            "evidence": issue.get("evidence") or "",
-            "issue_key": issue.get("issue_key"),
-            "issue_summary": issue.get("summary") or "",
-        },
-    )
-    enqueue_task(task)
-    append_feature_child(feature_id, task["task_id"])
-    _self_repair_mark_issue(
-        feature_id,
-        issue["issue_key"],
-        planner_task_id=task["task_id"],
-        status="scheduled",
-        scheduled_at=now_iso(),
-    )
-    append_event(
-        "self-repair",
-        "issue_task_enqueued",
-        task_id=task["task_id"],
-        feature_id=feature_id,
-        details={"issue_key": issue.get("issue_key"), "summary": issue.get("summary")},
-    )
-    return task
-
-
-def _attach_issue_to_self_repair_feature(feature, *, summary, evidence, issue_kind, source, issue_key=None):
-    attached_at = now_iso()
-    resolved_issue_key = _self_repair_issue_key(
-        issue_key=issue_key,
-        issue_kind=issue_kind,
-        summary=summary,
-        evidence=evidence,
-        source=source,
-    )
-    record = {
-        "issue_key": resolved_issue_key,
-        "issue_kind": issue_kind,
-        "summary": (summary or "").strip()[:240],
-        "evidence": (evidence or "").strip(),
-        "source": source,
-        "status": "pending",
-        "attached_at": attached_at,
-        "last_seen_at": attached_at,
-        "seen_count": 1,
-        "planner_task_id": None,
-    }
-
-    def mut(f):
-        sr = f.setdefault("self_repair", {})
-        issues = sr.setdefault("issues", [])
-        for issue in issues:
-            if issue.get("issue_key") == resolved_issue_key:
-                issue["last_seen_at"] = attached_at
-                issue["seen_count"] = int(issue.get("seen_count", 0) or 0) + 1
-                if record["evidence"] and record["evidence"] != issue.get("evidence"):
-                    issue["evidence"] = record["evidence"]
-                if record["summary"] and record["summary"] != issue.get("summary"):
-                    issue["summary"] = record["summary"]
-                issue["source"] = source
-                issue["issue_kind"] = issue_kind
-                break
-        else:
-            issues.append(record.copy())
-        sr["last_attached_issue_key"] = resolved_issue_key
-        sr["last_attached_at"] = attached_at
-
-    updated = update_feature(feature["feature_id"], mut)
-    attached_issue = next(
-        issue for issue in ((updated.get("self_repair") or {}).get("issues") or [])
-        if issue.get("issue_key") == resolved_issue_key
-    )
-    append_event(
-        "self-repair",
-        "issue_attached",
-        feature_id=feature["feature_id"],
-        task_id=attached_issue.get("planner_task_id"),
-        details={"issue_key": resolved_issue_key, "summary": attached_issue.get("summary")},
-    )
-    return updated, attached_issue
-
-
-def tick_self_repair_queue():
-    """Schedule the oldest pending issue onto the active self-repair feature.
-
-    >>> import pathlib, tempfile
-    >>> with tempfile.TemporaryDirectory() as tmp:
-    ...     root = pathlib.Path(tmp)
-    ...     feats = root / "features"; feats.mkdir()
-    ...     queue_root = root / "queue"
-    ...     for state in STATES:
-    ...         (queue_root / state).mkdir(parents=True, exist_ok=True)
-    ...     feature = {
-    ...         "feature_id": "feature-sr",
-    ...         "project": "devmini-orchestrator",
-    ...         "status": "open",
-    ...         "summary": "repair",
-    ...         "source": "self-repair:test",
-    ...         "child_task_ids": [],
-    ...         "self_repair": {"enabled": True, "issues": [{"issue_key": "i1", "summary": "fix queue", "evidence": "e", "source": "workflow-check", "issue_kind": "runtime_bug", "status": "pending"}]},
-    ...     }
-    ...     old = {k: tick_self_repair_queue.__globals__[k] for k in ("FEATURES_DIR", "QUEUE_ROOT", "new_task", "enqueue_task", "append_feature_child")}
-    ...     captured = {}
-    ...     tick_self_repair_queue.__globals__["FEATURES_DIR"] = feats
-    ...     tick_self_repair_queue.__globals__["QUEUE_ROOT"] = queue_root
-    ...     tick_self_repair_queue.__globals__["new_task"] = lambda **kwargs: {"task_id": "task-sr", **kwargs}
-    ...     tick_self_repair_queue.__globals__["enqueue_task"] = lambda task: captured.setdefault("task", task)
-    ...     tick_self_repair_queue.__globals__["append_feature_child"] = lambda fid, tid: update_feature(fid, lambda f: f.setdefault("child_task_ids", []).append(tid))
-    ...     write_json_atomic(feats / "feature-sr.json", feature)
-    ...     out = tick_self_repair_queue()
-    ...     saved = read_json(feats / "feature-sr.json", {})
-    ...     for key, value in old.items():
-    ...         tick_self_repair_queue.__globals__[key] = value
-    >>> out["scheduled"], captured["task"]["task_id"], saved["self_repair"]["issues"][0]["planner_task_id"]
-    (1, 'task-sr', 'task-sr')
-    """
-    scheduled = []
-    lock_fh = acquire_lock("self-repair.lock", mode="exclusive", timeout_sec=10)
-    try:
-        active = _active_self_repair_feature()
-        if not active or active.get("status") != "open":
-            return {"scheduled": 0, "feature_id": (active or {}).get("feature_id")}
-        if _self_repair_has_active_work(active):
-            return {"scheduled": 0, "feature_id": active["feature_id"], "reason": "feature_busy"}
-        pending = [issue for issue in _self_repair_pending_issues(active) if not _self_repair_issue_live(issue)]
-        if not pending:
-            return {"scheduled": 0, "feature_id": active["feature_id"], "reason": "no_pending_issues"}
-        pending.sort(key=lambda issue: (issue.get("attached_at") or "", issue.get("issue_key") or ""))
-        task = _enqueue_self_repair_issue_task(active, pending[0])
-        scheduled.append(task["task_id"])
-        return {"scheduled": len(scheduled), "feature_id": active["feature_id"], "task_ids": scheduled}
-    finally:
-        lock_fh.close()
-
-
+def _sync_operator_worktree_local_config(worktree_path):
+    wt_root = pathlib.Path(worktree_path)
+    for rel in GITIGNORED_OPERATOR_CONFIGS:
+        src = STATE_ROOT / rel
+        if not src.exists():
+            canonical = canonical_orchestrator_root() / rel
+            if canonical.exists():
+                src = canonical
+        dst = wt_root / rel
+        if not src.exists() or dst.exists():
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            dst.symlink_to(src)
+        except OSError:
+            shutil.copy2(src, dst)
 def reserve_orchestrator_operator_worktree(name, *, allow_with_self_repair=False):
     """Create a dedicated manual worktree for operator changes on this repo.
 
@@ -5354,6 +5328,7 @@ def reserve_orchestrator_operator_worktree(name, *, allow_with_self_repair=False
     )
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr or proc.stdout or "git worktree add failed").strip()[:300])
+    _sync_operator_worktree_local_config(wt_path)
     return {"branch": branch, "worktree": str(wt_path)}
 
 
@@ -8651,6 +8626,14 @@ def main(argv=None):
     p_wt = sub.add_parser("reserve-operator-worktree")
     p_wt.add_argument("--name", required=True)
     p_wt.add_argument("--allow-with-self-repair", action="store_true")
+    p_opr = sub.add_parser("open-operator-pr")
+    p_opr.add_argument("--repo", default=".")
+    p_opr.add_argument("--base", default="main")
+    p_opr.add_argument("--head", default=None)
+    p_opr.add_argument("--title", default=None)
+    p_opr.add_argument("--body-file", default=None)
+    p_opr.add_argument("--draft", action="store_true")
+    p_opr.add_argument("--no-sync-main", action="store_true")
 
     args = ap.parse_args(argv)
 
@@ -8784,6 +8767,17 @@ def main(argv=None):
         out = reserve_orchestrator_operator_worktree(
             args.name,
             allow_with_self_repair=args.allow_with_self_repair,
+        )
+        print(json.dumps(out, sort_keys=True))
+    elif args.cmd == "open-operator-pr":
+        out = open_operator_pr(
+            repo_path=args.repo,
+            base_branch=args.base,
+            head_branch=args.head,
+            title=args.title,
+            body_file=args.body_file,
+            draft=args.draft,
+            sync_main=not args.no_sync_main,
         )
         print(json.dumps(out, sort_keys=True))
 
