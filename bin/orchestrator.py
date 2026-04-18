@@ -547,14 +547,49 @@ def load_gh_token_env():
     token = os.environ.get("GH_TOKEN", "").strip()
     if token:
         return True
-    try:
-        token = GH_TOKEN_PATH.read_text().splitlines()[0].strip()
-    except (OSError, IndexError):
-        return False
+    token = ""
+    candidates = [GH_TOKEN_PATH]
+    canonical = canonical_orchestrator_root() / "config" / "gh-token"
+    if canonical != GH_TOKEN_PATH:
+        candidates.append(canonical)
+    for path in candidates:
+        try:
+            token = path.read_text().splitlines()[0].strip()
+        except (OSError, IndexError):
+            continue
+        if token:
+            break
     if not token:
         return False
     os.environ["GH_TOKEN"] = token
     return True
+
+def canonical_orchestrator_root():
+    """Best-effort canonical checkout path for this repo, preferring branch main."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(STATE_ROOT), "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, check=False, timeout=30,
+        )
+        if proc.returncode == 0:
+            current_path = None
+            current_branch = None
+            for raw in (proc.stdout or "").splitlines() + [""]:
+                line = raw.strip()
+                if line.startswith("worktree "):
+                    current_path = pathlib.Path(line.split(" ", 1)[1]).resolve()
+                    current_branch = None
+                elif line.startswith("branch "):
+                    current_branch = line.split(" ", 1)[1]
+                elif not line and current_path is not None:
+                    if current_branch == "refs/heads/main":
+                        return current_path
+                    current_path = None
+                    current_branch = None
+    except Exception:
+        pass
+    fallback = DEV_ROOT / "orchestrator"
+    return fallback.resolve() if fallback.exists() else STATE_ROOT
 
 
 load_gh_token_env()
@@ -5215,6 +5250,10 @@ def _sync_operator_worktree_local_config(worktree_path):
     wt_root = pathlib.Path(worktree_path)
     for rel in GITIGNORED_OPERATOR_CONFIGS:
         src = STATE_ROOT / rel
+        if not src.exists():
+            canonical = canonical_orchestrator_root() / rel
+            if canonical.exists():
+                src = canonical
         dst = wt_root / rel
         if not src.exists() or dst.exists():
             continue
