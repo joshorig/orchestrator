@@ -285,6 +285,14 @@ WORKFLOW_REPAIR_POLICY = (
         "diagnosis": "delivery credentials are expired; wait for auth refresh",
     },
     {
+        "name": "false_blocker_claim_self_repair",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "false_blocker_claim",
+        "action": "enqueue_self_repair",
+        "diagnosis": "solver emitted a control-plane false blocker claim; open orchestrator self-repair",
+        "when": "control_plane_feedback_bug",
+    },
+    {
         "name": "false_blocker_claim_report",
         "kind": "frontier_task_blocked",
         "blocker_code": "false_blocker_claim",
@@ -305,6 +313,14 @@ WORKFLOW_REPAIR_POLICY = (
         "action": "retry_task",
         "diagnosis": "target exists but moved to a different queue state; retry with the updated lifecycle logic",
         "when": "qa_target_relocated",
+    },
+    {
+        "name": "qa_target_missing_self_repair",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "qa_target_missing",
+        "action": "enqueue_self_repair",
+        "diagnosis": "workflow target lifecycle is inconsistent; open orchestrator self-repair",
+        "when": "qa_target_still_missing",
     },
     {
         "name": "qa_target_missing_report",
@@ -6728,6 +6744,43 @@ def _workflow_check_record_attempt(feature_id, issue_key, action, note):
     )
 
 
+def _workflow_issue_self_repair_summary(issue):
+    blocker = issue.get("blocker") or {}
+    project = issue.get("project") or "unknown-project"
+    kind = issue.get("kind") or "workflow-issue"
+    summary = issue.get("summary") or issue.get("feature_id") or "workflow issue"
+    blocker_code = blocker.get("code") or "runtime_bug"
+    task_id = issue.get("task_id") or "-"
+    return f"Self-repair {project}: {blocker_code} in {kind} for {task_id} — {summary}"[:240]
+
+
+def _workflow_issue_self_repair_evidence(issue):
+    blocker = issue.get("blocker") or {}
+    workflow = issue.get("workflow") or {}
+    frontier = workflow.get("frontier") or {}
+    lines = [
+        f"feature_id: {issue.get('feature_id')}",
+        f"project: {issue.get('project')}",
+        f"kind: {issue.get('kind')}",
+        f"summary: {issue.get('summary')}",
+        f"issue_key: {issue.get('issue_key')}",
+        f"task_id: {issue.get('task_id')}",
+        f"task_state: {issue.get('task_state')}",
+        f"blocker_code: {blocker.get('code')}",
+        f"blocker_summary: {blocker.get('summary')}",
+        f"blocker_detail: {blocker.get('detail')}",
+        f"diagnosis: {issue.get('diagnosis')}",
+        f"frontier_reason: {frontier.get('reason')}",
+    ]
+    repairs = workflow.get("repair_history") or []
+    if repairs:
+        evt = repairs[-1]
+        lines.append(
+            f"last_repair_activity: {evt.get('ts')} {evt.get('role')}:{evt.get('event')}"
+        )
+    return "\n".join(line for line in lines if line.split(": ", 1)[1] not in ("None", ""))
+
+
 def _workflow_check_worker_plists():
     home = pathlib.Path.home() / "Library" / "LaunchAgents"
     names = (
@@ -6818,6 +6871,18 @@ def _workflow_policy_matches(policy, issue, task, project):
     if when == "project_main_still_dirty":
         repo = repo_status(project["path"])
         return not (repo.get("exists") and not repo.get("dirty"))
+    if when == "control_plane_feedback_bug":
+        source = str((task or {}).get("source") or "")
+        detail = str((issue.get("blocker") or {}).get("detail") or "")
+        if not (
+            source.startswith("review-feedback:")
+            or source.startswith("pr-feedback:")
+            or "unresolved_review_threads" in detail
+            or "github_thread_resolution" in detail
+        ):
+            return False
+        self_repair = get_project(load_config(), "devmini-orchestrator")
+        return not _project_has_open_feature(self_repair["name"])
     if when == "qa_target_relocated":
         detail = str((issue.get("blocker") or {}).get("detail") or "")
         m = re.search(r"target ([A-Za-z0-9_-]+) ", detail)
@@ -6828,6 +6893,22 @@ def _workflow_policy_matches(policy, issue, task, project):
             return False
         state, _ = found
         return state != "queued"
+    if when == "qa_target_still_missing":
+        detail = str((issue.get("blocker") or {}).get("detail") or "")
+        if "review-feedback: target " not in detail and "pr-feedback: target " not in detail:
+            return False
+        m = re.search(r"target ([A-Za-z0-9_-]+) ", detail)
+        if not m:
+            return False
+        found = find_task(m.group(1), states=("queued", "awaiting-review", "awaiting-qa", "done", "failed"))
+        if not found:
+            self_repair = get_project(load_config(), "devmini-orchestrator")
+            return not _project_has_open_feature(self_repair["name"])
+        state, _ = found
+        if state == "queued":
+            return False
+        self_repair = get_project(load_config(), "devmini-orchestrator")
+        return not _project_has_open_feature(self_repair["name"])
     return True
 
 
@@ -7307,6 +7388,17 @@ def tick_workflow_check():
                     lambda: tick_canary_workflows(force=True),
                 )
                 outcome = f"canary scheduler result: {json.dumps(out, sort_keys=True)}"
+            elif action == "enqueue_self_repair":
+                out = cached_action(
+                    f"self_repair:{issue['issue_key']}",
+                    lambda: enqueue_self_repair(
+                        summary=_workflow_issue_self_repair_summary(issue),
+                        evidence=_workflow_issue_self_repair_evidence(issue),
+                        issue_kind=issue.get("kind") or "runtime_bug",
+                        source="workflow-check",
+                    ),
+                )
+                outcome = f"self-repair result: {json.dumps(out, sort_keys=True)}"
             else:
                 outcome = f"unknown action {action}"
 
