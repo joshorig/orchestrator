@@ -2365,6 +2365,15 @@ def self_repair_council_prompt(task, project, memory_ctx):
     engine_args = task.get("engine_args") or {}
     repair = engine_args.get("self_repair") or {}
     evidence = (engine_args.get("evidence") or "").strip()
+    issue_key = engine_args.get("issue_key") or "-"
+    feature = o.read_feature(task.get("feature_id")) if task.get("feature_id") else None
+    attached_issues = []
+    if feature:
+        for issue in ((feature.get("self_repair") or {}).get("issues") or []):
+            status = issue.get("status") or "pending"
+            attached_issues.append(
+                f"- [{status}] {issue.get('issue_key')}: {issue.get('summary') or '-'}"
+            )
     members = tuple(repair.get("council_members") or SELF_REPAIR_COUNCIL_DEFAULT)
     council_ctx = "\n\n".join(_council_member_context(member) for member in members)
     system_prompt = (
@@ -2378,6 +2387,12 @@ def self_repair_council_prompt(task, project, memory_ctx):
         "  key_agreements: list[str]\n"
         "  dissent: list[str]\n"
         "  execution_path: string\n"
+        "  chosen_strategy: string\n"
+        "  rejected_strategies: list[str]\n"
+        "  dissent_reasons: list[str]\n"
+        "  confidence: number\n"
+        "  retry_conditions: list[str]\n"
+        "  escalation_threshold: string\n"
         "  slices: list[object]\n"
         "Each slice object must include summary and braid_template.\n"
         "Valid braid_template values here: only \"orchestrator-self-repair\".\n"
@@ -2390,8 +2405,11 @@ def self_repair_council_prompt(task, project, memory_ctx):
         f"PROJECT: {project['name']}\n"
         f"FEATURE: {task.get('feature_id') or '-'}\n"
         f"TASK: {task.get('summary') or '-'}\n\n"
+        f"CURRENT ISSUE KEY: {issue_key}\n\n"
         "[ISSUE EVIDENCE]\n"
         f"{evidence or '(none)'}\n\n"
+        "[ATTACHED SELF-REPAIR ISSUES]\n"
+        f"{chr(10).join(attached_issues) if attached_issues else '(none)'}\n\n"
         "[PROJECT MEMORY]\n"
         f"{memory_ctx}\n\n"
         "Run a compact internal council across the listed members.\n"
@@ -2402,6 +2420,225 @@ def self_repair_council_prompt(task, project, memory_ctx):
         "4. the single best Codex execution slice to fix the runtime\n"
     )
     return system_prompt, user_prompt, members
+
+
+SELF_REPAIR_REASONING_BLOCKERS = {
+    "false_blocker_claim",
+    "template_graph_error",
+    "qa_target_missing",
+    "qa_smoke_failed",
+}
+
+
+def _self_repair_enabled(task):
+    return bool(((task.get("engine_args") or {}).get("self_repair") or {}).get("enabled"))
+
+
+def _self_repair_issue_ref(task):
+    eargs = task.get("engine_args") or {}
+    return {
+        "feature_id": task.get("feature_id"),
+        "issue_key": eargs.get("issue_key"),
+        "issue_summary": eargs.get("issue_summary") or task.get("summary") or "",
+        "issue_evidence": eargs.get("evidence") or "",
+    }
+
+
+def _parse_council_json(raw):
+    m = re.search(r"\{.*\}", raw or "", re.DOTALL)
+    if not m:
+        raise ValueError("no json object in council output")
+    return json.loads(m.group(0))
+
+
+def _run_self_repair_council(
+    *,
+    stage,
+    panel,
+    prompt_body,
+    worktree,
+    timeout,
+    last_msg_path,
+    model="sonnet",
+):
+    system_prompt = (
+        "You are a council checkpoint inside the orchestrator self-repair runtime.\n"
+        "Deliberate across the supplied panel before deciding.\n"
+        "Output ONLY one JSON object with keys:\n"
+        "  panel: list[str]\n"
+        "  stage: string\n"
+        "  verdict: string\n"
+        "  chosen_strategy: string\n"
+        "  rejected_strategies: list[str]\n"
+        "  dissent_reasons: list[str]\n"
+        "  confidence: number\n"
+        "  retry_conditions: list[str]\n"
+        "  escalation_threshold: string\n"
+        "  reason: string\n"
+        "Valid verdicts depend on the stage-specific instructions.\n"
+    )
+    prompt = (
+        f"STAGE: {stage}\n\n"
+        "[COUNCIL PERSONAS]\n"
+        + "\n\n".join(_council_member_context(member) for member in panel)
+        + "\n[END COUNCIL PERSONAS]\n\n"
+        + prompt_body
+    )
+    cmd = [
+        "claude",
+        "-p", prompt,
+        "--dangerously-skip-permissions",
+        "--system-prompt", system_prompt,
+        "--output-format", "text",
+        "--model", model,
+        "--max-budget-usd", "1.00",
+        "--no-session-persistence",
+    ]
+    proc = _run_bounded(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=timeout,
+        cwd=str(worktree),
+    )
+    raw = proc.stdout or ""
+    if last_msg_path:
+        last_msg_path.write_text(raw)
+    if proc.returncode != 0:
+        return {"error": (proc.stderr or raw or f"claude exit {proc.returncode}").strip()[:400]}
+    try:
+        data = _parse_council_json(raw)
+    except Exception as exc:
+        return {"error": f"invalid council output: {exc}"}
+    data.setdefault("panel", list(panel))
+    data.setdefault("stage", stage)
+    data["raw"] = raw
+    return data
+
+
+def _self_repair_record_council(task, stage, result):
+    if not _self_repair_enabled(task):
+        return
+    ref = _self_repair_issue_ref(task)
+    if not ref["feature_id"] or not ref["issue_key"]:
+        return
+    o.self_repair_record_deliberation(
+        ref["feature_id"],
+        ref["issue_key"],
+        stage=stage,
+        verdict=result.get("verdict") or "unknown",
+        panel=result.get("panel") or (),
+        chosen_strategy=result.get("chosen_strategy") or "",
+        rejected_strategies=result.get("rejected_strategies") or (),
+        dissent_reasons=result.get("dissent_reasons") or (),
+        confidence=result.get("confidence"),
+        retry_conditions=result.get("retry_conditions") or (),
+        escalation_threshold=result.get("escalation_threshold") or "",
+        reason=result.get("reason") or "",
+        task_id=task.get("task_id"),
+    )
+
+
+def _self_repair_reopen_current_issue(task, *, blocker_code, reason, deliberation=None, summary_suffix=""):
+    ref = _self_repair_issue_ref(task)
+    if not ref["feature_id"] or not ref["issue_key"]:
+        return None
+    summary = ref["issue_summary"]
+    if summary_suffix:
+        summary = f"{summary} [{summary_suffix}]"
+    evidence = ref["issue_evidence"]
+    if reason:
+        evidence = (evidence + "\n\n[REOPEN REASON]\n" + reason).strip()
+    return o.self_repair_reopen_issue(
+        ref["feature_id"],
+        ref["issue_key"],
+        summary=summary,
+        evidence=evidence,
+        blocker_code=blocker_code,
+        reason=reason,
+        deliberation=deliberation or {},
+    )
+
+
+def _run_self_repair_pre_execute_council(task, project, worktree, timeout, memory_ctx, graph_body):
+    repair = (task.get("engine_args") or {}).get("self_repair") or {}
+    panel = tuple(repair.get("council_members") or SELF_REPAIR_COUNCIL_DEFAULT)
+    council = (task.get("engine_args") or {}).get("council") or {}
+    prompt_body = (
+        "Decide whether execution should proceed on the current self-repair coding slice.\n"
+        "Valid verdicts: approve, replan.\n\n"
+        f"TASK SUMMARY: {task.get('summary') or '-'}\n"
+        f"ISSUE KEY: {(task.get('engine_args') or {}).get('issue_key') or '-'}\n"
+        f"COUNCIL CHOSEN PATH: {council.get('chosen_strategy') or council.get('execution_path') or '-'}\n"
+        f"KEY AGREEMENTS: {council.get('key_agreements') or []}\n"
+        f"DISSENT: {council.get('dissent') or []}\n\n"
+        f"[TASK GRAPH]\n{graph_body}\n\n"
+        f"[PROJECT MEMORY]\n{memory_ctx}\n"
+    )
+    result = _run_self_repair_council(
+        stage="pre_execute",
+        panel=panel,
+        prompt_body=prompt_body,
+        worktree=worktree,
+        timeout=max(600, min(timeout, 1800)),
+        last_msg_path=o.LOGS_DIR / f"{task['task_id']}.self-repair-pre-execute.last.txt",
+    )
+    if not result.get("error"):
+        _self_repair_record_council(task, "pre_execute", result)
+    return result
+
+
+def _run_self_repair_blocker_verifier(task, project, worktree, timeout, blocker_code, detail, memory_ctx):
+    repair_cfg = o.load_config().get("self_repair") or {}
+    panel = tuple(repair_cfg.get("verifier_panel") or repair_cfg.get("council_members") or SELF_REPAIR_COUNCIL_DEFAULT)
+    prompt_body = (
+        "Assess whether this self-repair blocker should be accepted as-is.\n"
+        "Valid verdicts: accept_blocker, replan, retry_same_path, change_strategy.\n"
+        "Prefer automation over human escalation. Only choose accept_blocker if no safer autonomous next step exists.\n\n"
+        f"TASK SUMMARY: {task.get('summary') or '-'}\n"
+        f"BLOCKER CODE: {blocker_code}\n"
+        f"BLOCKER DETAIL: {detail or '-'}\n\n"
+        f"[PROJECT MEMORY]\n{memory_ctx}\n"
+    )
+    result = _run_self_repair_council(
+        stage="blocker_verifier",
+        panel=panel,
+        prompt_body=prompt_body,
+        worktree=worktree,
+        timeout=max(600, min(timeout, 1800)),
+        last_msg_path=o.LOGS_DIR / f"{task['task_id']}.self-repair-blocker.last.txt",
+    )
+    if not result.get("error"):
+        _self_repair_record_council(task, "blocker_verifier", result)
+    return result
+
+
+def _run_self_repair_final_adjudication(task, target, target_wt, target_base, changed_files, diff_text, combined_findings, memory_ctx, timeout):
+    repair_cfg = o.load_config().get("self_repair") or {}
+    panel = tuple(repair_cfg.get("approval_panel") or repair_cfg.get("council_members") or SELF_REPAIR_COUNCIL_DEFAULT)
+    prompt_body = (
+        "Adjudicate whether this self-repair branch is safe to advance after functional, security, and architecture review.\n"
+        "Valid verdicts: approve, request_change, replan.\n"
+        "If there are unresolved concerns, prefer request_change or replan over accepting latent control-plane risk.\n\n"
+        f"TARGET TASK: {target.get('task_id')}\n"
+        f"TARGET SUMMARY: {target.get('summary') or '-'}\n"
+        f"FILES CHANGED vs {target_base}:\n{changed_files}\n\n"
+        f"[DIFF vs {target_base}]\n{diff_text}\n\n"
+        f"[COMBINED REVIEW FINDINGS]\n{combined_findings or '(none)'}\n\n"
+        f"[PROJECT MEMORY]\n{memory_ctx}\n"
+    )
+    result = _run_self_repair_council(
+        stage="final_adjudication",
+        panel=panel,
+        prompt_body=prompt_body,
+        worktree=target_wt,
+        timeout=max(600, min(timeout, 1800)),
+        last_msg_path=o.LOGS_DIR / f"{task['task_id']}.self-repair-final.last.txt",
+    )
+    if not result.get("error"):
+        _self_repair_record_council(task, "final_adjudication", result)
+    return result
 
 
 def planner_system_prompt(project_name, roadmap_entry_body=""):
@@ -2934,12 +3171,20 @@ def run_claude_planner(task, cfg, timeout, log_path):
         "key_agreements": list(plan.get("key_agreements") or []),
         "dissent": list(plan.get("dissent") or []),
         "execution_path": plan.get("execution_path") or "",
+        "chosen_strategy": plan.get("chosen_strategy") or plan.get("execution_path") or "",
+        "rejected_strategies": list(plan.get("rejected_strategies") or []),
+        "dissent_reasons": list(plan.get("dissent_reasons") or []),
+        "confidence": plan.get("confidence"),
+        "retry_conditions": list(plan.get("retry_conditions") or []),
+        "escalation_threshold": plan.get("escalation_threshold") or "",
     }
     shared_engine_args = {}
     if planner_mode == "self-repair-plan":
         shared_engine_args = {
             "self_repair": dict((task.get("engine_args") or {}).get("self_repair") or {}),
             "evidence": (task.get("engine_args") or {}).get("evidence") or "",
+            "issue_key": (task.get("engine_args") or {}).get("issue_key"),
+            "issue_summary": (task.get("engine_args") or {}).get("issue_summary") or task.get("summary") or "",
             "council": council_meta,
         }
     elif council_meta["panel"]:
@@ -3015,6 +3260,34 @@ def run_claude_planner(task, cfg, timeout, log_path):
         t["finished_at"] = o.now_iso()
         t["log_path"] = str(log_path)
     o.move_task(task_id, "running", "done", reason=f"decomposed into {len(enqueued)}", mutator=mut)
+    if planner_mode == "self-repair-plan" and feature_id and (task.get("engine_args") or {}).get("issue_key"):
+        o.self_repair_record_deliberation(
+            feature_id,
+            (task.get("engine_args") or {}).get("issue_key"),
+            stage="planning",
+            verdict="planned",
+            panel=council_meta.get("panel") or (),
+            chosen_strategy=council_meta.get("chosen_strategy") or "",
+            rejected_strategies=council_meta.get("rejected_strategies") or (),
+            dissent_reasons=council_meta.get("dissent_reasons") or (),
+            confidence=council_meta.get("confidence"),
+            retry_conditions=council_meta.get("retry_conditions") or (),
+            escalation_threshold=council_meta.get("escalation_threshold") or "",
+            reason=council_meta.get("execution_path") or "",
+            task_id=task_id,
+        )
+        o._self_repair_mark_issue(
+            feature_id,
+            (task.get("engine_args") or {}).get("issue_key"),
+            status="planned",
+            planner_task_id=task_id,
+            chosen_strategy=council_meta.get("chosen_strategy") or "",
+            rejected_strategies=list(council_meta.get("rejected_strategies") or ()),
+            dissent_reasons=list(council_meta.get("dissent_reasons") or ()),
+            confidence=council_meta.get("confidence"),
+            retry_conditions=list(council_meta.get("retry_conditions") or ()),
+            escalation_threshold=council_meta.get("escalation_threshold") or "",
+        )
 
 
 def run_claude_reviewer(task, cfg, timeout, log_path):
@@ -3061,6 +3334,32 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
     target_wt = target.get("worktree")
     target_base = target.get("base_branch") or base_branch_for_task(target)
     if not target_wt or not pathlib.Path(target_wt).exists():
+        if _self_repair_enabled(target):
+            _self_repair_reopen_current_issue(
+                target,
+                blocker_code="qa_target_missing",
+                reason=f"review target worktree missing: {target_wt}",
+                deliberation={
+                    "stage": "blocker_verifier",
+                    "verdict": "replan",
+                    "chosen_strategy": "reopen_issue",
+                    "reason": f"review target worktree missing: {target_wt}",
+                    "task_id": task_id,
+                },
+                summary_suffix="review-worktree-missing",
+            )
+            o.move_task(
+                target_id,
+                "awaiting-review",
+                "abandoned",
+                reason=f"review target worktree missing: {target_wt}",
+                mutator=lambda t: t.update({"finished_at": o.now_iso()}),
+            )
+            def mut_self(t):
+                t["finished_at"] = o.now_iso()
+            o.move_task(task_id, "claimed", "done", reason=f"reopened self-repair target {target_id}", mutator=mut_self)
+            o.tick_self_repair_queue()
+            return
         fail_task(task_id, "claimed", f"review target worktree missing: {target_wt}",
                   blocker_code="qa_target_missing", summary="review target worktree missing", retryable=False)
         return
@@ -3085,6 +3384,7 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
         "security-review-pass": _config_council_panel(cfg, "security_panel", review_panel or ("socrates", "kahneman", "torvalds")),
         "architectural-fit-review-pass": _config_council_panel(cfg, "architecture_panel", review_panel or ("socrates", "kahneman", "torvalds")),
     }
+    is_self_repair_target = _self_repair_enabled(target)
 
     codex_prompt = (
         "[BRAID REVIEW GRAPH — traverse deterministically.]\n"
@@ -3176,6 +3476,32 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
                       blocker_code=blocker, summary="codex reviewer failed", retryable=True)
             return
         if codex_result.get("verdict") == "topology_error":
+            if is_self_repair_target:
+                verifier = _run_self_repair_blocker_verifier(
+                    target,
+                    project,
+                    target_wt,
+                    review_timeout,
+                    "template_graph_error",
+                    "reviewer topology error",
+                    memory_ctx,
+                )
+                _self_repair_reopen_current_issue(
+                    target,
+                    blocker_code="template_graph_error",
+                    reason=verifier.get("reason") or "reviewer topology error",
+                    deliberation={**verifier, "stage": "blocker_verifier", "task_id": task_id},
+                    summary_suffix="review-topology",
+                )
+                o.move_task(target_id, "awaiting-review", "abandoned",
+                            reason=verifier.get("reason") or "reviewer topology error",
+                            mutator=lambda t: t.update({"finished_at": o.now_iso(), "self_repair_verifier": verifier}))
+                def mut_self(t):
+                    t["finished_at"] = o.now_iso()
+                o.move_task(task_id, "running", "done",
+                            reason=f"reopened self-repair target {target_id}", mutator=mut_self)
+                o.tick_self_repair_queue()
+                return
             o.braid_template_record_use(reviewer_template, topology_error=True)
             _mark_review_target_for_retry(target_id, "reviewer topology error")
             fail_task(task_id, "running", "reviewer topology error",
@@ -3203,6 +3529,32 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
                           blocker_code=blocker, summary="claude reviewer failed", retryable=True)
                 return
             if claude_result.get("verdict") == "topology_error":
+                if is_self_repair_target:
+                    verifier = _run_self_repair_blocker_verifier(
+                        target,
+                        project,
+                        target_wt,
+                        review_timeout,
+                        "template_graph_error",
+                        "claude reviewer topology error",
+                        memory_ctx,
+                    )
+                    _self_repair_reopen_current_issue(
+                        target,
+                        blocker_code="template_graph_error",
+                        reason=verifier.get("reason") or "claude reviewer topology error",
+                        deliberation={**verifier, "stage": "blocker_verifier", "task_id": task_id},
+                        summary_suffix="review-topology",
+                    )
+                    o.move_task(target_id, "awaiting-review", "abandoned",
+                                reason=verifier.get("reason") or "claude reviewer topology error",
+                                mutator=lambda t: t.update({"finished_at": o.now_iso(), "self_repair_verifier": verifier}))
+                    def mut_self(t):
+                        t["finished_at"] = o.now_iso()
+                    o.move_task(task_id, "running", "done",
+                                reason=f"reopened self-repair target {target_id}", mutator=mut_self)
+                    o.tick_self_repair_queue()
+                    return
                 o.braid_template_record_use(reviewer_template, topology_error=True)
                 _mark_review_target_for_retry(target_id, "claude reviewer topology error")
                 fail_task(task_id, "running", "claude reviewer topology error",
@@ -3234,6 +3586,32 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
                               blocker_code=blocker, summary=f"{gate_name} failed", retryable=True)
                     return
                 if gate_result.get("verdict") == "topology_error":
+                    if is_self_repair_target:
+                        verifier = _run_self_repair_blocker_verifier(
+                            target,
+                            project,
+                            target_wt,
+                            review_timeout,
+                            "template_graph_error",
+                            f"{gate_name} topology error",
+                            memory_ctx,
+                        )
+                        _self_repair_reopen_current_issue(
+                            target,
+                            blocker_code="template_graph_error",
+                            reason=verifier.get("reason") or f"{gate_name} topology error",
+                            deliberation={**verifier, "stage": "blocker_verifier", "task_id": task_id},
+                            summary_suffix="gate-topology",
+                        )
+                        o.move_task(target_id, "awaiting-review", "abandoned",
+                                    reason=verifier.get("reason") or f"{gate_name} topology error",
+                                    mutator=lambda t: t.update({"finished_at": o.now_iso(), "self_repair_verifier": verifier}))
+                        def mut_self(t):
+                            t["finished_at"] = o.now_iso()
+                        o.move_task(task_id, "running", "done",
+                                    reason=f"reopened self-repair target {target_id}", mutator=mut_self)
+                        o.tick_self_repair_queue()
+                        return
                     _mark_review_target_for_retry(target_id, f"{gate_name} topology error")
                     fail_task(task_id, "running", f"{gate_name} topology error",
                               blocker_code="template_graph_error", summary=f"{gate_name} topology error", retryable=True)
@@ -3242,6 +3620,29 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
                 final_verdict = gate_result.get("verdict")
                 if final_verdict != "approve":
                     break
+
+        self_repair_adjudication = None
+        if final_verdict == "approve" and is_self_repair_target:
+            self_repair_adjudication = _run_self_repair_final_adjudication(
+                target,
+                target,
+                target_wt,
+                target_base,
+                changed_files,
+                diff_text,
+                combined_findings,
+                memory_ctx,
+                review_timeout,
+            )
+            if self_repair_adjudication.get("error"):
+                _mark_review_target_for_retry(target_id, self_repair_adjudication["error"])
+                fail_task(task_id, "running", self_repair_adjudication["error"],
+                          blocker_code="llm_exit_error", summary="self-repair final adjudication failed", retryable=True)
+                return
+            combined_findings = (combined_findings + "\n\n" + self_repair_adjudication.get("raw", "")).strip()
+            final_verdict = "approve" if self_repair_adjudication.get("verdict") == "approve" else (
+                "request_change" if self_repair_adjudication.get("verdict") == "request_change" else self_repair_adjudication.get("verdict")
+            )
 
         hard_gate_findings = policy_findings + compile_findings + ratio_findings
         if final_verdict == "approve" and hard_gate_findings:
@@ -3273,12 +3674,36 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
         t["reviewed_by"] = task_id
         t["policy_review_findings"] = policy_findings + compile_findings + ratio_findings
         t["review_council_panel"] = list(review_panel)
-        t["review_gates"] = ["functional-review", "council-review", *gate_names]
+        t["review_gates"] = ["functional-review", "council-review", *gate_names] + (["self-repair-adjudication"] if is_self_repair_target else [])
         t["review_gate_panels"] = {name: list(gate_panels.get(name) or ()) for name in gate_names}
+        if is_self_repair_target:
+            t["review_gate_panels"]["self-repair-adjudication"] = list(
+                (o.load_config().get("self_repair") or {}).get("approval_panel")
+                or (o.load_config().get("self_repair") or {}).get("council_members")
+                or ()
+            )
 
     if final_verdict == "approve":
         o.move_task(target_id, "awaiting-review", "awaiting-qa",
                     reason=f"approved by {task_id}", mutator=mut_target)
+    elif final_verdict == "replan" and is_self_repair_target:
+        _self_repair_reopen_current_issue(
+            target,
+            blocker_code="self_repair_replan_requested",
+            reason=(self_repair_adjudication or {}).get("reason") or "self-repair final adjudication requested replan",
+            deliberation={**(self_repair_adjudication or {}), "stage": "final_adjudication", "task_id": task_id},
+        )
+        def mut_replan_target(t):
+            mut_target(t)
+            t["self_repair_adjudication"] = self_repair_adjudication
+        o.move_task(
+            target_id,
+            "awaiting-review",
+            "abandoned",
+            reason=(self_repair_adjudication or {}).get("reason") or "self-repair final adjudication requested replan",
+            mutator=mut_replan_target,
+        )
+        o.tick_self_repair_queue()
     else:
         _handle_review_request_change(task_id, project_name, target, combined_findings[:12000], mut_target)
 
@@ -3329,6 +3754,10 @@ def _handle_review_request_change(reviewer_task_id, project_name, target, review
             "review_findings": review_findings,
             "target_task_id": target_id,
             "round": rounds,
+            "self_repair": dict((target.get("engine_args") or {}).get("self_repair") or {}),
+            "evidence": (target.get("engine_args") or {}).get("evidence") or "",
+            "issue_key": (target.get("engine_args") or {}).get("issue_key"),
+            "issue_summary": (target.get("engine_args") or {}).get("issue_summary") or target.get("summary") or "",
         },
     )
     o.enqueue_task(feedback_task)
@@ -3396,6 +3825,29 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
                 mutator=lambda t: t.update({"finished_at": o.now_iso(), "abandoned_reason": f"superseded target {target_id}"}),
             )
             return
+        if _self_repair_enabled(task):
+            _self_repair_reopen_current_issue(
+                task,
+                blocker_code="qa_target_missing",
+                reason=f"review-feedback target missing: {target_id}",
+                deliberation={
+                    "stage": "blocker_verifier",
+                    "verdict": "replan",
+                    "chosen_strategy": "reopen_issue",
+                    "reason": f"review-feedback target missing: {target_id}",
+                    "task_id": task_id,
+                },
+                summary_suffix="target-missing",
+            )
+            o.move_task(
+                task_id,
+                "claimed",
+                "abandoned",
+                reason=f"review-feedback target missing: {target_id}",
+                mutator=lambda t: t.update({"finished_at": o.now_iso()}),
+            )
+            o.tick_self_repair_queue()
+            return
         fail_task(task_id, "claimed", f"review-feedback: target {target_id} not found in queue",
                   blocker_code="qa_target_missing", summary="review-feedback target missing", retryable=True)
         return
@@ -3415,6 +3867,29 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
                 reason=f"review-feedback stale worktree for {target_id}",
                 mutator=lambda t: t.update({"finished_at": o.now_iso(), "abandoned_reason": f"stale worktree for {target_id}"}),
             )
+            return
+        if _self_repair_enabled(task):
+            _self_repair_reopen_current_issue(
+                task,
+                blocker_code="qa_target_missing",
+                reason=f"review-feedback target worktree missing: {wt_str}",
+                deliberation={
+                    "stage": "blocker_verifier",
+                    "verdict": "replan",
+                    "chosen_strategy": "reopen_issue",
+                    "reason": f"review-feedback target worktree missing: {wt_str}",
+                    "task_id": task_id,
+                },
+                summary_suffix="worktree-missing",
+            )
+            o.move_task(
+                task_id,
+                "claimed",
+                "abandoned",
+                reason=f"review-feedback target worktree missing: {wt_str}",
+                mutator=lambda t: t.update({"finished_at": o.now_iso()}),
+            )
+            o.tick_self_repair_queue()
             return
         fail_task(task_id, "claimed", f"review-feedback: target worktree missing: {wt_str}",
                   blocker_code="qa_target_missing", summary="review-feedback target worktree missing", retryable=True)
@@ -3523,6 +3998,31 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
             return
 
         if trailer.startswith("BRAID_TOPOLOGY_ERROR"):
+            if _self_repair_enabled(task):
+                verifier = _run_self_repair_blocker_verifier(
+                    task,
+                    project,
+                    wt,
+                    timeout,
+                    "template_graph_error",
+                    trailer,
+                    memory_ctx,
+                )
+                _self_repair_reopen_current_issue(
+                    task,
+                    blocker_code="template_graph_error",
+                    reason=verifier.get("reason") or "review-feedback topology error",
+                    deliberation={**verifier, "stage": "blocker_verifier", "task_id": task_id},
+                    summary_suffix="review-feedback-topology",
+                )
+                def mut_abandon(t):
+                    t["finished_at"] = o.now_iso()
+                    t["topology_error"] = trailer
+                    t["self_repair_verifier"] = verifier
+                o.move_task(task_id, "running", "abandoned",
+                            reason=verifier.get("reason") or trailer[:80], mutator=mut_abandon)
+                o.tick_self_repair_queue()
+                return
             o.braid_template_record_use(bt, topology_error=True)
             def mut_fail(t):
                 t["finished_at"] = o.now_iso()
@@ -4227,6 +4727,58 @@ def run_codex_slot(task, cfg):
             cfg.get("slots", {}).get("codex", {}).get("timeout_sec", DEFAULT_TIMEOUTS["codex"]),
         )
 
+        if self_repair_meta.get("enabled"):
+            pre_execute = _run_self_repair_pre_execute_council(
+                task,
+                project,
+                wt_path,
+                timeout,
+                memory_ctx,
+                graph_body,
+            )
+            if pre_execute.get("error"):
+                _self_repair_reopen_current_issue(
+                    task,
+                    blocker_code="llm_exit_error",
+                    reason=pre_execute["error"],
+                    deliberation={
+                        "stage": "pre_execute",
+                        "verdict": "replan",
+                        "chosen_strategy": "reopen_issue",
+                        "reason": pre_execute["error"],
+                        "task_id": task_id,
+                    },
+                    summary_suffix="pre-execute-error",
+                )
+                o.move_task(
+                    task_id,
+                    "claimed",
+                    "abandoned",
+                    reason="self-repair pre-execution council failed",
+                    mutator=lambda t: t.update({"finished_at": o.now_iso(), "self_repair_council_error": pre_execute["error"]}),
+                )
+                o.tick_self_repair_queue()
+                return
+            if pre_execute.get("verdict") != "approve":
+                _self_repair_reopen_current_issue(
+                    task,
+                    blocker_code="self_repair_replan_requested",
+                    reason=pre_execute.get("reason") or "self-repair pre-execution council requested replan",
+                    deliberation={**pre_execute, "stage": "pre_execute", "task_id": task_id},
+                )
+                def mut_abandon_precheck(t):
+                    t["finished_at"] = o.now_iso()
+                    t["self_repair_council"] = pre_execute
+                o.move_task(
+                    task_id,
+                    "claimed",
+                    "abandoned",
+                    reason=pre_execute.get("reason") or "self-repair replan requested before execution",
+                    mutator=mut_abandon_precheck,
+                )
+                o.tick_self_repair_queue()
+                return
+
         log_path = o.LOGS_DIR / f"{task_id}.log"
         last_msg_path = o.LOGS_DIR / f"{task_id}.last.txt"
 
@@ -4293,6 +4845,36 @@ def run_codex_slot(task, cfg):
                 # failure"). Do NOT pollute topology_errors, do NOT
                 # enqueue a useless regen, do NOT block downstream work
                 # on this project.
+                if self_repair_meta.get("enabled"):
+                    verifier = _run_self_repair_blocker_verifier(
+                        task,
+                        project,
+                        wt_path,
+                        timeout,
+                        "false_blocker_claim",
+                        trailer,
+                        memory_ctx,
+                    )
+                    _self_repair_reopen_current_issue(
+                        task,
+                        blocker_code="false_blocker_claim",
+                        reason=verifier.get("reason") or f"false blocker claim: {trailer[:120]}",
+                        deliberation={**verifier, "stage": "blocker_verifier", "task_id": task_id},
+                        summary_suffix="replan",
+                    )
+                    def mut_abandon_false(t):
+                        t["finished_at"] = o.now_iso()
+                        t["false_blocker_claim"] = trailer
+                        t["self_repair_verifier"] = verifier
+                    o.move_task(
+                        task_id,
+                        "running",
+                        "abandoned",
+                        reason=verifier.get("reason") or "self-repair verifier reopened false blocker claim",
+                        mutator=mut_abandon_false,
+                    )
+                    o.tick_self_repair_queue()
+                    return
                 def mut_fail_false(t):
                     t["finished_at"] = o.now_iso()
                     t["topology_error"] = None
@@ -4312,6 +4894,36 @@ def run_codex_slot(task, cfg):
                 )
                 return
             if topology_reason_code(trailer) == "baseline_red":
+                if self_repair_meta.get("enabled"):
+                    verifier = _run_self_repair_blocker_verifier(
+                        task,
+                        project,
+                        wt_path,
+                        timeout,
+                        "qa_smoke_failed",
+                        trailer,
+                        memory_ctx,
+                    )
+                    _self_repair_reopen_current_issue(
+                        task,
+                        blocker_code="qa_smoke_failed",
+                        reason=verifier.get("reason") or "baseline smoke red before fix",
+                        deliberation={**verifier, "stage": "blocker_verifier", "task_id": task_id},
+                        summary_suffix="baseline-red",
+                    )
+                    def mut_abandon_baseline(t):
+                        t["finished_at"] = o.now_iso()
+                        t["failure"] = trailer
+                        t["self_repair_verifier"] = verifier
+                    o.move_task(
+                        task_id,
+                        "running",
+                        "abandoned",
+                        reason=verifier.get("reason") or "self-repair verifier reopened baseline red",
+                        mutator=mut_abandon_baseline,
+                    )
+                    o.tick_self_repair_queue()
+                    return
                 def mut_fail_baseline(t):
                     t["finished_at"] = o.now_iso()
                     t["failure"] = trailer
@@ -4328,6 +4940,37 @@ def run_codex_slot(task, cfg):
                     blocker_code="qa_smoke_failed", summary="baseline smoke red before fix",
                     retryable=True, mutator=mut_fail_baseline,
                 )
+                return
+
+            if self_repair_meta.get("enabled"):
+                verifier = _run_self_repair_blocker_verifier(
+                    task,
+                    project,
+                    wt_path,
+                    timeout,
+                    "template_graph_error",
+                    trailer,
+                    memory_ctx,
+                )
+                _self_repair_reopen_current_issue(
+                    task,
+                    blocker_code="template_graph_error",
+                    reason=verifier.get("reason") or "self-repair topology traversal requested replan",
+                    deliberation={**verifier, "stage": "blocker_verifier", "task_id": task_id},
+                    summary_suffix="topology",
+                )
+                def mut_abandon_topology(t):
+                    t["finished_at"] = o.now_iso()
+                    t["topology_error"] = trailer
+                    t["self_repair_verifier"] = verifier
+                o.move_task(
+                    task_id,
+                    "running",
+                    "abandoned",
+                    reason=verifier.get("reason") or "self-repair verifier reopened topology blocker",
+                    mutator=mut_abandon_topology,
+                )
+                o.tick_self_repair_queue()
                 return
 
             o.braid_template_record_use(bt, topology_error=True)
@@ -4546,6 +5189,33 @@ def run_qa_slot(task, cfg):
         target_id = target["task_id"]
         target_wt = target.get("worktree")
         if not target_wt or not pathlib.Path(target_wt).exists():
+            if _self_repair_enabled(target):
+                _self_repair_reopen_current_issue(
+                    target,
+                    blocker_code="qa_target_missing",
+                    reason=f"QA target worktree missing: {target_wt}",
+                    deliberation={
+                        "stage": "blocker_verifier",
+                        "verdict": "replan",
+                        "chosen_strategy": "reopen_issue",
+                        "reason": f"QA target worktree missing: {target_wt}",
+                        "task_id": task_id,
+                    },
+                    summary_suffix="qa-worktree-missing",
+                )
+                o.move_task(
+                    target_id,
+                    "awaiting-qa",
+                    "abandoned",
+                    reason="qa target worktree missing",
+                    mutator=lambda t: t.update({"finished_at": o.now_iso(), "qa_failure": "worktree missing"}),
+                )
+                def mut_self(t):
+                    t["finished_at"] = o.now_iso()
+                o.move_task(task_id, "claimed", "done",
+                            reason=f"reopened self-repair target {target_id}", mutator=mut_self)
+                o.tick_self_repair_queue()
+                return
             def mut_target_fail(t):
                 t["finished_at"] = o.now_iso()
                 t["qa_failure"] = "worktree missing"
@@ -4701,6 +5371,32 @@ def run_qa_slot(task, cfg):
                                 reason=f"semantic qa gate failed for {target_id}", mutator=mut_driver_gate_fail)
                     return
                 if qa_gate.get("verdict") == "topology_error":
+                    if _self_repair_enabled(target):
+                        verifier = _run_self_repair_blocker_verifier(
+                            target,
+                            project,
+                            target_wt,
+                            timeout,
+                            "template_graph_error",
+                            qa_gate_raw or "semantic QA gate topology error",
+                            memory_ctx,
+                        )
+                        _self_repair_reopen_current_issue(
+                            target,
+                            blocker_code="template_graph_error",
+                            reason=verifier.get("reason") or "semantic QA gate topology error",
+                            deliberation={**verifier, "stage": "blocker_verifier", "task_id": task_id},
+                            summary_suffix="qa-topology",
+                        )
+                        o.move_task(target_id, "awaiting-qa", "abandoned",
+                                    reason=verifier.get("reason") or "semantic qa topology error",
+                                    mutator=lambda t: t.update({"finished_at": o.now_iso(), "qa_gate_output": qa_gate_raw, "self_repair_verifier": verifier}))
+                        def mut_driver_gate_topology(t):
+                            t["finished_at"] = o.now_iso()
+                        o.move_task(task_id, "running", "done",
+                                    reason=f"self-repair reopened {target_id} after qa topology", mutator=mut_driver_gate_topology)
+                        o.tick_self_repair_queue()
+                        return
                     def mut_target_gate_topology(t):
                         t["finished_at"] = o.now_iso()
                         t["qa_gate_output"] = qa_gate_raw

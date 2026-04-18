@@ -4,6 +4,17 @@ _Append-only log. New entries go at the top. One entry per completed task or mil
 
 ---
 
+## 2026-04-18 — Self-repair governance councils
+
+**Summary:** Extended self-repair from a planner-only council into a governed loop. Self-repair issues now persist machine-usable deliberation state, the active self-repair feature can reopen and drain the same issue after reasoning failures, and council checkpoints now exist at pre-execution, blocker verification, and final approval.
+
+**Changed:**
+- `bin/orchestrator.py` — added self-repair issue deliberation persistence, explicit reopen semantics, and config defaults for verifier/approval panels.
+- `bin/worker.py` — added self-repair pre-execution council, blocker verifier council, final adjudication council, replan-on-reasoning-failure handling, and propagation of self-repair issue metadata through review-feedback loops.
+- `config/orchestrator.example.json` and `README.md` — documented verifier/approval panels and the governed self-repair loop.
+
+**Validation:** `python3 -m py_compile bin/orchestrator.py bin/worker.py`, `python3 -m doctest -o ELLIPSIS bin/orchestrator.py`, `python3 -m doctest -o ELLIPSIS bin/worker.py`.
+
 ## 2026-04-18 — Audit follow-through: runtime-owned creds/operators/projects, metrics stream, dedicated review gates
 
 **Summary:** Closed the remaining audit gap categories that were still open after the R-025..R-029 batch. The runtime now owns credential access through a keychain-backed `creds` CLI, maintains a dynamic Telegram operator allowlist and approval flow, can register new canonical repos into local config without hand-editing JSON, emits a unified `state/runtime/metrics.jsonl` stream for queue/environment/frontier health, and runs council-backed `security-review-pass` plus `architectural-fit-review-pass` gates in the internal review loop before QA. Substantive gate failures flow into rework; gate runtime failures remain retryable/self-healing rather than hard-stop blockers.

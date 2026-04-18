@@ -264,6 +264,14 @@ launchctl list | grep devmini
 
 Use `enqueue-self-repair` (or Telegram `/self_repair`) to open a bounded feature on the orchestrator repo itself when a diagnosed runtime issue needs a code fix. These features are marked `self-repair`, run through the normal feature branch / task PR / final PR path, and use the `orchestrator-self-repair` BRAID template plus `qa/smoke.sh` and `qa/regression.sh` in this repo. They still require human review on the final feature PR to `main`.
 
+Self-repair is now governed by council checkpoints across the full loop, not just initial planning:
+- planning council chooses the repair path and records machine-usable strategy state on the feature issue
+- pre-execution council can reopen the same issue for re-planning before coding starts
+- verifier council reviews reasoning-style blocker claims such as `false_blocker_claim`, `template_graph_error`, and `qa_target_missing`
+- final adjudication council sits above functional, security, and architecture review before a self-repair branch can advance
+
+When a self-repair council requests re-planning, the runtime reopens the same issue and drains it again through the active self-repair feature. It should not dead-end on a terminal blocker just because one slice made a bad local judgment.
+
 ### Durable gh auth
 
 The orchestrator now loads `GH_TOKEN` from `config/gh-token` automatically in

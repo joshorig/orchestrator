@@ -38,7 +38,9 @@
   },
   "self_repair": {
     "enabled": true,
-    "project": "devmini-orchestrator"
+    "project": "devmini-orchestrator",
+    "verifier_panel": ["socrates", "kahneman", "ada"],
+    "approval_panel": ["feynman", "meadows", "torvalds"]
   },
   "council": {
     "enabled": true,
