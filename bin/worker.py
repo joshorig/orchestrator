@@ -2461,6 +2461,9 @@ def _run_self_repair_council(
     last_msg_path,
     model="sonnet",
 ):
+    claude_bin = next((p for p in o.CLAUDE_CANDIDATE_PATHS if p and pathlib.Path(p).exists()), None)
+    if not claude_bin:
+        return {"error": "claude binary unavailable for self-repair council"}
     system_prompt = (
         "You are a council checkpoint inside the orchestrator self-repair runtime.\n"
         "Deliberate across the supplied panel before deciding.\n"
@@ -2485,7 +2488,7 @@ def _run_self_repair_council(
         + prompt_body
     )
     cmd = [
-        "claude",
+        claude_bin,
         "-p", prompt,
         "--dangerously-skip-permissions",
         "--system-prompt", system_prompt,
