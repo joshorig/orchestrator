@@ -59,6 +59,14 @@ python3 bin/orchestrator.py reserve-operator-worktree --name "<short-purpose>"
 
 That helper refuses by default if an active self-repair feature already owns the orchestrator control plane. Override only when you intentionally want to intervene in an already-active self-repair lane.
 
+The reserved worktree also hydrates the local ignored config needed for normal operator work (`config/gh-token`, local orchestrator/context config, Telegram token, Claude env) by linking or copying them from the canonical checkout.
+
+To open a PR from an operator worktree without relying on ambient `gh auth login`, use:
+
+```bash
+python3 bin/orchestrator.py open-operator-pr --repo . --draft
+```
+
 ## Architecture
 
 ### State machine

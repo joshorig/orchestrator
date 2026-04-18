@@ -21,3 +21,5 @@ if [ -z "${token}" ]; then
 fi
 
 export GH_TOKEN="$token"
+export GITHUB_TOKEN="$token"
+export GH_HOST="${GH_HOST:-github.com}"

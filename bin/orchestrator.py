@@ -39,6 +39,13 @@ CONFIG_EXAMPLE_PATH = STATE_ROOT / "config" / "orchestrator.example.json"
 CONTEXT_SOURCES_LOCAL_PATH = STATE_ROOT / "config" / "context-sources.json"
 CONTEXT_SOURCES_EXAMPLE_PATH = STATE_ROOT / "config" / "context-sources.example.json"
 GH_TOKEN_PATH = STATE_ROOT / "config" / "gh-token"
+GITIGNORED_OPERATOR_CONFIGS = (
+    "config/gh-token",
+    "config/orchestrator.local.json",
+    "config/context-sources.json",
+    "config/telegram.json",
+    "config/claude.env",
+)
 QUEUE_ROOT = STATE_ROOT / "queue"
 AGENT_STATE_DIR = STATE_ROOT / "state" / "agents"
 RUNTIME_DIR = STATE_ROOT / "state" / "runtime"
@@ -551,6 +558,24 @@ def load_gh_token_env():
 
 
 load_gh_token_env()
+
+
+def gh_subprocess_env(extra_env=None):
+    """Return a subprocess env with GitHub token vars populated when available."""
+    env = os.environ.copy()
+    token = env.get("GH_TOKEN", "").strip()
+    if not token:
+        load_gh_token_env()
+        token = os.environ.get("GH_TOKEN", "").strip()
+        if token:
+            env["GH_TOKEN"] = token
+    if token:
+        env.setdefault("GH_TOKEN", token)
+        env.setdefault("GITHUB_TOKEN", token)
+        env.setdefault("GH_HOST", "github.com")
+    if extra_env:
+        env.update(extra_env)
+    return env
 
 
 def _read_json_if_exists(path):
@@ -2436,6 +2461,85 @@ def _parse_pr_create_output(stdout_text):
         if m:
             pr_number = int(m.group(1))
     return pr_url, pr_number
+
+
+def open_operator_pr(*, repo_path=None, base_branch="main", head_branch=None, title=None, body_file=None, draft=False):
+    """Open a PR for the current operator branch using repo-managed GH token.
+
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     repo = pathlib.Path(tmp) / "repo"
+    ...     _ = subprocess.run(["git", "init", "-b", "feat", str(repo)], check=True, capture_output=True, text=True)
+    ...     _ = subprocess.run(["git", "-C", str(repo), "config", "user.name", "Doctest"], check=True, capture_output=True, text=True)
+    ...     _ = subprocess.run(["git", "-C", str(repo), "config", "user.email", "doctest@example.com"], check=True, capture_output=True, text=True)
+    ...     _ = (repo / "README.md").write_text("x\\n")
+    ...     _ = subprocess.run(["git", "-C", str(repo), "add", "README.md"], check=True, capture_output=True, text=True)
+    ...     _ = subprocess.run(["git", "-C", str(repo), "commit", "-m", "Initial title"], check=True, capture_output=True, text=True)
+    ...     body = repo / "body.md"; _ = body.write_text("demo\\n")
+    ...     old_run = open_operator_pr.__globals__["subprocess"].run
+    ...     old_which = open_operator_pr.__globals__["shutil"].which
+    ...     old_env = open_operator_pr.__globals__["gh_subprocess_env"]
+    ...     calls = []
+    ...     def fake_run(cmd, **kwargs):
+    ...         calls.append((cmd, kwargs))
+    ...         if cmd[:4] == ["git", "-C", str(repo), "rev-parse"]:
+    ...             return subprocess.CompletedProcess(cmd, 0, "feat\\n", "")
+    ...         if cmd[:4] == ["git", "-C", str(repo), "log", "-1"]:
+    ...             return subprocess.CompletedProcess(cmd, 0, "Initial title\\n", "")
+    ...         return subprocess.CompletedProcess(cmd, 0, "https://github.com/demo/repo/pull/12\\n", "")
+    ...     open_operator_pr.__globals__["subprocess"].run = fake_run
+    ...     open_operator_pr.__globals__["shutil"].which = lambda name: "/opt/homebrew/bin/gh"
+    ...     open_operator_pr.__globals__["gh_subprocess_env"] = lambda extra_env=None: {"GH_TOKEN": "x", "GITHUB_TOKEN": "x", "GH_HOST": "github.com"}
+    ...     out = open_operator_pr(repo_path=repo, body_file=str(body), draft=True)
+    ...     open_operator_pr.__globals__["subprocess"].run = old_run
+    ...     open_operator_pr.__globals__["shutil"].which = old_which
+    ...     open_operator_pr.__globals__["gh_subprocess_env"] = old_env
+    >>> out["ok"], out["pr_number"], "--draft" in calls[-1][0], calls[-1][1]["env"]["GITHUB_TOKEN"] == calls[-1][1]["env"]["GH_TOKEN"]
+    (True, 12, True, True)
+    """
+    repo = pathlib.Path(repo_path or os.getcwd()).resolve()
+    if shutil.which("gh") is None:
+        return {"ok": False, "reason": "gh CLI not installed"}
+    env = gh_subprocess_env()
+    if not env.get("GH_TOKEN", "").strip():
+        return {"ok": False, "reason": f"GH_TOKEN unavailable in {GH_TOKEN_PATH}"}
+    if head_branch is None:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, check=False, timeout=30,
+        )
+        head_branch = (proc.stdout or "").strip()
+    if not head_branch or head_branch in ("HEAD", "main"):
+        return {"ok": False, "reason": f"refuse to open PR from branch {head_branch or '(unknown)'}"}
+    if title is None:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "log", "-1", "--pretty=%s"],
+            capture_output=True, text=True, check=False, timeout=30,
+        )
+        title = ((proc.stdout or "").strip() or head_branch)[:120]
+    cmd = ["gh", "pr", "create", "--head", head_branch, "--base", base_branch, "--title", title]
+    if draft:
+        cmd.append("--draft")
+    if body_file:
+        cmd.extend(["--body-file", str(body_file)])
+    else:
+        cmd.append("--fill")
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(repo),
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "reason": "gh pr create timeout"}
+    if proc.returncode != 0:
+        return {"ok": False, "reason": (proc.stderr or proc.stdout or "gh pr create failed").strip()[:400]}
+    pr_url, pr_number = _parse_pr_create_output(proc.stdout or "")
+    return {"ok": True, "pr_url": pr_url, "pr_number": pr_number, "head_branch": head_branch, "base_branch": base_branch}
 
 
 def pr_sweep(dry_run=False):
@@ -5107,6 +5211,20 @@ def list_self_repair_features(*, project_name=None, statuses=None):
     return feats
 
 
+def _sync_operator_worktree_local_config(worktree_path):
+    wt_root = pathlib.Path(worktree_path)
+    for rel in GITIGNORED_OPERATOR_CONFIGS:
+        src = STATE_ROOT / rel
+        dst = wt_root / rel
+        if not src.exists() or dst.exists():
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            dst.symlink_to(src)
+        except OSError:
+            shutil.copy2(src, dst)
+
+
 def reserve_orchestrator_operator_worktree(name, *, allow_with_self_repair=False):
     """Create a dedicated manual worktree for operator changes on this repo.
 
@@ -5146,6 +5264,7 @@ def reserve_orchestrator_operator_worktree(name, *, allow_with_self_repair=False
     )
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr or proc.stdout or "git worktree add failed").strip()[:300])
+    _sync_operator_worktree_local_config(wt_path)
     return {"branch": branch, "worktree": str(wt_path)}
 
 
@@ -8398,6 +8517,13 @@ def main(argv=None):
     p_wt = sub.add_parser("reserve-operator-worktree")
     p_wt.add_argument("--name", required=True)
     p_wt.add_argument("--allow-with-self-repair", action="store_true")
+    p_opr = sub.add_parser("open-operator-pr")
+    p_opr.add_argument("--repo", default=".")
+    p_opr.add_argument("--base", default="main")
+    p_opr.add_argument("--head", default=None)
+    p_opr.add_argument("--title", default=None)
+    p_opr.add_argument("--body-file", default=None)
+    p_opr.add_argument("--draft", action="store_true")
 
     args = ap.parse_args(argv)
 
@@ -8531,6 +8657,16 @@ def main(argv=None):
         out = reserve_orchestrator_operator_worktree(
             args.name,
             allow_with_self_repair=args.allow_with_self_repair,
+        )
+        print(json.dumps(out, sort_keys=True))
+    elif args.cmd == "open-operator-pr":
+        out = open_operator_pr(
+            repo_path=args.repo,
+            base_branch=args.base,
+            head_branch=args.head,
+            title=args.title,
+            body_file=args.body_file,
+            draft=args.draft,
         )
         print(json.dumps(out, sort_keys=True))
 
