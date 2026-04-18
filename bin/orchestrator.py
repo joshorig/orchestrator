@@ -501,6 +501,8 @@ CONFIG_DEFAULTS = {
         "project": "devmini-orchestrator",
         "deploy_mode": "local-main",
         "council_members": ("socrates", "feynman", "ada", "torvalds"),
+        "verifier_panel": ("socrates", "kahneman", "ada"),
+        "approval_panel": ("feynman", "meadows", "torvalds"),
         "restart_launch_agents": True,
     },
     "council": {
@@ -5794,6 +5796,150 @@ def _self_repair_mark_issue(feature_id, issue_key, **updates):
     return update_feature(feature_id, mut)
 
 
+def _self_repair_append_deliberation(feature_id, issue_key, deliberation):
+    def mut(feature):
+        sr = feature.setdefault("self_repair", {})
+        issues = sr.setdefault("issues", [])
+        for issue in issues:
+            if issue.get("issue_key") != issue_key:
+                continue
+            rows = issue.setdefault("deliberations", [])
+            rows.append(dict(deliberation or {}))
+            issue["last_deliberation_at"] = deliberation.get("ts") or now_iso()
+            issue["last_deliberation_stage"] = deliberation.get("stage")
+            break
+    return update_feature(feature_id, mut)
+
+
+def self_repair_record_deliberation(
+    feature_id,
+    issue_key,
+    *,
+    stage,
+    verdict,
+    panel=(),
+    chosen_strategy="",
+    rejected_strategies=(),
+    dissent_reasons=(),
+    confidence=None,
+    retry_conditions=(),
+    escalation_threshold="",
+    reason="",
+    task_id=None,
+):
+    """Persist machine-usable council state for a self-repair issue.
+
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     feats = root / "features"; feats.mkdir()
+    ...     old = self_repair_record_deliberation.__globals__["FEATURES_DIR"]
+    ...     self_repair_record_deliberation.__globals__["FEATURES_DIR"] = feats
+    ...     write_json_atomic(feats / "feature-sr.json", {"feature_id": "feature-sr", "self_repair": {"enabled": True, "issues": [{"issue_key": "i1"}]}})
+    ...     out = self_repair_record_deliberation("feature-sr", "i1", stage="verifier", verdict="replan", panel=("a",), chosen_strategy="retry", confidence=0.7)
+    ...     self_repair_record_deliberation.__globals__["FEATURES_DIR"] = old
+    >>> issue = out["self_repair"]["issues"][0]
+    >>> issue["last_deliberation_stage"], issue["deliberations"][0]["chosen_strategy"], issue["deliberations"][0]["confidence"]
+    ('verifier', 'retry', 0.7)
+    """
+    ts = now_iso()
+    payload = {
+        "ts": ts,
+        "stage": stage,
+        "verdict": verdict,
+        "panel": list(panel or ()),
+        "chosen_strategy": chosen_strategy or "",
+        "rejected_strategies": list(rejected_strategies or ()),
+        "dissent_reasons": list(dissent_reasons or ()),
+        "confidence": confidence,
+        "retry_conditions": list(retry_conditions or ()),
+        "escalation_threshold": escalation_threshold or "",
+        "reason": reason or "",
+        "task_id": task_id,
+    }
+    return _self_repair_append_deliberation(feature_id, issue_key, payload)
+
+
+def self_repair_reopen_issue(
+    feature_id,
+    issue_key,
+    *,
+    summary="",
+    evidence="",
+    blocker_code="",
+    reason="",
+    deliberation=None,
+):
+    """Reopen a self-repair issue for another council-guided planning round.
+
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     feats = root / "features"; feats.mkdir()
+    ...     old = {
+    ...         "FEATURES_DIR": self_repair_reopen_issue.__globals__["FEATURES_DIR"],
+    ...         "append_event": self_repair_reopen_issue.__globals__["append_event"],
+    ...     }
+    ...     events = []
+    ...     self_repair_reopen_issue.__globals__["FEATURES_DIR"] = feats
+    ...     self_repair_reopen_issue.__globals__["append_event"] = lambda *args, **kwargs: events.append((args, kwargs))
+    ...     write_json_atomic(feats / "feature-sr.json", {"feature_id": "feature-sr", "self_repair": {"enabled": True, "issues": [{"issue_key": "i1", "status": "scheduled", "planner_task_id": "task-old"}]}})
+    ...     out = self_repair_reopen_issue("feature-sr", "i1", blocker_code="false_blocker_claim", reason="needs replan")
+    ...     for key, value in old.items():
+    ...         self_repair_reopen_issue.__globals__[key] = value
+    >>> issue = out["self_repair"]["issues"][0]
+    >>> issue["status"], issue["planner_task_id"] is None, issue["reopen_count"]
+    ('pending', True, 1)
+    """
+    reopened_at = now_iso()
+
+    def mut(feature):
+        sr = feature.setdefault("self_repair", {})
+        sr["replan_requested_at"] = reopened_at
+        sr["last_reopened_issue_key"] = issue_key
+        issues = sr.setdefault("issues", [])
+        for issue in issues:
+            if issue.get("issue_key") != issue_key:
+                continue
+            issue["status"] = "pending"
+            issue["planner_task_id"] = None
+            issue["reopened_at"] = reopened_at
+            issue["last_seen_at"] = reopened_at
+            issue["reopen_count"] = int(issue.get("reopen_count", 0) or 0) + 1
+            if summary:
+                issue["summary"] = summary[:240]
+            if evidence:
+                issue["evidence"] = evidence
+            issue["last_blocker_code"] = blocker_code or issue.get("last_blocker_code")
+            issue["last_reopen_reason"] = reason or issue.get("last_reopen_reason")
+            break
+
+    updated = update_feature(feature_id, mut)
+    if deliberation:
+        updated = self_repair_record_deliberation(
+            feature_id,
+            issue_key,
+            stage=deliberation.get("stage") or "reopen",
+            verdict=deliberation.get("verdict") or "replan",
+            panel=deliberation.get("panel") or (),
+            chosen_strategy=deliberation.get("chosen_strategy") or "",
+            rejected_strategies=deliberation.get("rejected_strategies") or (),
+            dissent_reasons=deliberation.get("dissent_reasons") or (),
+            confidence=deliberation.get("confidence"),
+            retry_conditions=deliberation.get("retry_conditions") or (),
+            escalation_threshold=deliberation.get("escalation_threshold") or "",
+            reason=deliberation.get("reason") or reason,
+            task_id=deliberation.get("task_id"),
+        )
+    append_event(
+        "self-repair",
+        "issue_reopened",
+        feature_id=feature_id,
+        details={"issue_key": issue_key, "blocker_code": blocker_code, "reason": reason},
+    )
+    return updated
+
+
 def _enqueue_self_repair_issue_task(feature, issue):
     feature_id = feature["feature_id"]
     repair_cfg = (feature.get("self_repair") or {}).copy()
@@ -5828,6 +5974,10 @@ def _enqueue_self_repair_issue_task(feature, issue):
         planner_task_id=task["task_id"],
         status="scheduled",
         scheduled_at=now_iso(),
+    )
+    update_feature(
+        feature_id,
+        lambda f: f.setdefault("self_repair", {}).update({"material_update_pending": False}),
     )
     append_event(
         "self-repair",
@@ -5864,6 +6014,7 @@ def _attach_issue_to_self_repair_feature(feature, *, summary, evidence, issue_ki
     def mut(f):
         sr = f.setdefault("self_repair", {})
         issues = sr.setdefault("issues", [])
+        attached_new = True
         for issue in issues:
             if issue.get("issue_key") == resolved_issue_key:
                 issue["last_seen_at"] = attached_at
@@ -5874,11 +6025,15 @@ def _attach_issue_to_self_repair_feature(feature, *, summary, evidence, issue_ki
                     issue["summary"] = record["summary"]
                 issue["source"] = source
                 issue["issue_kind"] = issue_kind
+                attached_new = False
                 break
         else:
             issues.append(record.copy())
         sr["last_attached_issue_key"] = resolved_issue_key
         sr["last_attached_at"] = attached_at
+        if attached_new:
+            sr["replan_requested_at"] = attached_at
+            sr["material_update_pending"] = True
 
     updated = update_feature(feature["feature_id"], mut)
     attached_issue = next(
