@@ -5107,6 +5107,214 @@ def list_self_repair_features(*, project_name=None, statuses=None):
     return feats
 
 
+def _active_self_repair_feature(project_name="devmini-orchestrator"):
+    rows = list_self_repair_features(project_name=project_name, statuses=("open", "finalizing"))
+    return rows[0] if rows else None
+
+
+def _self_repair_issue_key(*, issue_key=None, issue_kind="runtime_bug", summary="", evidence="", source="manual"):
+    if issue_key:
+        return str(issue_key)
+    raw = json.dumps(
+        {
+            "issue_kind": issue_kind,
+            "summary": (summary or "").strip(),
+            "evidence": (evidence or "").strip(),
+            "source": source,
+        },
+        sort_keys=True,
+    ).encode("utf-8")
+    return f"sha256:{hashlib.sha256(raw).hexdigest()}"
+
+
+def _self_repair_issue_live(issue):
+    task_id = (issue or {}).get("planner_task_id")
+    if not task_id:
+        return False
+    found = find_task(task_id)
+    return bool(found and found[0] not in ("done", "failed", "abandoned"))
+
+
+def _self_repair_pending_issues(feature):
+    issues = list(((feature or {}).get("self_repair") or {}).get("issues") or [])
+    return [issue for issue in issues if issue.get("status") in (None, "pending", "scheduled")]
+
+
+def _self_repair_has_active_work(feature):
+    feature_id = (feature or {}).get("feature_id")
+    if not feature_id:
+        return False
+    for item in _feature_related_tasks(feature_id):
+        if item.get("state") not in ("done", "abandoned"):
+            return True
+    return False
+
+
+def _self_repair_mark_issue(feature_id, issue_key, **updates):
+    def mut(feature):
+        sr = feature.setdefault("self_repair", {})
+        issues = sr.setdefault("issues", [])
+        for issue in issues:
+            if issue.get("issue_key") == issue_key:
+                issue.update(updates)
+                break
+    return update_feature(feature_id, mut)
+
+
+def _enqueue_self_repair_issue_task(feature, issue):
+    feature_id = feature["feature_id"]
+    repair_cfg = (feature.get("self_repair") or {}).copy()
+    task = new_task(
+        role="planner",
+        engine="claude",
+        project=feature["project"],
+        summary=f"Council-plan self-repair: {(issue.get('summary') or feature.get('summary') or '')[:210]}",
+        source=f"self-repair:{issue.get('source') or 'workflow-check'}",
+        braid_template="orchestrator-self-repair",
+        feature_id=feature_id,
+        engine_args={
+            "mode": "self-repair-plan",
+            "self_repair": {
+                "enabled": True,
+                "issue_kind": issue.get("issue_kind") or repair_cfg.get("issue_kind") or "runtime_bug",
+                "source": issue.get("source") or repair_cfg.get("source") or "manual",
+                "deploy_mode": repair_cfg.get("deploy_mode", "local-main"),
+                "council_members": list(repair_cfg.get("council_members") or ()),
+                "restart_launch_agents": bool(repair_cfg.get("restart_launch_agents", True)),
+            },
+            "evidence": issue.get("evidence") or "",
+            "issue_key": issue.get("issue_key"),
+            "issue_summary": issue.get("summary") or "",
+        },
+    )
+    enqueue_task(task)
+    append_feature_child(feature_id, task["task_id"])
+    _self_repair_mark_issue(
+        feature_id,
+        issue["issue_key"],
+        planner_task_id=task["task_id"],
+        status="scheduled",
+        scheduled_at=now_iso(),
+    )
+    append_event(
+        "self-repair",
+        "issue_task_enqueued",
+        task_id=task["task_id"],
+        feature_id=feature_id,
+        details={"issue_key": issue.get("issue_key"), "summary": issue.get("summary")},
+    )
+    return task
+
+
+def _attach_issue_to_self_repair_feature(feature, *, summary, evidence, issue_kind, source, issue_key=None):
+    attached_at = now_iso()
+    resolved_issue_key = _self_repair_issue_key(
+        issue_key=issue_key,
+        issue_kind=issue_kind,
+        summary=summary,
+        evidence=evidence,
+        source=source,
+    )
+    record = {
+        "issue_key": resolved_issue_key,
+        "issue_kind": issue_kind,
+        "summary": (summary or "").strip()[:240],
+        "evidence": (evidence or "").strip(),
+        "source": source,
+        "status": "pending",
+        "attached_at": attached_at,
+        "last_seen_at": attached_at,
+        "seen_count": 1,
+        "planner_task_id": None,
+    }
+
+    def mut(f):
+        sr = f.setdefault("self_repair", {})
+        issues = sr.setdefault("issues", [])
+        for issue in issues:
+            if issue.get("issue_key") == resolved_issue_key:
+                issue["last_seen_at"] = attached_at
+                issue["seen_count"] = int(issue.get("seen_count", 0) or 0) + 1
+                if record["evidence"] and record["evidence"] != issue.get("evidence"):
+                    issue["evidence"] = record["evidence"]
+                if record["summary"] and record["summary"] != issue.get("summary"):
+                    issue["summary"] = record["summary"]
+                issue["source"] = source
+                issue["issue_kind"] = issue_kind
+                break
+        else:
+            issues.append(record.copy())
+        sr["last_attached_issue_key"] = resolved_issue_key
+        sr["last_attached_at"] = attached_at
+
+    updated = update_feature(feature["feature_id"], mut)
+    attached_issue = next(
+        issue for issue in ((updated.get("self_repair") or {}).get("issues") or [])
+        if issue.get("issue_key") == resolved_issue_key
+    )
+    append_event(
+        "self-repair",
+        "issue_attached",
+        feature_id=feature["feature_id"],
+        task_id=attached_issue.get("planner_task_id"),
+        details={"issue_key": resolved_issue_key, "summary": attached_issue.get("summary")},
+    )
+    return updated, attached_issue
+
+
+def tick_self_repair_queue():
+    """Schedule the oldest pending issue onto the active self-repair feature.
+
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     feats = root / "features"; feats.mkdir()
+    ...     queue_root = root / "queue"
+    ...     for state in STATES:
+    ...         (queue_root / state).mkdir(parents=True, exist_ok=True)
+    ...     feature = {
+    ...         "feature_id": "feature-sr",
+    ...         "project": "devmini-orchestrator",
+    ...         "status": "open",
+    ...         "summary": "repair",
+    ...         "source": "self-repair:test",
+    ...         "child_task_ids": [],
+    ...         "self_repair": {"enabled": True, "issues": [{"issue_key": "i1", "summary": "fix queue", "evidence": "e", "source": "workflow-check", "issue_kind": "runtime_bug", "status": "pending"}]},
+    ...     }
+    ...     old = {k: tick_self_repair_queue.__globals__[k] for k in ("FEATURES_DIR", "QUEUE_ROOT", "new_task", "enqueue_task", "append_feature_child")}
+    ...     captured = {}
+    ...     tick_self_repair_queue.__globals__["FEATURES_DIR"] = feats
+    ...     tick_self_repair_queue.__globals__["QUEUE_ROOT"] = queue_root
+    ...     tick_self_repair_queue.__globals__["new_task"] = lambda **kwargs: {"task_id": "task-sr", **kwargs}
+    ...     tick_self_repair_queue.__globals__["enqueue_task"] = lambda task: captured.setdefault("task", task)
+    ...     tick_self_repair_queue.__globals__["append_feature_child"] = lambda fid, tid: update_feature(fid, lambda f: f.setdefault("child_task_ids", []).append(tid))
+    ...     write_json_atomic(feats / "feature-sr.json", feature)
+    ...     out = tick_self_repair_queue()
+    ...     saved = read_json(feats / "feature-sr.json", {})
+    ...     for key, value in old.items():
+    ...         tick_self_repair_queue.__globals__[key] = value
+    >>> out["scheduled"], captured["task"]["task_id"], saved["self_repair"]["issues"][0]["planner_task_id"]
+    (1, 'task-sr', 'task-sr')
+    """
+    scheduled = []
+    lock_fh = acquire_lock("self-repair.lock", mode="exclusive", timeout_sec=10)
+    try:
+        active = _active_self_repair_feature()
+        if not active or active.get("status") != "open":
+            return {"scheduled": 0, "feature_id": (active or {}).get("feature_id")}
+        if _self_repair_has_active_work(active):
+            return {"scheduled": 0, "feature_id": active["feature_id"], "reason": "feature_busy"}
+        pending = [issue for issue in _self_repair_pending_issues(active) if not _self_repair_issue_live(issue)]
+        if not pending:
+            return {"scheduled": 0, "feature_id": active["feature_id"], "reason": "no_pending_issues"}
+        pending.sort(key=lambda issue: (issue.get("attached_at") or "", issue.get("issue_key") or ""))
+        task = _enqueue_self_repair_issue_task(active, pending[0])
+        scheduled.append(task["task_id"])
+        return {"scheduled": len(scheduled), "feature_id": active["feature_id"], "task_ids": scheduled}
+    finally:
+        lock_fh.close()
+
+
 def reserve_orchestrator_operator_worktree(name, *, allow_with_self_repair=False):
     """Create a dedicated manual worktree for operator changes on this repo.
 
@@ -6363,63 +6571,97 @@ def tick_canary_workflows(force=False):
     return {"enqueued": 1, "reason": "queued", "feature_id": feature["feature_id"], "task_id": task.get("task_id")}
 
 
-def enqueue_self_repair(*, summary, evidence, issue_kind="runtime_bug", source="manual"):
+def enqueue_self_repair(*, summary, evidence, issue_kind="runtime_bug", source="manual", issue_key=None):
     cfg = load_config()
     repair_cfg = cfg.get("self_repair") or {}
     if not repair_cfg.get("enabled", True):
         return {"enqueued": 0, "reason": "disabled"}
     project_name = repair_cfg.get("project", "devmini-orchestrator")
-    project = get_project(cfg, project_name)
-    if _project_has_open_feature(project_name):
-        return {"enqueued": 0, "reason": "project_busy"}
-    if not _self_repair_project_environment_ok(project_name):
-        return {"enqueued": 0, "reason": "environment_degraded", "project": project_name}
-    feature = create_feature(
-        project=project_name,
-        summary=summary[:240],
-        source=f"self-repair:{source}",
-        roadmap_entry={"id": "R-023-SELF-REPAIR", "title": summary[:120], "body": evidence},
-        roadmap_entry_id="R-023-SELF-REPAIR",
-        self_repair={
-            "enabled": True,
-            "issue_kind": issue_kind,
-            "source": source,
-            "deploy_mode": repair_cfg.get("deploy_mode", "local-main"),
-            "council_members": list(repair_cfg.get("council_members") or ()),
-            "restart_launch_agents": bool(repair_cfg.get("restart_launch_agents", True)),
-        },
+    resolved_issue_key = _self_repair_issue_key(
+        issue_key=issue_key,
+        issue_kind=issue_kind,
+        summary=summary,
+        evidence=evidence,
+        source=source,
     )
-    task = new_task(
-        role="planner",
-        engine="claude",
-        project=project_name,
-        summary=f"Council-plan self-repair: {summary[:210]}",
-        source=f"self-repair:{source}",
-        braid_template="orchestrator-self-repair",
-        feature_id=feature["feature_id"],
-        engine_args={
-            "mode": "self-repair-plan",
-            "self_repair": {
+    lock_fh = acquire_lock("self-repair.lock", mode="exclusive", timeout_sec=30)
+    try:
+        active = _active_self_repair_feature(project_name)
+        if active:
+            updated, issue = _attach_issue_to_self_repair_feature(
+                active,
+                summary=summary,
+                evidence=evidence,
+                issue_kind=issue_kind,
+                source=source,
+                issue_key=resolved_issue_key,
+            )
+            if _self_repair_issue_live(issue):
+                return {
+                    "enqueued": 0,
+                    "reason": "already_attached",
+                    "feature_id": updated["feature_id"],
+                    "task_id": issue.get("planner_task_id"),
+                    "issue_key": resolved_issue_key,
+                }
+            if updated.get("status") == "open" and not _self_repair_has_active_work(updated):
+                task = _enqueue_self_repair_issue_task(updated, issue)
+                return {
+                    "enqueued": 1,
+                    "reason": "attached_and_scheduled",
+                    "feature_id": updated["feature_id"],
+                    "task_id": task["task_id"],
+                    "issue_key": resolved_issue_key,
+                }
+            return {
+                "enqueued": 0,
+                "reason": "attached_to_active",
+                "feature_id": updated["feature_id"],
+                "task_id": issue.get("planner_task_id"),
+                "issue_key": resolved_issue_key,
+            }
+
+        if not _self_repair_project_environment_ok(project_name):
+            return {"enqueued": 0, "reason": "environment_degraded", "project": project_name}
+        feature = create_feature(
+            project=project_name,
+            summary=summary[:240],
+            source=f"self-repair:{source}",
+            roadmap_entry={"id": "R-023-SELF-REPAIR", "title": summary[:120], "body": evidence},
+            roadmap_entry_id="R-023-SELF-REPAIR",
+            self_repair={
                 "enabled": True,
                 "issue_kind": issue_kind,
                 "source": source,
                 "deploy_mode": repair_cfg.get("deploy_mode", "local-main"),
                 "council_members": list(repair_cfg.get("council_members") or ()),
                 "restart_launch_agents": bool(repair_cfg.get("restart_launch_agents", True)),
+                "issues": [{
+                    "issue_key": resolved_issue_key,
+                    "issue_kind": issue_kind,
+                    "summary": summary[:240],
+                    "evidence": evidence,
+                    "source": source,
+                    "status": "pending",
+                    "attached_at": now_iso(),
+                    "last_seen_at": now_iso(),
+                    "seen_count": 1,
+                    "planner_task_id": None,
+                }],
             },
-            "evidence": evidence,
-        },
-    )
-    enqueue_task(task)
-    append_feature_child(feature["feature_id"], task["task_id"])
-    append_event(
-        "self-repair",
-        "feature_enqueued",
-        task_id=task["task_id"],
-        feature_id=feature["feature_id"],
-        details={"project": project_name, "issue_kind": issue_kind, "source": source},
-    )
-    return {"enqueued": 1, "feature_id": feature["feature_id"], "task_id": task["task_id"]}
+        )
+        issue = ((feature.get("self_repair") or {}).get("issues") or [])[0]
+        task = _enqueue_self_repair_issue_task(feature, issue)
+        append_event(
+            "self-repair",
+            "feature_enqueued",
+            task_id=task["task_id"],
+            feature_id=feature["feature_id"],
+            details={"project": project_name, "issue_kind": issue_kind, "source": source, "issue_key": resolved_issue_key},
+        )
+        return {"enqueued": 1, "reason": "queued", "feature_id": feature["feature_id"], "task_id": task["task_id"], "issue_key": resolved_issue_key}
+    finally:
+        lock_fh.close()
 
 
 def status_text():
@@ -7827,6 +8069,7 @@ def tick_workflow_check():
                         evidence=_workflow_issue_self_repair_evidence(env_issue),
                         issue_kind=env_issue.get("kind") or "environment_degraded",
                         source="workflow-check",
+                        issue_key=env_issue.get("issue_key"),
                     ),
                 )
                 outcome = (
@@ -7953,6 +8196,7 @@ def tick_workflow_check():
                         evidence=_workflow_issue_self_repair_evidence(issue),
                         issue_kind=issue.get("kind") or "runtime_bug",
                         source="workflow-check",
+                        issue_key=issue.get("issue_key"),
                     ),
                 )
                 outcome = f"self-repair result: {json.dumps(out, sort_keys=True)}"
@@ -7967,6 +8211,15 @@ def tick_workflow_check():
 
         issue["outcome"] = outcome
         issues.append(issue)
+
+    self_repair_drain = tick_self_repair_queue()
+    if self_repair_drain.get("scheduled"):
+        append_event(
+            "self-repair",
+            "queue_drained",
+            feature_id=self_repair_drain.get("feature_id"),
+            details=self_repair_drain,
+        )
 
     report_path = _write_workflow_check_report(issues, reaped=reaped) if issues else None
     detail = f"issues={len(issues)} reaped={reaped} report={report_path.name if report_path else '-'}"
