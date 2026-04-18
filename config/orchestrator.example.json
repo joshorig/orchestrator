@@ -44,6 +44,8 @@
     "enabled": true,
     "planner_panel": ["aristotle", "socrates", "meadows"],
     "review_panel": ["socrates", "kahneman", "torvalds"],
+    "security_panel": ["kahneman", "ada", "socrates"],
+    "architecture_panel": ["meadows", "aristotle", "torvalds"],
     "qa_panel": ["feynman", "kahneman", "ada"]
   },
   "projects": [

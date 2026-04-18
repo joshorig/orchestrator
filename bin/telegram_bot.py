@@ -3,9 +3,9 @@
 
 Transport: long-polling `getUpdates`. Never a webhook (no public ports per security principles).
 
-Config: config/telegram.json beneath the orchestrator repo root (chmod 600, gitignored).
-If the file is absent or clearly a placeholder, the bot logs and exits cleanly so launchd
-does not respawn into an error loop.
+Config: config/telegram.json beneath the orchestrator repo root (gitignored local override).
+Bot token can be provided there or via the orchestrator keychain-backed secret store.
+Approved chats come from the orchestrator's dynamic allowlist state.
 
 Commands are dispatched through orchestrator.dispatch_telegram_command — shared with the
 legacy file-stub poller for parity. Any unknown command returns the help string; we never
@@ -43,21 +43,26 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def load_bot_config():
-    if not CONFIG_PATH.exists():
-        log.error("telegram config missing: %s — copy telegram.example.json and fill in real values", CONFIG_PATH)
-        return None
-    try:
-        cfg = json.loads(CONFIG_PATH.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        log.error("telegram config unreadable: %s", exc)
-        return None
-    token = cfg.get("bot_token", "")
+    cfg = {}
+    if CONFIG_PATH.exists():
+        try:
+            cfg = json.loads(CONFIG_PATH.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            log.error("telegram config unreadable: %s", exc)
+            return None
+    token = o.load_telegram_bot_token() or cfg.get("bot_token", "")
     if not token or "REPLACE" in token.upper():
-        log.error("telegram bot_token not configured (still placeholder)")
+        log.error("telegram bot_token not configured")
         return None
-    if not cfg.get("allowed_chat_ids"):
-        log.error("telegram allowed_chat_ids empty — refusing to start (would accept any caller)")
+    allowed = o.telegram_allowed_chat_ids()
+    bootstrap = [int(x) for x in cfg.get("allowed_chat_ids", []) if str(x).strip()]
+    if bootstrap:
+        allowed = sorted(set(allowed + bootstrap))
+    if not allowed:
+        log.error("telegram allowlist empty — refusing to start")
         return None
+    cfg["bot_token"] = token
+    cfg["allowed_chat_ids"] = allowed
     return cfg
 
 
@@ -96,13 +101,18 @@ def build_handlers(cfg):
     from telegram.constants import ParseMode
     from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-    allowed = set(int(x) for x in cfg["allowed_chat_ids"])
+    bootstrap_allowed = set(int(x) for x in cfg["allowed_chat_ids"])
+
+    def current_allowed():
+        return set(o.telegram_allowed_chat_ids()) | bootstrap_allowed
 
     def gate(handler):
         async def inner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             chat_id = update.effective_chat.id if update.effective_chat else None
             text = (update.effective_message.text or "") if update.effective_message else ""
-            if chat_id is None or chat_id not in allowed:
+            if text.startswith("/register"):
+                return await handler(update, ctx, text)
+            if chat_id is None or chat_id not in current_allowed():
                 log_reject(chat_id, text, "chat_id_not_allowed")
                 log.warning("rejected chat_id=%s text=%r", chat_id, text)
                 return
@@ -256,10 +266,45 @@ def build_handlers(cfg):
             f"✅ enqueued: <code>{html_escape(task['task_id'])}</code>",
         )
 
+    async def cmd_register(update, ctx, text):
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        if chat_id is None:
+            return
+        parts = text.split(maxsplit=1)
+        display_name = parts[1].strip() if len(parts) > 1 else ""
+        out = o.telegram_register_operator(chat_id, display_name)
+        name = html_escape(out.get("name") or display_name or "")
+        await send_html(
+            update,
+            (
+                "✅ <b>registration recorded</b>\n"
+                f"<pre>chat_id={chat_id}\nname={name}\nstatus={out.get('status')}\nseen_count={out.get('seen_count', 1)}</pre>\n"
+                f"Ask an approved operator to run <code>/approve_operator {chat_id} {name}</code>."
+            ),
+        )
+
+    async def cmd_approve_operator(update, ctx, text):
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        if chat_id not in current_allowed():
+            log_reject(chat_id, text, "chat_id_not_allowed")
+            return
+        parts = text.split(maxsplit=2)
+        if len(parts) < 2:
+            await send_html(update, "❌ usage: <code>/approve_operator &lt;chat_id&gt; [name]</code>")
+            return
+        target_chat = int(parts[1].strip())
+        display_name = parts[2].strip() if len(parts) > 2 else ""
+        out = o.telegram_approve_operator(target_chat, approved_by=chat_id, name=display_name)
+        await send_html(update, f"✅ operator approved: <code>{out['chat_id']}</code> ({html_escape(out['name'])})")
+
+    async def cmd_operators(update, ctx, text):
+        body = json.dumps(o.load_operator_allowlist(), indent=2, sort_keys=True)
+        await send_html(update, block("👥", "operators", body))
+
     async def cmd_unknown(update, ctx):
         chat_id = update.effective_chat.id if update.effective_chat else None
         text = (update.effective_message.text or "") if update.effective_message else ""
-        if chat_id not in allowed:
+        if chat_id not in current_allowed():
             log_reject(chat_id, text, "chat_id_not_allowed")
             return
         log_reject(chat_id, text, "unknown_command")
@@ -282,6 +327,9 @@ def build_handlers(cfg):
             "/regression <p> queue full regression sweep for project\n"
             "/report <kind>  write morning|evening status report\n"
             "/enqueue <sum>  manual codex task with summary\n"
+            "/register [name] request operator access from this chat\n"
+            "/approve_operator <id> [name] approve a pending operator\n"
+            "/operators      show approved and pending operators\n"
             "/self_repair <summary> | <evidence> open guarded orchestrator repair lane"
         )
         await send_html(update, block("❓", "unknown command", help_text))
@@ -306,7 +354,7 @@ def build_handlers(cfg):
                     new.append(p.name)
                     continue
             msg, use_html = format_report_message(p.name, body)
-            for chat_id in allowed:
+            for chat_id in sorted(current_allowed()):
                 try:
                     await ctx.bot.send_message(
                         chat_id=chat_id,
@@ -348,6 +396,9 @@ def build_handlers(cfg):
     app.add_handler(CommandHandler("regression", gate(cmd_regression)))
     app.add_handler(CommandHandler("report", gate(cmd_report)))
     app.add_handler(CommandHandler("enqueue", gate(cmd_enqueue)))
+    app.add_handler(CommandHandler("register", cmd_register))
+    app.add_handler(CommandHandler("approve_operator", gate(cmd_approve_operator)))
+    app.add_handler(CommandHandler("operators", gate(cmd_operators)))
     # Catch-all for anything else.
     app.add_handler(MessageHandler(filters.ALL, cmd_unknown))
 
@@ -411,7 +462,7 @@ def main():
         # Exit cleanly so launchd respawns after ThrottleInterval rather than tight-looping.
         return 0
     app = build_handlers(cfg)
-    log.info("devmini telegram bot starting (polling mode, %d allowed chat(s))", len(cfg["allowed_chat_ids"]))
+    log.info("devmini telegram bot starting (polling mode, %d allowed chat(s))", len(set(o.telegram_allowed_chat_ids()) | set(cfg["allowed_chat_ids"])))
     app.run_polling(allowed_updates=["message"], drop_pending_updates=True)
     return 0
 

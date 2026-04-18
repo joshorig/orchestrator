@@ -1686,6 +1686,105 @@ def _test_ratio_findings(changed_files_text):
     return [f"test-to-code delta ratio too low: code_files={len(code_files)} test_files={len(test_files)}"]
 
 
+def _specialized_review_prompt(
+    *,
+    gate_name,
+    graph_body,
+    target,
+    target_wt,
+    target_base,
+    changed_files,
+    diff_text,
+    roadmap_ctx,
+    memory_ctx,
+    council_ctx,
+    extra_ctx="",
+):
+    gate_brief = {
+        "security-review-pass": (
+            "You are the dedicated security review gate before autonomous push.\n"
+            "- Hunt for auth/secret exposure, unsafe subprocess/file/network use, trust-boundary mistakes, missing validation, and review-bot bypasses.\n"
+            "- Treat config drift, shell invocation, and credential handling as high-risk.\n"
+            "- Request change if the diff weakens security posture or leaks local/operator information.\n"
+        ),
+        "architectural-fit-review-pass": (
+            "You are the dedicated architecture-fit review gate before autonomous push.\n"
+            "- Check consistency with repo-memory decisions, workflow invariants, queue/state-machine semantics, and project-specific contracts.\n"
+            "- Request change if the diff violates established architecture, broadens scope silently, or introduces policy drift.\n"
+        ),
+    }[gate_name]
+    return (
+        "[BRAID REVIEW GRAPH — traverse deterministically.]\n"
+        f"{graph_body}\n"
+        "[END GRAPH]\n\n"
+        f"{gate_brief}\n"
+        "- Run a compact internal council across the provided panel before deciding.\n"
+        "- Preserve dissent in your reasoning body; do not flatten concerns away.\n"
+        "- Do not modify files. Review only.\n\n"
+        "[COUNCIL PERSONAS]\n"
+        f"{council_ctx}\n"
+        "[END COUNCIL PERSONAS]\n\n"
+        f"REVIEW TARGET: {target.get('task_id')}\n"
+        f"TARGET SUMMARY: {target.get('summary','')}\n"
+        f"TARGET WORKTREE: {target_wt}\n"
+        f"FILES CHANGED vs {target_base}:\n{changed_files}\n\n"
+        f"[DIFF vs {target_base}]\n{diff_text}\n\n"
+        f"{roadmap_ctx}"
+        f"{extra_ctx}"
+        f"[PROJECT CONTEXT]\n{memory_ctx}\n\n"
+        "Emit EXACTLY one final line:\n"
+        "  BRAID_OK: APPROVE — <one-line justification>\n"
+        "  BRAID_OK: REQUEST_CHANGE — <one-line reason>\n"
+        "  BRAID_TOPOLOGY_ERROR: <reason graph could not be traversed>\n"
+    )
+
+
+def _run_specialized_review_gate(
+    gate_name,
+    *,
+    task_id,
+    target,
+    target_wt,
+    target_base,
+    changed_files,
+    diff_text,
+    roadmap_ctx,
+    memory_ctx,
+    panel,
+    timeout,
+    logf,
+):
+    graph_body, graph_hash = o.braid_template_load(gate_name)
+    if graph_body is None:
+        return {"error": f"{gate_name} template missing", "blocker_code": "runtime_precondition_failed"}
+    prompt = _specialized_review_prompt(
+        gate_name=gate_name,
+        graph_body=graph_body,
+        target=target,
+        target_wt=target_wt,
+        target_base=target_base,
+        changed_files=changed_files,
+        diff_text=diff_text,
+        roadmap_ctx=roadmap_ctx,
+        memory_ctx=memory_ctx,
+        council_ctx="\n\n".join(_council_member_context(member) for member in panel),
+    )
+    last_msg_path = o.LOGS_DIR / f"{task_id}.{gate_name}.last.txt"
+    logf.write(f"\n# {gate_name}\n")
+    result = _run_review_agent(
+        "claude",
+        prompt=prompt,
+        worktree=target_wt,
+        timeout=timeout,
+        logf=logf,
+        last_msg_path=last_msg_path,
+    )
+    result["gate_name"] = gate_name
+    result["graph_hash"] = graph_hash
+    result["panel"] = list(panel)
+    return result
+
+
 def _run_review_agent(kind, *, prompt, worktree, timeout, logf, last_msg_path):
     if kind == "codex":
         cmd = [
@@ -2981,6 +3080,11 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
         )
     review_panel = _config_council_panel(cfg, "review_panel", ("socrates", "kahneman", "torvalds"))
     council_ctx = "\n\n".join(_council_member_context(member) for member in review_panel)
+    gate_names = ("security-review-pass", "architectural-fit-review-pass")
+    gate_panels = {
+        "security-review-pass": _config_council_panel(cfg, "security_panel", review_panel or ("socrates", "kahneman", "torvalds")),
+        "architectural-fit-review-pass": _config_council_panel(cfg, "architecture_panel", review_panel or ("socrates", "kahneman", "torvalds")),
+    }
 
     codex_prompt = (
         "[BRAID REVIEW GRAPH — traverse deterministically.]\n"
@@ -3107,6 +3211,38 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
             combined_findings = (combined_findings + "\n\n" + claude_result.get("raw", "")).strip()
             final_verdict = claude_result.get("verdict")
 
+        if final_verdict == "approve":
+            for gate_name in gate_names:
+                gate_result = _run_specialized_review_gate(
+                    gate_name,
+                    task_id=task_id,
+                    target=target,
+                    target_wt=target_wt,
+                    target_base=target_base,
+                    changed_files=changed_files,
+                    diff_text=diff_text,
+                    roadmap_ctx=roadmap_ctx,
+                    memory_ctx=memory_ctx,
+                    panel=gate_panels.get(gate_name) or review_panel,
+                    timeout=review_timeout,
+                    logf=logf,
+                )
+                if gate_result.get("error"):
+                    blocker = gate_result.get("blocker_code") or ("llm_timeout" if "timeout" in gate_result["error"] else "llm_exit_error")
+                    _mark_review_target_for_retry(target_id, gate_result["error"])
+                    fail_task(task_id, "running", gate_result["error"],
+                              blocker_code=blocker, summary=f"{gate_name} failed", retryable=True)
+                    return
+                if gate_result.get("verdict") == "topology_error":
+                    _mark_review_target_for_retry(target_id, f"{gate_name} topology error")
+                    fail_task(task_id, "running", f"{gate_name} topology error",
+                              blocker_code="template_graph_error", summary=f"{gate_name} topology error", retryable=True)
+                    return
+                combined_findings = (combined_findings + "\n\n" + gate_result.get("raw", "")).strip()
+                final_verdict = gate_result.get("verdict")
+                if final_verdict != "approve":
+                    break
+
         hard_gate_findings = policy_findings + compile_findings + ratio_findings
         if final_verdict == "approve" and hard_gate_findings:
             final_verdict = "request_change"
@@ -3137,6 +3273,8 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
         t["reviewed_by"] = task_id
         t["policy_review_findings"] = policy_findings + compile_findings + ratio_findings
         t["review_council_panel"] = list(review_panel)
+        t["review_gates"] = ["functional-review", "council-review", *gate_names]
+        t["review_gate_panels"] = {name: list(gate_panels.get(name) or ()) for name in gate_names}
 
     if final_verdict == "approve":
         o.move_task(target_id, "awaiting-review", "awaiting-qa",
