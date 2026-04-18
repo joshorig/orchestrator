@@ -26,6 +26,7 @@ import pathlib
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -46,6 +47,36 @@ DEFAULT_TIMEOUTS = {"claude": 1800, "codex": 3600, "qa": 900}
 def log(msg):
     sys.stderr.write(f"[worker {dt.datetime.now().isoformat(timespec='seconds')}] {msg}\n")
     sys.stderr.flush()
+
+
+def _run_bounded(cmd, *, timeout, cwd=None, env=None, stdout=None, stderr=None, text=True):
+    """Run a subprocess in its own process group with TERM->KILL timeout handling."""
+    proc = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        env=env,
+        stdout=stdout,
+        stderr=stderr,
+        text=text,
+        start_new_session=True,
+    )
+    try:
+        out, err = proc.communicate(timeout=timeout)
+        return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+    except subprocess.TimeoutExpired as exc:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            out, err = proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            out, err = proc.communicate()
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout, output=out, stderr=err) from exc
 
 
 def fail_task(task_id, from_state, reason, *, blocker_code=None, summary=None, detail=None, retryable=None, mutator=None):
@@ -80,6 +111,27 @@ def block_task(task_id, from_state, reason, *, blocker_code, summary=None, detai
         if mutator is not None:
             mutator(task)
     o.move_task(task_id, from_state, "blocked", reason=reason[:200], mutator=mut)
+
+
+def _mark_review_target_for_retry(target_id, reason):
+    found = o.find_task(target_id, states=("awaiting-review",))
+    if not found:
+        return False
+    state, target = found
+    target_path = o.task_path(target_id, state)
+    def mut(task):
+        task["review_failure"] = reason
+        task["review_failure_at"] = o.now_iso()
+        o.set_task_blocker(
+            task,
+            "runtime_precondition_failed",
+            summary="reviewer task failed",
+            detail=reason,
+            source="worker",
+            retryable=True,
+        )
+    o.update_task_in_place(target_path, mut)
+    return True
 
 
 # --- git worktree management ------------------------------------------------
@@ -1406,7 +1458,7 @@ def run_claude_memory_synthesis(task, cfg, timeout, log_path):
     with log_path.open("w") as logf:
         logf.write(f"# claude memory-synthesis task={task_id} project={project['name']}\n\n")
         try:
-            proc = subprocess.run(
+            proc = _run_bounded(
                 cmd, stdout=subprocess.PIPE, stderr=logf, text=True, timeout=timeout,
                 cwd="/tmp",
             )
@@ -1529,6 +1581,93 @@ def _policy_findings_for_diff(project_name, worktree, base_ref):
     return findings
 
 
+def _restore_project_file_from_head(project_path, rel_path):
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(project_path), "checkout", "HEAD", "--", rel_path],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "git checkout timed out"
+    detail = (proc.stderr or proc.stdout or "").strip()
+    return proc.returncode == 0, detail or "ok"
+
+
+def _changed_file_list(changed_files_text):
+    return [line.strip() for line in (changed_files_text or "").splitlines() if line.strip() and not line.startswith("(")]
+
+
+def _compile_gate_findings(project, worktree, changed_files_text):
+    files = _changed_file_list(changed_files_text)
+    findings = []
+    py_files = [f for f in files if f.endswith(".py")]
+    if py_files:
+        cmd = ["python3", "-m", "py_compile", *py_files]
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=worktree,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            findings.append("compile gate timed out for Python changes")
+        else:
+            if proc.returncode != 0:
+                detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+                findings.append(f"compile gate failed for Python changes: {(detail[0] if detail else 'py_compile failed')[:220]}")
+
+    if any(f.endswith(".java") for f in files):
+        gradlew = pathlib.Path(worktree) / "gradlew"
+        if gradlew.exists():
+            try:
+                proc = subprocess.run(
+                    [str(gradlew), "compileJava", "compileTestJava", "-q"],
+                    cwd=worktree,
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                findings.append("compile gate timed out for Java changes")
+            else:
+                if proc.returncode != 0:
+                    detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+                    findings.append(f"compile gate failed for Java changes: {(detail[0] if detail else 'gradle compile failed')[:220]}")
+    return findings
+
+
+def _test_ratio_findings(changed_files_text):
+    files = _changed_file_list(changed_files_text)
+    code_files = [
+        f for f in files
+        if f.endswith((".py", ".java", ".ts", ".tsx", ".js", ".jsx"))
+        and "/test" not in f.lower()
+        and "/tests" not in f.lower()
+        and not pathlib.Path(f).name.startswith("test_")
+    ]
+    test_files = [
+        f for f in files
+        if "/test" in f.lower()
+        or "/tests" in f.lower()
+        or pathlib.Path(f).name.startswith("test_")
+        or f.endswith((".spec.ts", ".spec.tsx", ".spec.js", ".spec.jsx", ".test.ts", ".test.tsx", ".test.js", ".test.jsx"))
+    ]
+    if not code_files:
+        return []
+    if test_files:
+        ratio = len(test_files) / max(len(code_files), 1)
+        if ratio >= 0.5:
+            return []
+    return [f"test-to-code delta ratio too low: code_files={len(code_files)} test_files={len(test_files)}"]
+
+
 def _run_review_agent(kind, *, prompt, worktree, timeout, logf, last_msg_path):
     if kind == "codex":
         cmd = [
@@ -1558,7 +1697,7 @@ def _run_review_agent(kind, *, prompt, worktree, timeout, logf, last_msg_path):
         raise ValueError(f"unknown review agent {kind}")
 
     try:
-        proc = subprocess.run(
+        proc = _run_bounded(
             cmd,
             cwd=cwd,
             stdout=stdout_target,
@@ -1826,7 +1965,7 @@ def run_claude_template_gen(task, cfg, task_type, timeout, log_path):
         logf.write(f"# model: opus\n# max_budget_usd: 1.00\n\n")
         logf.flush()
         try:
-            proc = subprocess.run(
+            proc = _run_bounded(
                 cmd, stdout=subprocess.PIPE, stderr=logf, text=True, timeout=timeout,
                 cwd="/tmp",  # avoid CLAUDE.md auto-discovery at worker invocation
             )
@@ -1936,7 +2075,7 @@ def run_claude_template_refine(task, cfg, task_type, timeout, log_path):
         logf.write(f"# refine node: {node_id}\n")
         logf.write(f"# refine condition: {condition}\n\n")
         try:
-            proc = subprocess.run(
+            proc = _run_bounded(
                 cmd, stdout=subprocess.PIPE, stderr=logf, text=True, timeout=timeout,
                 cwd="/tmp",
             )
@@ -2595,7 +2734,7 @@ def run_claude_planner(task, cfg, timeout, log_path):
     with log_path.open("w") as logf:
         logf.write(f"# claude planner task={task_id} project={project['name']}\n\n")
         try:
-            proc = subprocess.run(
+            proc = _run_bounded(
                 cmd, stdout=subprocess.PIPE, stderr=logf, text=True, timeout=timeout,
                 cwd="/tmp",  # avoid CLAUDE.md auto-discovery
             )
@@ -2812,6 +2951,16 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
     review_query = " ".join(filter(None, [target.get("summary"), changed_files]))
     memory_ctx = read_memory_context(project["name"], project["path"], role="reviewer", query=review_query)
     policy_findings = _policy_findings_for_diff(project_name, target_wt, target_base)
+    compile_findings = _compile_gate_findings(project, target_wt, changed_files)
+    ratio_findings = _test_ratio_findings(changed_files)
+    feature = o.read_feature(target.get("feature_id")) if target.get("feature_id") else None
+    roadmap_ctx = ""
+    if feature:
+        roadmap_ctx = (
+            f"ROADMAP ENTRY ID: {feature.get('roadmap_entry_id') or '(none)'}\n"
+            f"ROADMAP TITLE: {(feature.get('roadmap_entry') or {}).get('title') or '(none)'}\n"
+            f"ROADMAP BODY:\n{(feature.get('roadmap_entry') or {}).get('body') or '(none)'}\n\n"
+        )
     review_panel = _config_council_panel(cfg, "review_panel", ("socrates", "kahneman", "torvalds"))
     council_ctx = "\n\n".join(_council_member_context(member) for member in review_panel)
 
@@ -2830,11 +2979,12 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
         f"TARGET WORKTREE: {target_wt}\n"
         f"FILES CHANGED vs {target_base}:\n{changed_files}\n\n"
         f"[DIFF vs {target_base}]\n{diff_text}\n\n"
+        f"{roadmap_ctx}"
         + (
             "[PRE-CHECK POLICY FINDINGS]\n"
-            + "\n".join(f"- {item}" for item in policy_findings)
+            + "\n".join(f"- {item}" for item in (policy_findings + compile_findings + ratio_findings))
             + "\n\n"
-            if policy_findings else ""
+            if (policy_findings or compile_findings or ratio_findings) else ""
         )
         + f"[PROJECT CONTEXT]\n{memory_ctx}\n\n"
         "Emit EXACTLY one final line:\n"
@@ -2861,11 +3011,12 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
         f"TARGET WORKTREE: {target_wt}\n"
         f"FILES CHANGED vs {target_base}:\n{changed_files}\n\n"
         f"[DIFF vs {target_base}]\n{diff_text}\n\n"
+        f"{roadmap_ctx}"
         + (
             "[PRE-CHECK POLICY FINDINGS]\n"
-            + "\n".join(f"- {item}" for item in policy_findings)
+            + "\n".join(f"- {item}" for item in (policy_findings + compile_findings + ratio_findings))
             + "\n\n"
-            if policy_findings else ""
+            if (policy_findings or compile_findings or ratio_findings) else ""
         )
         + f"[PROJECT CONTEXT]\n{memory_ctx}\n\n"
         "Emit EXACTLY one final line:\n"
@@ -2898,11 +3049,13 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
         if codex_result.get("error"):
             o.braid_template_record_use(reviewer_template, topology_error=True)
             blocker = "llm_timeout" if "timeout" in codex_result["error"] else "llm_exit_error"
+            _mark_review_target_for_retry(target_id, codex_result["error"])
             fail_task(task_id, "running", codex_result["error"],
                       blocker_code=blocker, summary="codex reviewer failed", retryable=True)
             return
         if codex_result.get("verdict") == "topology_error":
             o.braid_template_record_use(reviewer_template, topology_error=True)
+            _mark_review_target_for_retry(target_id, "reviewer topology error")
             fail_task(task_id, "running", "reviewer topology error",
                       blocker_code="template_graph_error", summary="reviewer topology error", retryable=True)
             return
@@ -2923,32 +3076,37 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
             if claude_result.get("error"):
                 o.braid_template_record_use(reviewer_template, topology_error=True)
                 blocker = "llm_timeout" if "timeout" in claude_result["error"] else "llm_exit_error"
+                _mark_review_target_for_retry(target_id, claude_result["error"])
                 fail_task(task_id, "running", claude_result["error"],
                           blocker_code=blocker, summary="claude reviewer failed", retryable=True)
                 return
             if claude_result.get("verdict") == "topology_error":
                 o.braid_template_record_use(reviewer_template, topology_error=True)
+                _mark_review_target_for_retry(target_id, "claude reviewer topology error")
                 fail_task(task_id, "running", "claude reviewer topology error",
                           blocker_code="template_graph_error", summary="claude reviewer topology error", retryable=True)
                 return
             combined_findings = (combined_findings + "\n\n" + claude_result.get("raw", "")).strip()
             final_verdict = claude_result.get("verdict")
 
-        if final_verdict == "approve" and policy_findings:
+        hard_gate_findings = policy_findings + compile_findings + ratio_findings
+        if final_verdict == "approve" and hard_gate_findings:
             final_verdict = "request_change"
             combined_findings = (
                 combined_findings
                 + "\n\nPolicy gate findings:\n"
-                + "\n".join(f"- {item}" for item in policy_findings)
+                + "\n".join(f"- {item}" for item in hard_gate_findings)
             )
 
     if final_verdict is None:
+        _mark_review_target_for_retry(target_id, "review verdict missing")
         fail_task(task_id, "running", "no review verdict trailer",
                   blocker_code="model_output_invalid", summary="review verdict missing", retryable=False)
         return
 
     if final_verdict == "topology_error":
         o.braid_template_record_use(reviewer_template, topology_error=True)
+        _mark_review_target_for_retry(target_id, "reviewer topology error")
         fail_task(task_id, "running", "reviewer topology error",
                   blocker_code="template_graph_error", summary="reviewer topology error", retryable=True)
         return
@@ -2959,7 +3117,7 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
         t["review_verdict"] = final_verdict
         t["reviewed_at"] = o.now_iso()
         t["reviewed_by"] = task_id
-        t["policy_review_findings"] = policy_findings
+        t["policy_review_findings"] = policy_findings + compile_findings + ratio_findings
         t["review_council_panel"] = list(review_panel)
 
     if final_verdict == "approve":
@@ -3162,7 +3320,7 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
             logf.write(f"# worktree: {wt}\n\n---\n")
             logf.flush()
             try:
-                proc = subprocess.run(
+                proc = _run_bounded(
                     cmd, stdout=logf, stderr=subprocess.STDOUT, text=True, timeout=timeout,
                 )
             except subprocess.TimeoutExpired:
@@ -3530,7 +3688,7 @@ def run_pr_feedback_task(task, cfg):
             logf.write(f"# worktree: {wt}\n\n---\n")
             logf.flush()
             try:
-                proc = subprocess.run(
+                proc = _run_bounded(
                     cmd, stdout=logf, stderr=subprocess.STDOUT, text=True, timeout=timeout,
                 )
             except subprocess.TimeoutExpired:
@@ -3630,7 +3788,7 @@ def run_pr_feedback_task(task, cfg):
             logf.write(f"# REPO_ROOT={wt}\n\n")
             logf.flush()
             try:
-                smoke_proc = subprocess.run(
+                smoke_proc = _run_bounded(
                     ["bash", str(smoke_abs)],
                     cwd=project["path"],
                     env=smoke_env,
@@ -3915,7 +4073,7 @@ def run_codex_slot(task, cfg):
             logf.write(f"# graph:\n{graph_body}\n\n---\n")
             logf.flush()
             try:
-                proc = subprocess.run(
+                proc = _run_bounded(
                     cmd, stdout=logf, stderr=subprocess.STDOUT, text=True, timeout=timeout,
                 )
             except subprocess.TimeoutExpired:
@@ -4236,9 +4394,20 @@ def run_qa_slot(task, cfg):
         smoke_env_repo_root = None
 
     if not script_abs.exists():
-        fail_task(task_id, "claimed", f"script missing: {script_abs}",
-                  blocker_code="qa_contract_error", summary="QA script missing", retryable=False)
-        return
+        restored, detail = _restore_project_file_from_head(project["path"], script_rel)
+        if restored and script_abs.exists():
+            o.append_event(
+                "qa",
+                "qa_script_restored",
+                task_id=task_id,
+                feature_id=task.get("feature_id"),
+                details={"project": project["name"], "script": script_rel},
+            )
+        else:
+            fail_task(task_id, "claimed", f"script missing: {script_abs}",
+                      blocker_code="qa_contract_error", summary="QA script missing", detail=detail,
+                      retryable=False)
+            return
 
     timeout = eargs.get(
         "timeout_sec",
@@ -4278,7 +4447,7 @@ def run_qa_slot(task, cfg):
             logf.write("\n")
             logf.flush()
             try:
-                proc = subprocess.run(
+                proc = _run_bounded(
                     ["bash", str(script_abs)],
                     cwd=run_cwd,
                     env=qa_env,
