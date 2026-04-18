@@ -53,7 +53,9 @@ PLANNER_DISABLED_DIR = RUNTIME_DIR / "planner-disabled"
 CLAIMS_DIR = RUNTIME_DIR / "claims"
 LOCKS_DIR = RUNTIME_DIR / "locks"
 EVENTS_LOG = RUNTIME_DIR / "events.jsonl"
+METRICS_LOG = RUNTIME_DIR / "metrics.jsonl"
 PR_SWEEP_METRICS_PATH = RUNTIME_DIR / "pr-sweep-metrics.json"
+ALLOWLIST_PATH = RUNTIME_DIR / "allowlist.json"
 FEATURES_DIR = STATE_ROOT / "state" / "features"
 TRANSITIONS_LOG = RUNTIME_DIR / "transitions.log"
 REPORT_DIR = STATE_ROOT / "reports"
@@ -514,6 +516,29 @@ CONTEXT_SOURCE_DEFAULTS = {
     "token_savior_root": "",
     "token_savior_python": "",
 }
+SECRET_SPECS = {
+    "gh-token": {
+        "service": "devmini.orchestrator.gh-token",
+        "account": "gh-token",
+        "label": "GitHub token",
+        "env_var": "GH_TOKEN",
+        "path": GH_TOKEN_PATH,
+    },
+    "telegram-bot-token": {
+        "service": "devmini.orchestrator.telegram-bot-token",
+        "account": "telegram-bot",
+        "label": "Telegram bot token",
+        "env_var": "TELEGRAM_BOT_TOKEN",
+        "path": STATE_ROOT / "config" / "telegram.token",
+    },
+    "claude-env": {
+        "service": "devmini.orchestrator.claude-env",
+        "account": "claude-env",
+        "label": "Claude env blob",
+        "env_var": None,
+        "path": STATE_ROOT / "config" / "claude.env",
+    },
+}
 
 BRAID_RECENT_OUTCOMES_MAX = 50
 LOG_RETENTION_DAYS = 7
@@ -543,26 +568,29 @@ def now_iso():
 
 
 def load_gh_token_env():
-    """Load GH_TOKEN from config/gh-token if the process environment lacks it."""
+    """Load GH_TOKEN from keychain or config/gh-token if the process environment lacks it."""
     token = os.environ.get("GH_TOKEN", "").strip()
     if token:
         return True
-    token = ""
-    candidates = [GH_TOKEN_PATH]
-    canonical = canonical_orchestrator_root() / "config" / "gh-token"
-    if canonical != GH_TOKEN_PATH:
-        candidates.append(canonical)
-    for path in candidates:
-        try:
-            token = path.read_text().splitlines()[0].strip()
-        except (OSError, IndexError):
-            continue
-        if token:
-            break
+    token = keychain_secret_get("gh-token")
     if not token:
         return False
     os.environ["GH_TOKEN"] = token
     return True
+
+
+def load_telegram_bot_token():
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    if token:
+        return token
+    token = keychain_secret_get("telegram-bot-token")
+    if token:
+        os.environ["TELEGRAM_BOT_TOKEN"] = token
+    return token
+
+
+def load_claude_env_blob():
+    return keychain_secret_get("claude-env")
 
 def canonical_orchestrator_root():
     """Best-effort canonical checkout path for this repo, preferring branch main."""
@@ -591,10 +619,6 @@ def canonical_orchestrator_root():
     fallback = DEV_ROOT / "orchestrator"
     return fallback.resolve() if fallback.exists() else STATE_ROOT
 
-
-load_gh_token_env()
-
-
 def gh_subprocess_env(extra_env=None):
     """Return a subprocess env with GitHub token vars populated when available."""
     env = os.environ.copy()
@@ -617,6 +641,281 @@ def _read_json_if_exists(path):
     if not pathlib.Path(path).exists():
         return {}
     return json.loads(pathlib.Path(path).read_text())
+
+
+def _security_cmd(*args, timeout=15):
+    try:
+        proc = subprocess.run(
+            ["security", *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, "", str(exc)
+    return proc.returncode == 0, proc.stdout or "", proc.stderr or ""
+
+
+def _secret_spec(name):
+    spec = SECRET_SPECS.get(name)
+    if not spec:
+        raise KeyError(f"unknown secret: {name}")
+    return spec
+
+
+def _legacy_secret_value(spec):
+    path = pathlib.Path(spec["path"])
+    try:
+        return path.read_text().strip()
+    except OSError:
+        return ""
+
+
+def keychain_secret_get(name):
+    """Return a secret from the macOS Keychain, falling back to the legacy file.
+
+    >>> spec = {"service": "svc", "account": "acct", "path": pathlib.Path("/tmp/missing")}
+    >>> old = keychain_secret_get.__globals__["_security_cmd"]
+    >>> keychain_secret_get.__globals__["_security_cmd"] = lambda *args, **kwargs: (True, "sekrit\\n", "")
+    >>> keychain_secret_get.__globals__["SECRET_SPECS"]["_tmp"] = spec
+    >>> keychain_secret_get("_tmp")
+    'sekrit'
+    >>> keychain_secret_get.__globals__["_security_cmd"] = old
+    >>> _ = keychain_secret_get.__globals__["SECRET_SPECS"].pop("_tmp", None)
+    """
+    spec = _secret_spec(name)
+    ok, stdout, _ = _security_cmd(
+        "find-generic-password",
+        "-s", spec["service"],
+        "-a", spec["account"],
+        "-w",
+    )
+    if ok:
+        return (stdout or "").strip()
+    return _legacy_secret_value(spec)
+
+
+def keychain_secret_set(name, value):
+    spec = _secret_spec(name)
+    _security_cmd(
+        "delete-generic-password",
+        "-s", spec["service"],
+        "-a", spec["account"],
+    )
+    ok, stdout, stderr = _security_cmd(
+        "add-generic-password",
+        "-U",
+        "-s", spec["service"],
+        "-a", spec["account"],
+        "-w", value,
+        "-l", spec["label"],
+    )
+    detail = (stderr or stdout or "").strip()
+    return ok, detail or "ok"
+
+
+def keychain_secret_delete(name):
+    spec = _secret_spec(name)
+    ok, stdout, stderr = _security_cmd(
+        "delete-generic-password",
+        "-s", spec["service"],
+        "-a", spec["account"],
+    )
+    detail = (stderr or stdout or "").strip()
+    return ok, detail or "ok"
+
+
+def secret_status(name):
+    spec = _secret_spec(name)
+    value = keychain_secret_get(name)
+    source = "keychain" if value and _legacy_secret_value(spec) != value else ("file" if value else "missing")
+    return {
+        "name": name,
+        "label": spec["label"],
+        "present": bool(value),
+        "source": source,
+        "env_var": spec.get("env_var"),
+        "path": str(spec["path"]),
+    }
+
+
+def _allowlist_default():
+    return {"approved": [], "pending": [], "updated_at": None}
+
+
+def load_operator_allowlist():
+    data = read_json(ALLOWLIST_PATH, None)
+    if not isinstance(data, dict):
+        data = _allowlist_default()
+    data.setdefault("approved", [])
+    data.setdefault("pending", [])
+    data.setdefault("updated_at", None)
+    return data
+
+
+def save_operator_allowlist(data):
+    payload = dict(_allowlist_default())
+    payload.update(data or {})
+    payload["updated_at"] = now_iso()
+    write_json_atomic(ALLOWLIST_PATH, payload)
+    return payload
+
+
+def telegram_allowed_chat_ids():
+    data = load_operator_allowlist()
+    out = []
+    for row in data.get("approved", []):
+        try:
+            out.append(int(row.get("chat_id")))
+        except (TypeError, ValueError):
+            continue
+    return sorted(set(out))
+
+
+def telegram_register_operator(chat_id, name=""):
+    """Record or refresh a pending operator registration.
+
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     old = telegram_register_operator.__globals__["ALLOWLIST_PATH"]
+    ...     telegram_register_operator.__globals__["ALLOWLIST_PATH"] = pathlib.Path(tmp) / "allowlist.json"
+    ...     out1 = telegram_register_operator(123, "alice")
+    ...     out2 = telegram_register_operator(123, "alice")
+    ...     telegram_register_operator.__globals__["ALLOWLIST_PATH"] = old
+    >>> (out1["status"], out2["seen_count"] >= 2)
+    ('pending', True)
+    """
+    data = load_operator_allowlist()
+    now = now_iso()
+    chat_id = int(chat_id)
+    for row in data.get("approved", []):
+        if int(row.get("chat_id")) == chat_id:
+            return {"status": "already_approved", "chat_id": chat_id, "name": row.get("name") or name}
+    for row in data.get("pending", []):
+        if int(row.get("chat_id")) == chat_id:
+            row["name"] = name or row.get("name") or f"operator-{chat_id}"
+            row["last_requested_at"] = now
+            row["seen_count"] = int(row.get("seen_count", 0) or 0) + 1
+            save_operator_allowlist(data)
+            return {"status": "pending", "chat_id": chat_id, "name": row["name"], "seen_count": row["seen_count"]}
+    row = {
+        "chat_id": chat_id,
+        "name": name or f"operator-{chat_id}",
+        "requested_at": now,
+        "last_requested_at": now,
+        "seen_count": 1,
+    }
+    data.setdefault("pending", []).append(row)
+    save_operator_allowlist(data)
+    return {"status": "pending", "chat_id": chat_id, "name": row["name"], "seen_count": 1}
+
+
+def telegram_approve_operator(chat_id, approved_by, name=""):
+    """Approve a pending operator registration into the durable allowlist.
+
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     old = telegram_approve_operator.__globals__["ALLOWLIST_PATH"]
+    ...     telegram_approve_operator.__globals__["ALLOWLIST_PATH"] = pathlib.Path(tmp) / "allowlist.json"
+    ...     _ = telegram_register_operator(123, "alice")
+    ...     out = telegram_approve_operator(123, approved_by=999, name="Alice")
+    ...     telegram_approve_operator.__globals__["ALLOWLIST_PATH"] = old
+    >>> (out["status"], out["chat_id"], out["name"])
+    ('approved', 123, 'Alice')
+    """
+    data = load_operator_allowlist()
+    now = now_iso()
+    chat_id = int(chat_id)
+    approved_by = int(approved_by)
+    pending = None
+    keep = []
+    for row in data.get("pending", []):
+        if int(row.get("chat_id")) == chat_id and pending is None:
+            pending = row
+        else:
+            keep.append(row)
+    data["pending"] = keep
+    for row in data.get("approved", []):
+        if int(row.get("chat_id")) == chat_id:
+            fallback_name = (pending or {}).get("name") if pending else row.get("name")
+            row["name"] = name or row.get("name") or fallback_name
+            row["approved_by"] = approved_by
+            row["approved_at"] = now
+            save_operator_allowlist(data)
+            return {"status": "approved", "chat_id": chat_id, "name": row.get("name")}
+    approved = {
+        "chat_id": chat_id,
+        "name": name or ((pending or {}).get("name")) or f"operator-{chat_id}",
+        "approved_at": now,
+        "approved_by": approved_by,
+    }
+    data.setdefault("approved", []).append(approved)
+    save_operator_allowlist(data)
+    return {"status": "approved", "chat_id": chat_id, "name": approved["name"]}
+
+
+def append_metric(name, value, *, metric_type="gauge", tags=None, source=None, ts=None):
+    METRICS_LOG.parent.mkdir(parents=True, exist_ok=True)
+    row = {
+        "ts": ts or now_iso(),
+        "name": name,
+        "type": metric_type,
+        "value": value,
+        "tags": dict(tags or {}),
+        "source": source or "runtime",
+    }
+    with METRICS_LOG.open("a") as f:
+        f.write(json.dumps(row, sort_keys=True) + "\n")
+    return row
+
+
+def read_metrics(*, name=None, limit=None):
+    if not METRICS_LOG.exists():
+        return []
+    rows = []
+    try:
+        lines = METRICS_LOG.read_text(errors="replace").splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if name is not None and row.get("name") != name:
+            continue
+        rows.append(row)
+    if limit is not None and limit >= 0:
+        rows = rows[-limit:]
+    return rows
+
+
+def latest_metric_values(*, names=None):
+    wanted = set(names or [])
+    latest = {}
+    for row in read_metrics():
+        name = row.get("name")
+        if wanted and name not in wanted:
+            continue
+        latest[name] = row
+    return latest
+
+
+def emit_runtime_metrics_snapshot(*, source="runtime"):
+    counts = queue_counts()
+    health = environment_health(refresh=True)
+    workflows = open_feature_workflow_summaries()
+    snapshot = []
+    for state, count in counts.items():
+        snapshot.append(append_metric("queue.count", count, tags={"state": state}, source=source))
+    snapshot.append(append_metric("environment.ok", 1 if health.get("ok") else 0, source=source))
+    error_count = len([i for i in health.get("issues", []) if i.get("severity") == "error"])
+    snapshot.append(append_metric("environment.error_count", error_count, source=source))
+    snapshot.append(append_metric("feature.open_count", len(workflows), source=source))
+    blocked = sum(1 for wf in workflows if (wf.get("frontier") or {}).get("state") in ("blocked", "failed", "abandoned"))
+    snapshot.append(append_metric("feature.frontier_blocked_count", blocked, source=source))
+    return snapshot
 
 
 def _deep_merge_dicts(base, override):
@@ -677,6 +976,112 @@ def get_project(config, name):
         if p["name"] == name:
             return p
     raise KeyError(f"unknown project: {name}")
+
+
+def _write_local_config_patch(mutator):
+    local = _read_json_if_exists(CONFIG_LOCAL_PATH)
+    if not isinstance(local, dict):
+        local = {}
+    mutator(local)
+    write_json_atomic(CONFIG_LOCAL_PATH, local)
+    return local
+
+
+def _validate_project_registration(name, path, smoke, regression):
+    repo = pathlib.Path(path).expanduser().resolve()
+    if not repo.exists():
+        raise SystemExit(f"project path missing: {repo}")
+    ok, detail = _git_ok(repo, "rev-parse", "--is-inside-work-tree")
+    if not ok:
+        raise SystemExit(f"project path is not a git repo: {detail[:200]}")
+    if smoke and not (repo / smoke).exists():
+        raise SystemExit(f"missing smoke script: {repo / smoke}")
+    if regression and not (repo / regression).exists():
+        raise SystemExit(f"missing regression script: {repo / regression}")
+    cfg = load_config()
+    names = {p["name"] for p in cfg.get("projects", [])}
+    if name in names:
+        raise SystemExit(f"project already registered: {name}")
+    return repo
+
+
+def register_project(
+    *,
+    name,
+    path,
+    project_type="application",
+    playwright=False,
+    auto_push=False,
+    smoke="qa/smoke.sh",
+    regression="qa/regression.sh",
+    regression_days=None,
+    regression_threshold_pct=3,
+    reload_launchd=True,
+):
+    """Register a project in the local orchestrator config and refresh the env.
+
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     repo = root / "repo"; repo.mkdir()
+    ...     qa = repo / "qa"; qa.mkdir()
+    ...     _ = (qa / "smoke.sh").write_text("#!/bin/sh\\n")
+    ...     _ = (qa / "regression.sh").write_text("#!/bin/sh\\n")
+    ...     _ = subprocess.run(["git", "-C", str(repo), "init", "-b", "main"], capture_output=True, text=True, check=True)
+    ...     old_cfg = register_project.__globals__["CONFIG_LOCAL_PATH"]
+    ...     old_load = register_project.__globals__["load_config"]
+    ...     old_restart = register_project.__globals__["restart_orchestrator_launch_agents"]
+    ...     old_health = register_project.__globals__["environment_health"]
+    ...     register_project.__globals__["CONFIG_LOCAL_PATH"] = root / "orchestrator.local.json"
+    ...     register_project.__globals__["load_config"] = lambda: {"projects": []}
+    ...     register_project.__globals__["restart_orchestrator_launch_agents"] = lambda **kwargs: (["ok"], [])
+    ...     register_project.__globals__["environment_health"] = lambda refresh=False: {"ok": True, "issues": []}
+    ...     out = register_project(name="demo", path=str(repo), reload_launchd=True)
+    ...     body = json.loads((root / "orchestrator.local.json").read_text())
+    ...     register_project.__globals__["CONFIG_LOCAL_PATH"] = old_cfg
+    ...     register_project.__globals__["load_config"] = old_load
+    ...     register_project.__globals__["restart_orchestrator_launch_agents"] = old_restart
+    ...     register_project.__globals__["environment_health"] = old_health
+    >>> (out["registered"], body["projects"][0]["name"], out["environment_ok"])
+    (True, 'demo', True)
+    """
+    repo = _validate_project_registration(name, path, smoke, regression)
+    regression_days = [d.lower()[:3] for d in (regression_days or ["sun"])]
+    project_entry = {
+        "name": name,
+        "path": str(repo),
+        "type": project_type,
+        "playwright": bool(playwright),
+        "auto_push": bool(auto_push),
+        "qa": {
+            "smoke": smoke,
+            "regression": regression,
+            "regression_days": regression_days,
+            "regression_threshold_pct": int(regression_threshold_pct),
+        },
+    }
+    payload = _write_local_config_patch(
+        lambda local: local.setdefault("projects", []).append(project_entry)
+    )
+    restarted, failed = ([], [])
+    if reload_launchd:
+        restarted, failed = restart_orchestrator_launch_agents()
+    health = environment_health(refresh=True)
+    append_event(
+        "config",
+        "project_registered",
+        details={"project": name, "path": str(repo), "reload_launchd": reload_launchd},
+    )
+    return {
+        "registered": True,
+        "project": name,
+        "path": str(repo),
+        "local_config_path": str(CONFIG_LOCAL_PATH),
+        "projects_total": len(payload.get("projects", [])),
+        "restarted_agents": restarted,
+        "restart_failures": failed,
+        "environment_ok": bool(health.get("ok")),
+    }
 
 
 class EnvironmentDegraded(RuntimeError):
@@ -852,6 +1257,14 @@ def repair_environment():
                 "changes": ["launchctl setenv GH_TOKEN"] if launchctl_ok else [],
                 "issue": issue,
             }
+        elif code == "runtime_env_dirty" and summary == "telegram bot token unavailable":
+            token_loaded = bool(load_telegram_bot_token())
+            result = {
+                "fixed": token_loaded,
+                "action": "load_telegram_bot_token",
+                "detail": "ok" if token_loaded else "telegram token still unavailable",
+                "issue": issue,
+            }
         elif code == "runtime_env_dirty" and summary == "worktrees root missing":
             worktrees_root = DEV_ROOT / "worktrees"
             worktrees_root.mkdir(parents=True, exist_ok=True)
@@ -933,7 +1346,7 @@ def environment_health(*, refresh=False):
                 }
             )
 
-    if not os.environ.get("GH_TOKEN", "").strip() and not GH_TOKEN_PATH.exists():
+    if not load_gh_token_env():
         issues.append(
             {
                 "code": "delivery_auth_expired",
@@ -941,7 +1354,40 @@ def environment_health(*, refresh=False):
                 "project": None,
                 "severity": "error",
                 "summary": "GH_TOKEN unavailable",
-                "detail": f"missing environment GH_TOKEN and {GH_TOKEN_PATH}",
+                "detail": "missing GitHub token in env, keychain, and config/gh-token",
+            }
+        )
+    if not load_telegram_bot_token():
+        issues.append(
+            {
+                "code": "runtime_env_dirty",
+                "scope": "global",
+                "project": None,
+                "severity": "error",
+                "summary": "telegram bot token unavailable",
+                "detail": "store a token via `orchestrator.py creds set telegram-bot-token` or config/telegram.json",
+            }
+        )
+    if not load_claude_env_blob() and not (STATE_ROOT / "config" / "claude.env").exists():
+        issues.append(
+            {
+                "code": "runtime_env_dirty",
+                "scope": "global",
+                "project": None,
+                "severity": "warning",
+                "summary": "claude env blob unavailable",
+                "detail": "store shared Claude env via `orchestrator.py creds set claude-env` or config/claude.env",
+            }
+        )
+    if not telegram_allowed_chat_ids():
+        issues.append(
+            {
+                "code": "runtime_env_dirty",
+                "scope": "global",
+                "project": None,
+                "severity": "warning",
+                "summary": "telegram allowlist empty",
+                "detail": "approve an operator via `orchestrator.py telegram-approve`",
             }
         )
 
@@ -1716,6 +2162,13 @@ def enqueue_task(task):
         feature_id=task.get("feature_id"),
         details={"project": task.get("project"), "source": task.get("source"), "braid_template": task.get("braid_template")},
     )
+    append_metric(
+        "task.enqueued",
+        1,
+        metric_type="counter",
+        tags={"engine": task.get("engine"), "role": task.get("role"), "project": task.get("project")},
+        source=task.get("source") or "runtime",
+    )
     _nudge_engine_workers(task.get("engine"))
     return path
 
@@ -1800,6 +2253,20 @@ def move_task(task_id, from_state, to_state, reason="", mutator=None):
             "project": task.get("project"),
             "blocker_code": (task.get("blocker") or {}).get("code"),
         },
+    )
+    append_metric(
+        "task.transition",
+        1,
+        metric_type="counter",
+        tags={
+            "from_state": from_state,
+            "to_state": to_state,
+            "engine": task.get("engine"),
+            "role": task.get("role"),
+            "project": task.get("project"),
+            "blocker_code": (task.get("blocker") or {}).get("code") or "",
+        },
+        source=task.get("source") or "runtime",
     )
     return dst, task
 
@@ -5765,6 +6232,12 @@ def write_agent_status(role, status, detail=""):
         {"role": role, "status": status, "detail": detail, "updated_at": now_iso()},
     )
     append_event(role, "agent_status", details={"status": status, "detail": detail})
+    append_metric(
+        "agent.status",
+        1,
+        tags={"role": role, "status": status},
+        source="agent-status",
+    )
 
 
 def agent_statuses():
@@ -6446,6 +6919,7 @@ def ppd_report_path(day=None):
 
 
 def report(kind):
+    emit_runtime_metrics_snapshot(source=f"report:{kind}")
     ts = dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     out = REPORT_DIR / f"{kind}_{ts}.md"
@@ -6486,6 +6960,15 @@ def report(kind):
     lines.append(f"- guard skips total: {metrics.get('guard_skip_total', 0)}")
     for reason, count in sorted((metrics.get("guard_skip_by_reason") or {}).items()):
         lines.append(f"- {reason}: {count}")
+    latest_metrics = latest_metric_values(
+        names=("environment.ok", "environment.error_count", "feature.open_count", "feature.frontier_blocked_count")
+    )
+    if latest_metrics:
+        lines += ["", "## Runtime metrics"]
+        for name in ("environment.ok", "environment.error_count", "feature.open_count", "feature.frontier_blocked_count"):
+            row = latest_metrics.get(name)
+            if row:
+                lines.append(f"- {name}: {row.get('value')}")
     lines += ["", "## BRAID templates"]
     idx = load_braid_index()
     if not idx:
@@ -6947,6 +7430,16 @@ def status_text():
             f"{metrics['guard_skip_total']} skip(s) "
             f"({', '.join(f'{k}={v}' for k, v in sorted((metrics.get('guard_skip_by_reason') or {}).items()))})"
         )
+    latest = latest_metric_values(
+        names=("environment.error_count", "feature.open_count", "feature.frontier_blocked_count", "workflow_check.issue_count")
+    )
+    if latest:
+        lines.append("")
+        lines.append("Metrics:")
+        for key in ("environment.error_count", "feature.open_count", "feature.frontier_blocked_count", "workflow_check.issue_count"):
+            row = latest.get(key)
+            if row:
+                lines.append(f"  {key}: {row.get('value')}")
     return "\n".join(lines)
 
 
@@ -8226,6 +8719,7 @@ def tick_workflow_check():
     cfg = load_config()
     max_attempts = int(cfg.get("workflow_check_max_attempts", 3))
     write_agent_status("workflow-check", "running", "Scanning feature workflows for blockers.")
+    emit_runtime_metrics_snapshot(source="workflow-check")
 
     reaped = reap()
     issues = []
@@ -8405,6 +8899,7 @@ def tick_workflow_check():
         )
 
     report_path = _write_workflow_check_report(issues, reaped=reaped) if issues else None
+    append_metric("workflow_check.issue_count", len(issues), source="workflow-check")
     detail = f"issues={len(issues)} reaped={reaped} report={report_path.name if report_path else '-'}"
     write_agent_status("workflow-check", "idle", detail)
     return {"issues": len(issues), "reaped": reaped, "report": str(report_path) if report_path else None}
@@ -8714,6 +9209,18 @@ def dispatch_telegram_command(text):
         )
         enqueue_task(task)
         return f"enqueued: {task['task_id']}"
+    if text.startswith("/telegram-register "):
+        raw = text.split(" ", 1)[1].strip()
+        chat_id, _, name = raw.partition(" ")
+        return json.dumps(telegram_register_operator(int(chat_id), name.strip()), sort_keys=True)
+    if text.startswith("/telegram-approve "):
+        raw = text.split(" ", 1)[1].strip().split(maxsplit=2)
+        if len(raw) < 2:
+            return "usage: /telegram-approve <chat_id> <approved_by> [name]"
+        chat_id = int(raw[0]); approved_by = int(raw[1]); name = raw[2].strip() if len(raw) > 2 else ""
+        return json.dumps(telegram_approve_operator(chat_id, approved_by, name), sort_keys=True)
+    if text in ("/operators", "operators"):
+        return json.dumps(load_operator_allowlist(), sort_keys=True)
     if text.startswith("/self_repair ") or text.startswith("self_repair "):
         raw = text.split(" ", 1)[1].strip()
         if not raw:
@@ -8730,6 +9237,7 @@ def dispatch_telegram_command(text):
     return (
         "unknown command. allowed: /status /tasks /task <task_id> /queue /planner /reviewer /qa "
         "/cleanup /env /env-repair /ask <question> /regression <project> /report morning|evening /enqueue <summary> "
+        "/operators /telegram-register <chat_id> [name] /telegram-approve <chat_id> <approved_by> [name] "
         "/self_repair <summary> | <evidence>"
     )
 
@@ -8779,6 +9287,29 @@ def main(argv=None):
     p_env = sub.add_parser("env-health")
     p_env.add_argument("--refresh", action="store_true")
     sub.add_parser("repair-environment")
+    p_creds = sub.add_parser("creds")
+    p_creds.add_argument("action", choices=("status", "get", "set", "delete"))
+    p_creds.add_argument("secret", choices=tuple(sorted(SECRET_SPECS)))
+    p_creds.add_argument("--value", default=None)
+    p_tg_reg = sub.add_parser("telegram-register")
+    p_tg_reg.add_argument("--chat-id", required=True, type=int)
+    p_tg_reg.add_argument("--name", default="")
+    p_tg_appr = sub.add_parser("telegram-approve")
+    p_tg_appr.add_argument("--chat-id", required=True, type=int)
+    p_tg_appr.add_argument("--approved-by", required=True, type=int)
+    p_tg_appr.add_argument("--name", default="")
+    sub.add_parser("telegram-operators")
+    p_reg_proj = sub.add_parser("register-project")
+    p_reg_proj.add_argument("--name", required=True)
+    p_reg_proj.add_argument("--path", required=True)
+    p_reg_proj.add_argument("--type", default="application")
+    p_reg_proj.add_argument("--playwright", action="store_true")
+    p_reg_proj.add_argument("--auto-push", action="store_true")
+    p_reg_proj.add_argument("--smoke", default="qa/smoke.sh")
+    p_reg_proj.add_argument("--regression", default="qa/regression.sh")
+    p_reg_proj.add_argument("--regression-day", action="append", dest="regression_days")
+    p_reg_proj.add_argument("--regression-threshold-pct", default=3, type=int)
+    p_reg_proj.add_argument("--no-reload-launchd", action="store_true")
 
     p_audit = sub.add_parser("tick-template-audit")
     p_audit.add_argument("--today", default=None)
@@ -8893,6 +9424,37 @@ def main(argv=None):
         print(environment_health_text(refresh=args.refresh))
     elif args.cmd == "repair-environment":
         print(json.dumps(repair_environment(), sort_keys=True))
+    elif args.cmd == "creds":
+        if args.action == "status":
+            print(json.dumps(secret_status(args.secret), sort_keys=True))
+        elif args.action == "get":
+            print(keychain_secret_get(args.secret))
+        elif args.action == "set":
+            value = args.value if args.value is not None else sys.stdin.read()
+            ok, detail = keychain_secret_set(args.secret, value.rstrip("\n"))
+            print(json.dumps({"ok": ok, "detail": detail, "secret": args.secret}, sort_keys=True))
+        elif args.action == "delete":
+            ok, detail = keychain_secret_delete(args.secret)
+            print(json.dumps({"ok": ok, "detail": detail, "secret": args.secret}, sort_keys=True))
+    elif args.cmd == "telegram-register":
+        print(json.dumps(telegram_register_operator(args.chat_id, args.name), sort_keys=True))
+    elif args.cmd == "telegram-approve":
+        print(json.dumps(telegram_approve_operator(args.chat_id, args.approved_by, args.name), sort_keys=True))
+    elif args.cmd == "telegram-operators":
+        print(json.dumps(load_operator_allowlist(), sort_keys=True))
+    elif args.cmd == "register-project":
+        print(json.dumps(register_project(
+            name=args.name,
+            path=args.path,
+            project_type=args.type,
+            playwright=args.playwright,
+            auto_push=args.auto_push,
+            smoke=args.smoke,
+            regression=args.regression,
+            regression_days=args.regression_days,
+            regression_threshold_pct=args.regression_threshold_pct,
+            reload_launchd=not args.no_reload_launchd,
+        ), sort_keys=True))
     elif args.cmd == "tick-template-audit":
         print(tick_template_audit(today=args.today))
     elif args.cmd == "workflow-check":

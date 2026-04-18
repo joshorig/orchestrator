@@ -1,3 +1,5 @@
-# Copy to gh-token (chmod 600) and replace the placeholder below with a real
-# GitHub PAT on a single line. The real gh-token file is gitignored.
+# Optional legacy fallback. Preferred path is:
+#   python3 bin/orchestrator.py creds set gh-token --value "<PAT>"
+# If you still want a file-backed token, copy to gh-token (chmod 600) and
+# replace the placeholder below with a real GitHub PAT on a single line.
 ghp_REPLACE_WITH_YOUR_PAT

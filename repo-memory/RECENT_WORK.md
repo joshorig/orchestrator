@@ -4,6 +4,19 @@ _Append-only log. New entries go at the top. One entry per completed task or mil
 
 ---
 
+## 2026-04-18 — Audit follow-through: runtime-owned creds/operators/projects, metrics stream, dedicated review gates
+
+**Summary:** Closed the remaining audit gap categories that were still open after the R-025..R-029 batch. The runtime now owns credential access through a keychain-backed `creds` CLI, maintains a dynamic Telegram operator allowlist and approval flow, can register new canonical repos into local config without hand-editing JSON, emits a unified `state/runtime/metrics.jsonl` stream for queue/environment/frontier health, and runs council-backed `security-review-pass` plus `architectural-fit-review-pass` gates in the internal review loop before QA. Substantive gate failures flow into rework; gate runtime failures remain retryable/self-healing rather than hard-stop blockers.
+
+**Changed:**
+- `bin/orchestrator.py` — added keychain-backed secret helpers, `creds` CLI, dynamic operator allowlist state, `telegram-register` / `telegram-approve` / `telegram-operators`, `register-project`, and structured metrics emission plus report/status/workflow-check integration.
+- `bin/telegram_bot.py` — switched Telegram auth to runtime allowlist + keychain/local-secret token loading, added `/register`, `/approve_operator`, and `/operators`.
+- `bin/worker.py` — added dedicated security and architecture review gates on top of the existing functional + adversarial review flow.
+- `braid/{generators,templates}/security-review-pass*`, `braid/{generators,templates}/architectural-fit-review-pass*` — new first-class BRAID review gate contracts.
+- `README.md`, `config/{telegram.example.json,gh-token.example}` — documented keychain-backed creds, dynamic operator approval, runtime project registration, and the new metrics stream.
+
+**Validation:** `python3 -m py_compile bin/orchestrator.py bin/worker.py bin/telegram_bot.py`, `python3 -m doctest -o ELLIPSIS bin/orchestrator.py`, `python3 -m doctest -o ELLIPSIS bin/worker.py`.
+
 ## 2026-04-18 — R-025..R-029 completion + repo sanitization baseline
 
 **Summary:** Closed out the remaining autonomy-hardening roadmap cluster and removed tracked host-specific config from the public repo surface. The runtime now attempts bounded environment repair before self-repair, planner/reviewer/QA prompts consume role-aware token-savior + policy context, planner/reviewer/QA all use explicit council panels, semantic QA audits expected validation scope against observed log signals, and review-thread auto-resolution now requires diff-aware local evidence rather than a weak “task ran” heuristic.

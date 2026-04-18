@@ -285,6 +285,15 @@ source bin/gh_env.sh
 gh auth status
 ```
 
+Runtime-managed credentials now support a keychain-backed path through the CLI:
+
+```bash
+python3 bin/orchestrator.py creds status gh-token
+python3 bin/orchestrator.py creds set gh-token --value "$(pbpaste)"
+python3 bin/orchestrator.py creds set telegram-bot-token --value "<bot token>"
+python3 bin/orchestrator.py creds set claude-env < config/claude.env
+```
+
 Optional launchd-wide export for tools that do not go through the orchestrator
 Python entrypoints:
 
@@ -295,9 +304,9 @@ launchctl setenv GH_TOKEN "$GH_TOKEN"
 
 ## Mobile control (Telegram)
 
-Long-polling bot at `bin/telegram_bot.py`. No public ports, no webhook. Config at `config/telegram.json` (chmod 600, gitignored) holds the bot token and an allowlist of chat IDs. Unknown chats are logged to `logs/telegram-reject.log` and never see a response. Reports written to `reports/` are auto-pushed every 60s.
+Long-polling bot at `bin/telegram_bot.py`. No public ports, no webhook. The bot token can come from the keychain-backed `telegram-bot-token` secret or `config/telegram.json`. Approved chats are read from `state/runtime/allowlist.json`, with optional bootstrap IDs still supported from `config/telegram.json`. Unknown chats are logged to `logs/telegram-reject.log`, but `/register [name]` is allowed so a new operator can request access. Reports written to `reports/` are auto-pushed every 60s.
 
-Commands: `/status`, `/queue`, `/planner`, `/reviewer`, `/qa`, `/cleanup`, `/ask <question>`, `/ask codex: <question>`, `/ask both: <question>`, `/regression <project>`, `/report morning|evening`, `/enqueue <summary>`. Unknown commands return the help string — no arbitrary shell.
+Commands: `/status`, `/queue`, `/planner`, `/reviewer`, `/qa`, `/cleanup`, `/ask <question>`, `/ask codex: <question>`, `/ask both: <question>`, `/regression <project>`, `/report morning|evening`, `/enqueue <summary>`, `/register [name]`, `/approve_operator <chat_id> [name]`, `/operators`. Unknown commands return the help string — no arbitrary shell.
 
 `/ask` is read-only. It gathers live orchestrator state, selected logs, roadmap context, explicit current-date / regression-schedule facts, and PR metadata when a PR number is mentioned. `/ask` defaults to Claude, `/ask codex:` targets Codex, and `/ask both:` queries both then synthesizes one answer. It does not execute arbitrary shell or mutate runtime state.
 
@@ -308,11 +317,42 @@ Future agent tasks that edit files in this repo MUST:
 1. Read `repo-memory/CURRENT_STATE.md` and `repo-memory/DECISIONS.md` before proposing changes. Many design choices here are intentional and load-bearing (atomic rename claim, exit-then-respawn workers, engine-field routing) — don't undo them without a decision entry.
 2. Append one entry to `repo-memory/RECENT_WORK.md` on completion. Incremental, append-only; no rewrites.
 3. Record any real post-mortem in `repo-memory/FAILURES.md` using the schema already in that file.
-4. Never commit `config/telegram.json`, `config/claude.env`, or anything under `logs/`, `queue/`, `state/`, `reports/`, `artifacts/`. The `.gitignore` already covers these — don't force-add.
+4. Never commit `config/telegram.json`, `config/claude.env`, `config/gh-token`, or anything under `logs/`, `queue/`, `state/`, `reports/`, `artifacts/`. The `.gitignore` already covers these — don't force-add.
 5. Never modify runtime state files directly from inside a task. If a task needs to transition, use the `orchestrator.py transition` CLI, which records an entry in `state/runtime/transitions.log`.
 6. Preserve the atomic-rename invariant: tasks move between substates via `os.rename` only. Do not write-then-delete.
 7. BRAID templates are append-only in practice — new task types add a new `.mmd`, never mutate an existing one in place. Regeneration writes to `<name>.mmd.tmp` then `os.rename`s.
 8. The token-savior MCP is retrieval-only. Do not route task-state reads/writes through it.
+
+## Project registration
+
+Register canonical repos through the runtime instead of hand-editing local config:
+
+```bash
+python3 bin/orchestrator.py register-project \
+  --name my-repo \
+  --path /absolute/path/to/my-repo \
+  --type application \
+  --smoke qa/smoke.sh \
+  --regression qa/regression.sh \
+  --regression-day sun
+```
+
+This writes to `config/orchestrator.local.json`, validates the repo shape, reloads launch agents, and refreshes `env-health`.
+
+## Metrics
+
+The runtime now emits structured metric rows to `state/runtime/metrics.jsonl`. `workflow-check` writes snapshots before each sweep, and reports/status surface the latest environment, queue, and blocked-frontier metrics from that stream.
+
+## Review gates
+
+Internal review now has four layers before QA:
+
+1. Codex functional review
+2. Claude adversarial review with council panel
+3. Council-backed `security-review-pass`
+4. Council-backed `architectural-fit-review-pass`
+
+Substantive gate failures route to `review-address-feedback` rework. Gate infrastructure failures remain retryable runtime/self-repair paths; they do not introduce a separate terminal hard-stop.
 
 ## Links
 
