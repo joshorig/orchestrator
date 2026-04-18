@@ -463,6 +463,9 @@ CONFIG_DEFAULTS = {
     "self_repair": {
         "enabled": True,
         "project": "devmini-orchestrator",
+        "deploy_mode": "local-main",
+        "council_members": ("socrates", "feynman", "ada", "torvalds"),
+        "restart_launch_agents": True,
     },
 }
 
@@ -749,6 +752,29 @@ def project_environment_blockers(project_name, *, refresh=False):
 
 def project_environment_ok(project_name, *, refresh=False):
     return not project_environment_blockers(project_name, refresh=refresh)
+
+
+def _self_repair_project_environment_ok(project_name):
+    """Whether a project is healthy enough to branch a local self-repair feature.
+
+    For the orchestrator repo itself, a clean local `main` that is merely ahead
+    of `origin/main` is acceptable input for branching a bounded self-repair
+    feature. Uncommitted changes, fetch failures, and all other project errors
+    remain blocking.
+    """
+    blockers = project_environment_blockers(project_name, refresh=True)
+    if not blockers:
+        return True
+    if project_name != "devmini-orchestrator":
+        return False
+    catastrophic = {
+        "project path missing",
+        "project path is not a git repo",
+        "required binary missing: git",
+        "required binary missing: python3",
+        "required binary missing: bash",
+    }
+    return not any((issue.get("summary") or "") in catastrophic for issue in blockers)
 
 
 def environment_health_text(*, refresh=False):
@@ -6012,7 +6038,7 @@ def enqueue_self_repair(*, summary, evidence, issue_kind="runtime_bug", source="
     project = get_project(cfg, project_name)
     if _project_has_open_feature(project_name):
         return {"enqueued": 0, "reason": "project_busy"}
-    if not project_environment_ok(project_name, refresh=True):
+    if not _self_repair_project_environment_ok(project_name):
         return {"enqueued": 0, "reason": "environment_degraded", "project": project_name}
     feature = create_feature(
         project=project_name,
@@ -6020,18 +6046,33 @@ def enqueue_self_repair(*, summary, evidence, issue_kind="runtime_bug", source="
         source=f"self-repair:{source}",
         roadmap_entry={"id": "R-023-SELF-REPAIR", "title": summary[:120], "body": evidence},
         roadmap_entry_id="R-023-SELF-REPAIR",
-        self_repair={"enabled": True, "issue_kind": issue_kind, "source": source},
+        self_repair={
+            "enabled": True,
+            "issue_kind": issue_kind,
+            "source": source,
+            "deploy_mode": repair_cfg.get("deploy_mode", "local-main"),
+            "council_members": list(repair_cfg.get("council_members") or ()),
+            "restart_launch_agents": bool(repair_cfg.get("restart_launch_agents", True)),
+        },
     )
     task = new_task(
-        role="implementer",
-        engine="codex",
+        role="planner",
+        engine="claude",
         project=project_name,
-        summary=summary[:240],
+        summary=f"Council-plan self-repair: {summary[:210]}",
         source=f"self-repair:{source}",
         braid_template="orchestrator-self-repair",
         feature_id=feature["feature_id"],
         engine_args={
-            "self_repair": {"enabled": True, "issue_kind": issue_kind, "source": source},
+            "mode": "self-repair-plan",
+            "self_repair": {
+                "enabled": True,
+                "issue_kind": issue_kind,
+                "source": source,
+                "deploy_mode": repair_cfg.get("deploy_mode", "local-main"),
+                "council_members": list(repair_cfg.get("council_members") or ()),
+                "restart_launch_agents": bool(repair_cfg.get("restart_launch_agents", True)),
+            },
             "evidence": evidence,
         },
     )
@@ -6794,6 +6835,51 @@ def _workflow_check_worker_plists():
         "worker.qa",
     )
     return [home / f"com.devmini.orchestrator.{name}.plist" for name in names]
+
+
+def orchestrator_launch_agent_plists():
+    home = pathlib.Path.home() / "Library" / "LaunchAgents"
+    return sorted(home.glob("com.devmini.orchestrator*.plist"))
+
+
+def restart_orchestrator_launch_agents(*, exclude_labels=None):
+    """Reload local orchestrator launch agents from plist files.
+
+    Returns `(restarted, failed)`.
+
+    >>> import tempfile
+    >>> from types import SimpleNamespace
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     home = pathlib.Path(tmp)
+    ...     agents = home / "Library" / "LaunchAgents"
+    ...     agents.mkdir(parents=True)
+    ...     _ = (agents / "com.devmini.orchestrator.worker.codex.plist").write_text("<plist/>")
+    ...     _ = (agents / "com.devmini.orchestrator.worker.qa.plist").write_text("<plist/>")
+    ...     old_home = restart_orchestrator_launch_agents.__globals__["pathlib"].Path.home
+    ...     old_run = restart_orchestrator_launch_agents.__globals__["subprocess"].run
+    ...     calls = []
+    ...     restart_orchestrator_launch_agents.__globals__["pathlib"].Path.home = lambda: home
+    ...     restart_orchestrator_launch_agents.__globals__["subprocess"].run = lambda cmd, **kwargs: (calls.append(cmd) or SimpleNamespace(returncode=0, stdout="", stderr=""))
+    ...     out = restart_orchestrator_launch_agents(exclude_labels={"com.devmini.orchestrator.worker.qa"})
+    ...     restart_orchestrator_launch_agents.__globals__["pathlib"].Path.home = old_home
+    ...     restart_orchestrator_launch_agents.__globals__["subprocess"].run = old_run
+    ...     out[0], len(calls)
+    (['com.devmini.orchestrator.worker.codex'], 2)
+    """
+    restarted = []
+    failed = []
+    exclude = set(exclude_labels or ())
+    for plist in orchestrator_launch_agent_plists():
+        label = plist.stem
+        if label in exclude:
+            continue
+        subprocess.run(["launchctl", "unload", str(plist)], capture_output=True, text=True, check=False)
+        proc = subprocess.run(["launchctl", "load", str(plist)], capture_output=True, text=True, check=False)
+        if proc.returncode == 0:
+            restarted.append(label)
+        else:
+            failed.append(f"{label}: {(proc.stderr or proc.stdout or 'load failed').strip()[:160]}")
+    return restarted, failed
 
 
 def _workflow_check_restart_workers():

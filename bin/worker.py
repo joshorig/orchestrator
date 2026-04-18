@@ -37,6 +37,9 @@ import orchestrator as o  # noqa: E402
 
 WORKTREES_ROOT = o.DEV_ROOT / "worktrees"
 QA_ARTIFACTS_ROOT = o.DEV_ROOT / "qa-artifacts"
+COUNCIL_ROOT = pathlib.Path("/Volumes/devssd/repos/oss/council-of-high-intelligence")
+COUNCIL_AGENT_DIR = COUNCIL_ROOT / "agents"
+SELF_REPAIR_COUNCIL_DEFAULT = ("socrates", "feynman", "ada", "torvalds")
 
 # Default per-slot timeouts in seconds. Overridable via
 # config["slots"][<slot>]["timeout_sec"] or task["engine_args"]["timeout_sec"].
@@ -228,7 +231,7 @@ def preflight_main(project_path):
         )
 
 
-def ensure_feature_branch(project_path, feature_branch):
+def ensure_feature_branch(project_path, feature_branch, *, allow_dirty_main=False):
     """Create `feature_branch` locally + on origin if it doesn't already exist.
 
     Idempotent. Safe to call repeatedly — the first caller creates the branch,
@@ -238,7 +241,8 @@ def ensure_feature_branch(project_path, feature_branch):
 
     Returns True if the branch was newly created, False if it already existed.
     """
-    preflight_main(project_path)
+    if not allow_dirty_main:
+        preflight_main(project_path)
 
     # Fast path: branch already present locally.
     probe = subprocess.run(
@@ -248,7 +252,7 @@ def ensure_feature_branch(project_path, feature_branch):
     if probe.returncode == 0:
         return False
 
-    # Fetch origin so we can check + start from a fresh main.
+    # Fetch origin so we can check + start from a fresh main when possible.
     subprocess.run(
         ["git", "-C", project_path, "fetch", "origin", "main",
          f"+refs/heads/{feature_branch}:refs/remotes/origin/{feature_branch}"],
@@ -268,10 +272,13 @@ def ensure_feature_branch(project_path, feature_branch):
         )
         return False
 
-    # Create the branch locally off origin/main and push it to origin so sibling
-    # worktrees can fetch it. Use the agent git identity for the push.
+    # Create the branch locally off origin/main when the canonical checkout is
+    # clean. Self-repair may intentionally relax that preflight and branch from
+    # the current local main so the repair can proceed from a clean worktree
+    # even while the canonical checkout is noisy.
+    start_ref = "main" if allow_dirty_main else "origin/main"
     create = subprocess.run(
-        ["git", "-C", project_path, "branch", feature_branch, "origin/main"],
+        ["git", "-C", project_path, "branch", feature_branch, start_ref],
         capture_output=True, text=True,
     )
     if create.returncode != 0:
@@ -954,6 +961,94 @@ def create_pr(target, project, branch, pr_body_path, log_path, base_branch="main
     return (True, "ok", pr_url, pr_number)
 
 
+def deploy_self_repair(target, project, worktree, log_path, *, restart_launch_agents=True):
+    """Promote a validated self-repair branch into canonical main locally."""
+    repo = pathlib.Path(project["path"])
+    wt = pathlib.Path(worktree)
+    if not repo.exists():
+        return (False, "canonical repo missing", {})
+    if not wt.exists():
+        return (False, "self-repair worktree missing", {})
+
+    branch = (_git(repo, "branch", "--show-current").stdout or "").strip()
+    if branch != "main":
+        return (False, f"canonical checkout not on main ({branch or '?'})", {})
+    commits = [line.strip() for line in (_git(wt, "rev-list", "--reverse", "main..HEAD").stdout or "").splitlines() if line.strip()]
+    if not commits:
+        return (False, "no self-repair commits ahead of main", {})
+
+    status = (_git(repo, "status", "--porcelain").stdout or "").strip()
+    info = {
+        "applied_commits": commits,
+        "restart_launch_agents": bool(restart_launch_agents),
+        "canonical_status_before_deploy": status,
+    }
+    with open(log_path, "a") as logf:
+        logf.write(f"\n# self-repair deploy commits: {', '.join(commits)}\n")
+        for sha in commits:
+            proc = _git_agent(repo, "cherry-pick", sha, timeout=120)
+            if proc.returncode != 0:
+                logf.write(f"# cherry-pick failed for {sha}: {(proc.stderr or proc.stdout or '').strip()[:400]}\n")
+                _git_agent(repo, "cherry-pick", "--abort", timeout=30)
+                return (False, f"cherry-pick failed for {sha}", info)
+
+        smoke_rel = (project.get("qa") or {}).get("smoke")
+        smoke_abs = repo / smoke_rel if smoke_rel else None
+        if not smoke_abs or not smoke_abs.exists():
+            return (False, "canonical smoke script missing", info)
+
+        logf.write(f"# self-repair canonical smoke: {smoke_abs}\n")
+        try:
+            smoke_proc = subprocess.run(
+                ["bash", str(smoke_abs)],
+                cwd=project["path"],
+                env=os.environ.copy(),
+                stdout=logf,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=DEFAULT_TIMEOUTS["qa"],
+            )
+        except subprocess.TimeoutExpired:
+            return (False, "canonical smoke timeout", info)
+        if smoke_proc.returncode != 0:
+            return (False, f"canonical smoke failed: exit {smoke_proc.returncode}", info)
+
+        head_sha = (_git(repo, "rev-parse", "HEAD").stdout or "").strip()
+        info["deployed_sha"] = head_sha
+
+        push = _git_agent(repo, "push", "origin", "main", timeout=120)
+        if push.returncode != 0:
+            logf.write(f"# self-repair push failed: {(push.stderr or push.stdout or '').strip()[:400]}\n")
+            return (False, "push origin main failed", info)
+        info["pushed_at"] = o.now_iso()
+
+        deploy_check = subprocess.run(
+            ["python3", "bin/orchestrator.py", "workflow-check"],
+            cwd=project["path"],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+        logf.write("\n# self-repair post-deploy workflow-check\n")
+        logf.write((deploy_check.stdout or "")[:4000])
+        logf.write((deploy_check.stderr or "")[:2000])
+        if deploy_check.returncode != 0:
+            return (False, "post-deploy workflow-check failed", info)
+
+        if restart_launch_agents:
+            restarted, failed = o.restart_orchestrator_launch_agents(
+                exclude_labels={"com.devmini.orchestrator.worker.qa"},
+            )
+            info["restarted_launch_agents"] = restarted
+            info["restart_failures"] = failed
+            logf.write(f"\n# self-repair restart: restarted={restarted} failed={failed}\n")
+            if failed:
+                return (False, "launch agent restart failed", info)
+
+    return (True, "ok", info)
+
+
 # --- memory context ---------------------------------------------------------
 
 ENGINEERING_SKILLS_ROOT = pathlib.Path("/Volumes/devssd/repos/skills/engineering-memory/skills")
@@ -1526,7 +1621,7 @@ def run_claude_template_gen(task, cfg, task_type, timeout, log_path):
         "--system-prompt", gen_system,
         "--output-format", "text",
         "--model", "opus",
-        "--max-budget-usd", "1.00",
+        "--max-budget-usd", "2.00" if planner_mode == "self-repair-plan" else "1.00",
         "--no-session-persistence",
     ]
 
@@ -1759,6 +1854,62 @@ def planner_template_roles(project_name):
     for template in planner_implementer_templates(project_name):
         roles[template] = "implementer"
     return roles
+
+
+def _council_member_context(member):
+    path = COUNCIL_AGENT_DIR / f"council-{member}.md"
+    if not path.exists():
+        return f"## {member}\nPersona file missing at {path}\n"
+    lines = path.read_text().splitlines()
+    kept = []
+    for line in lines[:120]:
+        kept.append(line)
+        if line.strip() == "## Output Format (Council Round 2)":
+            break
+    return f"## {member}\n" + "\n".join(kept).strip() + "\n"
+
+
+def self_repair_council_prompt(task, project, memory_ctx):
+    engine_args = task.get("engine_args") or {}
+    repair = engine_args.get("self_repair") or {}
+    evidence = (engine_args.get("evidence") or "").strip()
+    members = tuple(repair.get("council_members") or SELF_REPAIR_COUNCIL_DEFAULT)
+    council_ctx = "\n\n".join(_council_member_context(member) for member in members)
+    system_prompt = (
+        "You are the self-repair council planner for the devmini orchestrator.\n"
+        "Use the provided council member personas to deliberate before deciding the repair path.\n"
+        "The task is not to write code. The task is to choose the narrowest repair plan that restores autonomous runtime health.\n"
+        "Prefer one bounded implementer slice. Add a second slice only if the first cannot safely land without it.\n"
+        "Assume execution and deployment will be handled autonomously after QA on a clean working tree.\n"
+        "Output ONLY one JSON object with keys:\n"
+        "  panel: list[str]\n"
+        "  key_agreements: list[str]\n"
+        "  dissent: list[str]\n"
+        "  execution_path: string\n"
+        "  slices: list[object]\n"
+        "Each slice object must include summary and braid_template.\n"
+        "Valid braid_template values here: only \"orchestrator-self-repair\".\n"
+        "Do not emit prose outside the JSON object.\n\n"
+        "[COUNCIL PERSONAS]\n"
+        f"{council_ctx}\n"
+        "[END COUNCIL PERSONAS]"
+    )
+    user_prompt = (
+        f"PROJECT: {project['name']}\n"
+        f"FEATURE: {task.get('feature_id') or '-'}\n"
+        f"TASK: {task.get('summary') or '-'}\n\n"
+        "[ISSUE EVIDENCE]\n"
+        f"{evidence or '(none)'}\n\n"
+        "[PROJECT MEMORY]\n"
+        f"{memory_ctx}\n\n"
+        "Run a compact internal council across the listed members.\n"
+        "Focus on:\n"
+        "1. observable failure facts\n"
+        "2. the cleanest repair path\n"
+        "3. whether local deployment/restart is required\n"
+        "4. the single best Codex execution slice to fix the runtime\n"
+    )
+    return system_prompt, user_prompt, members
 
 
 def planner_system_prompt(project_name, roadmap_entry_body=""):
@@ -2172,6 +2323,7 @@ def run_claude_planner(task, cfg, timeout, log_path):
     """Freeform planner: claude reads memory and emits slice proposals."""
     task_id = task["task_id"]
     project_name = task.get("project")
+    planner_mode = ((task.get("engine_args") or {}).get("mode") or "").strip()
     try:
         project = o.get_project(cfg, project_name)
     except KeyError:
@@ -2181,12 +2333,16 @@ def run_claude_planner(task, cfg, timeout, log_path):
 
     memory_ctx = read_memory_context(project["name"], project["path"])
     roadmap_entry = (task.get("engine_args") or {}).get("roadmap_entry") or {}
-    system_prompt = planner_system_prompt(project["name"], roadmap_entry.get("body", ""))
-    user_prompt = (
-        f"PROJECT: {project['name']}\n\n"
-        f"PARENT TASK: {task['summary']}\n\n"
-        f"MEMORY:\n{memory_ctx}\n"
-    )
+    if planner_mode == "self-repair-plan":
+        system_prompt, user_prompt, council_members = self_repair_council_prompt(task, project, memory_ctx)
+    else:
+        council_members = ()
+        system_prompt = planner_system_prompt(project["name"], roadmap_entry.get("body", ""))
+        user_prompt = (
+            f"PROJECT: {project['name']}\n\n"
+            f"PARENT TASK: {task['summary']}\n\n"
+            f"MEMORY:\n{memory_ctx}\n"
+        )
 
     cmd = [
         "claude",
@@ -2194,7 +2350,7 @@ def run_claude_planner(task, cfg, timeout, log_path):
         "--dangerously-skip-permissions",
         "--system-prompt", system_prompt,
         "--output-format", "text",
-        "--model", "sonnet",
+        "--model", "opus" if planner_mode == "self-repair-plan" else "sonnet",
         "--max-budget-usd", "1.00",
         "--disallowedTools", "Bash,Read,Write,Edit,Grep,Glob,Agent,WebFetch,WebSearch",
         "--no-session-persistence",
@@ -2223,30 +2379,63 @@ def run_claude_planner(task, cfg, timeout, log_path):
                   blocker_code="llm_exit_error", summary="claude exit error", retryable=True)
         return
 
-    # Extract JSON array from output — claude sometimes wraps in markdown.
     raw = proc.stdout or ""
-    m = re.search(r"\[.*\]", raw, re.DOTALL)
-    if not m:
-        fail_task(task_id, "running", "no json array in output",
-                  blocker_code="model_output_invalid", summary="planner output invalid", retryable=False)
-        return
-    try:
-        slices = json.loads(m.group(0))
-    except json.JSONDecodeError:
-        fail_task(task_id, "running", "malformed json array",
-                  blocker_code="model_output_invalid", summary="planner output invalid", retryable=False)
-        return
+    if planner_mode == "self-repair-plan":
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not m:
+            fail_task(task_id, "running", "no json object in self-repair planner output",
+                      blocker_code="model_output_invalid", summary="planner output invalid", retryable=False)
+            return
+        try:
+            plan = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            fail_task(task_id, "running", "malformed self-repair planner json",
+                      blocker_code="model_output_invalid", summary="planner output invalid", retryable=False)
+            return
+        slices = plan.get("slices")
+        if not isinstance(slices, list):
+            fail_task(task_id, "running", "self-repair planner missing slices",
+                      blocker_code="model_output_invalid", summary="planner output invalid", retryable=False)
+            return
+    else:
+        m = re.search(r"\[.*\]", raw, re.DOTALL)
+        if not m:
+            fail_task(task_id, "running", "no json array in output",
+                      blocker_code="model_output_invalid", summary="planner output invalid", retryable=False)
+            return
+        try:
+            slices = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            fail_task(task_id, "running", "malformed json array",
+                      blocker_code="model_output_invalid", summary="planner output invalid", retryable=False)
+            return
 
     # Template → role for codex slices. Slices with a template outside this set
     # are dropped — the planner prompt instructs claude to skip ill-fitting work
     # rather than invent new templates.
-    TEMPLATE_ROLE = planner_template_roles(project["name"])
+    TEMPLATE_ROLE = (
+        {"orchestrator-self-repair": "implementer"}
+        if planner_mode == "self-repair-plan"
+        else planner_template_roles(project["name"])
+    )
 
     feature_id = task.get("feature_id")
 
     enqueued = []
     dropped = []
     sibling_task_ids = []
+    self_repair_engine_args = {}
+    if planner_mode == "self-repair-plan":
+        self_repair_engine_args = {
+            "self_repair": dict((task.get("engine_args") or {}).get("self_repair") or {}),
+            "evidence": (task.get("engine_args") or {}).get("evidence") or "",
+            "council": {
+                "panel": list(plan.get("panel") or council_members),
+                "key_agreements": list(plan.get("key_agreements") or []),
+                "dissent": list(plan.get("dissent") or []),
+                "execution_path": plan.get("execution_path") or "",
+            },
+        }
     for idx, s in enumerate(slices[:3]):
         raw_tpl = s.get("braid_template")
         summ = s.get("summary", "")
@@ -2254,7 +2443,10 @@ def run_claude_planner(task, cfg, timeout, log_path):
             dropped.append((raw_tpl, summ[:80], "unknown template"))
             sibling_task_ids.append(None)
             continue
-        ok, reason = classify_slice(raw_tpl, summ)
+        if planner_mode == "self-repair-plan":
+            ok, reason = (bool(summ.strip()), None if summ.strip() else "empty summary")
+        else:
+            ok, reason = classify_slice(raw_tpl, summ)
         if not ok:
             dropped.append((raw_tpl, summ[:80], reason))
             sibling_task_ids.append(None)
@@ -2269,6 +2461,7 @@ def run_claude_planner(task, cfg, timeout, log_path):
             parent_task_id=task_id,
             feature_id=feature_id,
             depends_on=[],
+            engine_args=dict(self_repair_engine_args),
         )
         raw_depends = s.get("depends_on")
         resolved = []
@@ -2309,6 +2502,13 @@ def run_claude_planner(task, cfg, timeout, log_path):
 
     def mut(t):
         t["artifacts"] = t.get("artifacts", []) + enqueued
+        if planner_mode == "self-repair-plan":
+            t["council"] = {
+                "panel": list(plan.get("panel") or council_members),
+                "key_agreements": list(plan.get("key_agreements") or []),
+                "dissent": list(plan.get("dissent") or []),
+                "execution_path": plan.get("execution_path") or "",
+            }
         t["finished_at"] = o.now_iso()
         t["log_path"] = str(log_path)
     o.move_task(task_id, "running", "done", reason=f"decomposed into {len(enqueued)}", mutator=mut)
@@ -3347,6 +3547,7 @@ def run_codex_slot(task, cfg):
     wt_path = None
     branch = None
     base_branch = "main"
+    self_repair_meta = dict((task.get("engine_args") or {}).get("self_repair") or {})
     try:
         # Shared lock to coexist with other codex workers; blocks against regression exclusive.
         lock_fh = acquire_lock(f"{project['name']}.lock", mode="shared", timeout_sec=60)
@@ -3354,7 +3555,11 @@ def run_codex_slot(task, cfg):
         base_branch = base_branch_for_task(task)
         if base_branch != "main":
             try:
-                ensure_feature_branch(project["path"], base_branch)
+                ensure_feature_branch(
+                    project["path"],
+                    base_branch,
+                    allow_dirty_main=bool(self_repair_meta.get("enabled")),
+                )
             except MainDirtyOrAhead as exc:
                 exc_text = str(exc)
                 blocker_code = "runtime_env_dirty" if "fetch origin main failed" in exc_text.lower() else "project_main_dirty"
@@ -3585,6 +3790,7 @@ def run_codex_slot(task, cfg):
 def build_codex_prompt(task, graph_body, memory_ctx):
     engine_args = task.get("engine_args") or {}
     evidence = (engine_args.get("evidence") or "").strip()
+    council = engine_args.get("council") or {}
     return (
         "[BRAID REASONING GRAPH — traverse deterministically. If you cannot, "
         "emit exactly one line `BRAID_TOPOLOGY_ERROR: <reason>` as the final line and stop. "
@@ -3595,6 +3801,15 @@ def build_codex_prompt(task, graph_body, memory_ctx):
         "[TASK]\n"
         f"{task.get('summary','')}\n\n"
         + (f"[ISSUE EVIDENCE]\n{evidence}\n\n" if evidence else "")
+        + (
+            "[COUNCIL DECISION]\n"
+            f"panel: {', '.join(council.get('panel') or [])}\n"
+            f"execution_path: {council.get('execution_path') or '-'}\n"
+            f"key_agreements: {(council.get('key_agreements') or [])}\n"
+            f"dissent: {(council.get('dissent') or [])}\n\n"
+            if council else
+            ""
+        )
         +
         "[REPO LAYOUT]\n"
         "All repo-memory files live under `repo-memory/` at the worktree root:\n"
@@ -3832,6 +4047,11 @@ def run_qa_slot(task, cfg):
                 # state. Tasks set by run_codex_slot carry `base_branch` — fall
                 # back to deriving it from feature_id for older records.
                 target_base = target.get("base_branch") or base_branch_for_task(target)
+                feature = None
+                feature_id = target.get("feature_id")
+                if feature_id:
+                    feature = o.read_json(o.feature_path(feature_id), None)
+                self_repair_meta = dict((feature or {}).get("self_repair") or {})
                 qa_gate = _run_semantic_qa_gate(
                     project["name"],
                     project["path"],
@@ -3900,6 +4120,71 @@ def run_qa_slot(task, cfg):
                         t["finished_at"] = o.now_iso()
                     o.move_task(task_id, "running", "done",
                                 reason=f"semantic qa scope inadequate for {target_id}", mutator=mut_driver_scope_fail)
+                    return
+
+                if self_repair_meta.get("enabled"):
+                    deploy_ok, deploy_reason, deploy_info = deploy_self_repair(
+                        target,
+                        project,
+                        target_wt,
+                        log_path,
+                        restart_launch_agents=bool(self_repair_meta.get("restart_launch_agents", True)),
+                    )
+                    if deploy_ok:
+                        def mut_target_self_repair_ok(t):
+                            t["finished_at"] = o.now_iso()
+                            t["qa_passed_at"] = o.now_iso()
+                            t["qa_gate_output"] = qa_gate_raw
+                            t["local_deploy"] = dict(deploy_info or {})
+                        o.move_task(target_id, "awaiting-qa", "done",
+                                    reason=f"self-repair deployed via {task_id}", mutator=mut_target_self_repair_ok)
+                        if feature_id:
+                            try:
+                                o.update_feature(
+                                    feature_id,
+                                    lambda f: (
+                                        f.update(
+                                            {
+                                                "status": "merged",
+                                                "finalized_at": o.now_iso(),
+                                                "merged_at": o.now_iso(),
+                                                "finalize_error": None,
+                                                "local_deploy": dict(deploy_info or {}),
+                                            }
+                                        )
+                                    ),
+                                )
+                            except FileNotFoundError:
+                                pass
+                    else:
+                        blocker_code = (
+                            "runtime_env_dirty"
+                            if any(token in deploy_reason for token in ("canonical", "restart", "workflow-check"))
+                            else "delivery_push_failed"
+                        )
+                        def mut_target_self_repair_fail(t):
+                            t["finished_at"] = o.now_iso()
+                            t["qa_passed_at"] = o.now_iso()
+                            t["qa_gate_output"] = qa_gate_raw
+                            t["deploy_failure"] = deploy_reason
+                            t["local_deploy"] = dict(deploy_info or {})
+                            o.set_task_blocker(
+                                t,
+                                blocker_code,
+                                summary="self-repair deploy failed",
+                                detail=deploy_reason,
+                                source="worker",
+                                retryable=True,
+                            )
+                        o.move_task(target_id, "awaiting-qa", "failed",
+                                    reason=f"self-repair deploy failed: {deploy_reason}",
+                                    mutator=mut_target_self_repair_fail)
+
+                    def mut_driver_self_repair(t):
+                        t["finished_at"] = o.now_iso()
+                    o.move_task(task_id, "running", "done",
+                                reason=f"self-repair deploy {'ok' if deploy_ok else 'failed'} for {target_id}",
+                                mutator=mut_driver_self_repair)
                     return
 
                 # Pattern B: always write pr-body.md; push only if opted-in.

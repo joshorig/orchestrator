@@ -9,6 +9,8 @@ flowchart TD;
     CheckBase -- "baseline red" --> ReviseCheck2[Revise: restore smoke baseline];
     ReviseCheck2 -- "retry" --> Draft;
     CheckBase -- "baseline green" --> CheckContract[Check: contract snapshot unchanged];
+    CheckContract -- "vitest binary missing" --> FixContractRunner[Revise: install contract runner deps];
+    FixContractRunner -- "retry" --> CheckContract;
     CheckContract -- "snapshot drift" --> ReviseCheck3[Revise: restore contract shape];
     ReviseCheck3 -- "retry" --> Draft;
     CheckContract -- "snapshot clean" --> CheckJmh[Check: jmhSmokeAll delta within noise];
