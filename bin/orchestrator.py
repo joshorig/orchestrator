@@ -270,8 +270,25 @@ WORKFLOW_REPAIR_POLICY = (
         "name": "template_refine_exhausted_report",
         "kind": "frontier_task_blocked",
         "blocker_code": "template_refine_exhausted",
-        "action": None,
-        "diagnosis": "template refinement attempts exhausted; escalate to template regeneration or human review",
+        "action": "retry_task",
+        "diagnosis": "template changed after refinement exhaustion; retry the blocked task",
+        "when": "template_graph_ready",
+    },
+    {
+        "name": "template_refine_exhausted_self_repair",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "template_refine_exhausted",
+        "action": "enqueue_self_repair",
+        "diagnosis": "template refinement attempts exhausted and no new template landed; escalate into self-repair",
+        "when": "template_graph_waiting",
+    },
+    {
+        "name": "review_feedback_stale_abandon",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "qa_target_missing",
+        "action": "abandon_task",
+        "diagnosis": "review-feedback lane is stale or superseded; retire the obsolete task so the real frontier can progress",
+        "when": "review_feedback_stale",
     },
     {
         "name": "regression_stop",
@@ -6917,6 +6934,8 @@ def _follow_up_repair_key(item):
     ('feature-pr-feedback', 'f1', 21)
     >>> _follow_up_repair_key({"task_id": "t2", "task": {"feature_id": "f1", "engine_args": {"mode": "pr-feedback", "pr_number": 7}, "parent_task_id": "task-parent"}})
     ('pr-feedback', 'task-parent', 7)
+    >>> _follow_up_repair_key({"task_id": "t3", "task": {"feature_id": "f1", "source": "review-feedback:task-r", "engine_args": {"target_task_id": "task-target"}}})
+    ('review-feedback', 'f1', 'task-target')
     """
     task = item.get("task") or {}
     eargs = task.get("engine_args") or {}
@@ -6925,6 +6944,8 @@ def _follow_up_repair_key(item):
         return ("feature-pr-feedback", task.get("feature_id"), eargs.get("feature_pr_number"))
     if mode == "pr-feedback":
         return ("pr-feedback", task.get("parent_task_id"), eargs.get("pr_number"))
+    if (task.get("source") or "").startswith("review-feedback:"):
+        return ("review-feedback", task.get("feature_id"), eargs.get("target_task_id") or task.get("parent_task_id"))
     return None
 
 
@@ -7225,6 +7246,17 @@ def _workflow_check_retry_task(task, state, reason):
     return bool(found and found[0] in ("queued", "claimed", "running"))
 
 
+def _workflow_check_abandon_task(task, state, reason):
+    move_task(
+        task["task_id"],
+        state,
+        "abandoned",
+        reason=reason,
+        mutator=lambda t: t.update({"finished_at": now_iso(), "abandoned_reason": reason}),
+    )
+    return True
+
+
 def _workflow_policy_matches(policy, issue, task, project):
     if policy.get("kind") and issue.get("kind") != policy["kind"]:
         return False
@@ -7268,6 +7300,33 @@ def _workflow_policy_matches(policy, issue, task, project):
         _, current_hash = braid_template_load(tmpl)
         previous_hash = task.get("braid_template_hash")
         return bool(current_hash and current_hash != previous_hash)
+    if when == "review_feedback_stale":
+        source = str((task or {}).get("source") or "")
+        if not source.startswith("review-feedback:"):
+            return False
+        feature_id = (task or {}).get("feature_id")
+        if feature_id:
+            feature = read_feature(feature_id)
+            if feature and feature.get("status") == "finalizing":
+                return True
+        target_id = ((task or {}).get("engine_args") or {}).get("target_task_id") or task.get("parent_task_id")
+        if not target_id:
+            return False
+        current_id = task.get("task_id")
+        current_created = task.get("created_at") or ""
+        for state_name in STATES:
+            for path in queue_dir(state_name).glob("*.json"):
+                sibling = read_json(path, {})
+                if sibling.get("task_id") == current_id:
+                    continue
+                if sibling.get("feature_id") != feature_id:
+                    continue
+                sibling_source = str(sibling.get("source") or "")
+                sibling_target = ((sibling.get("engine_args") or {}).get("target_task_id") or sibling.get("parent_task_id"))
+                if sibling_source.startswith("review-feedback:") and sibling_target == target_id:
+                    if (sibling.get("created_at") or "") > current_created:
+                        return True
+        return False
     if when == "project_main_clean":
         repo = repo_status(project["path"])
         return bool(repo.get("exists") and not repo.get("dirty"))
@@ -7828,6 +7887,13 @@ def tick_workflow_check():
                     reason=f"workflow-check: {issue['diagnosis'][:120]}",
                 )
                 outcome = "task requeued" if ok else "retry failed"
+            elif action == "abandon_task":
+                ok = _workflow_check_abandon_task(
+                    issue["task"],
+                    issue["task_state"],
+                    reason=f"workflow-check: {issue['diagnosis'][:120]}",
+                )
+                outcome = "task abandoned" if ok else "abandon failed"
             elif action == "restart_workers_then_retry":
                 restarted, failed = cached_action(
                     "restart_workers",

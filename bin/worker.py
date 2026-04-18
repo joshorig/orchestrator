@@ -134,6 +134,24 @@ def _mark_review_target_for_retry(target_id, reason):
     return True
 
 
+def _newer_review_feedback_exists(feature_id, target_id, current_task_id, current_created_at):
+    for state in o.STATES:
+        for path in o.queue_dir(state).glob("*.json"):
+            sibling = o.read_json(path, {})
+            if sibling.get("task_id") == current_task_id:
+                continue
+            if sibling.get("feature_id") != feature_id:
+                continue
+            if not str(sibling.get("source") or "").startswith("review-feedback:"):
+                continue
+            sibling_target = ((sibling.get("engine_args") or {}).get("target_task_id") or sibling.get("parent_task_id"))
+            if sibling_target != target_id:
+                continue
+            if (sibling.get("created_at") or "") > (current_created_at or ""):
+                return True
+    return False
+
+
 # --- git worktree management ------------------------------------------------
 
 def base_branch_for_task(task):
@@ -3227,15 +3245,41 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
 
     found = o.find_task(target_id, states=("queued", "awaiting-review", "awaiting-qa", "done", "failed"))
     if not found:
+        feature = o.read_feature(task.get("feature_id")) if task.get("feature_id") else None
+        if (
+            (feature and feature.get("status") == "finalizing")
+            or _newer_review_feedback_exists(task.get("feature_id"), target_id, task_id, task.get("created_at"))
+        ):
+            o.move_task(
+                task_id,
+                "claimed",
+                "abandoned",
+                reason=f"review-feedback superseded for {target_id}",
+                mutator=lambda t: t.update({"finished_at": o.now_iso(), "abandoned_reason": f"superseded target {target_id}"}),
+            )
+            return
         fail_task(task_id, "claimed", f"review-feedback: target {target_id} not found in queue",
-                  blocker_code="qa_target_missing", summary="review-feedback target missing", retryable=False)
+                  blocker_code="qa_target_missing", summary="review-feedback target missing", retryable=True)
         return
     target_state, target = found
 
     wt_str = task.get("worktree") or target.get("worktree")
     if not wt_str or not pathlib.Path(wt_str).exists():
+        feature = o.read_feature(task.get("feature_id")) if task.get("feature_id") else None
+        if (
+            (feature and feature.get("status") == "finalizing")
+            or _newer_review_feedback_exists(task.get("feature_id"), target_id, task_id, task.get("created_at"))
+        ):
+            o.move_task(
+                task_id,
+                "claimed",
+                "abandoned",
+                reason=f"review-feedback stale worktree for {target_id}",
+                mutator=lambda t: t.update({"finished_at": o.now_iso(), "abandoned_reason": f"stale worktree for {target_id}"}),
+            )
+            return
         fail_task(task_id, "claimed", f"review-feedback: target worktree missing: {wt_str}",
-                  blocker_code="qa_target_missing", summary="review-feedback target worktree missing", retryable=False)
+                  blocker_code="qa_target_missing", summary="review-feedback target worktree missing", retryable=True)
         return
     wt = pathlib.Path(wt_str)
     base_branch = task.get("base_branch") or target.get("base_branch") or base_branch_for_task(target)
