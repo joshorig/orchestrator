@@ -58,10 +58,16 @@
       "ok",
       "ok",
       "ok",
+      "ok",
+      "ok",
+      "ok",
+      "ok",
+      "ok",
+      "ok",
       "ok"
     ],
     "topology_errors": 1,
-    "uses": 179
+    "uses": 185
   },
   "memory-synthesis": {
     "created_at": "2026-04-14T00:30:00",
@@ -108,10 +114,14 @@
       "ok",
       "ok",
       "ok",
+      "ok",
+      "ok",
+      "ok",
+      "ok",
       "ok"
     ],
     "topology_errors": 1,
-    "uses": 22
+    "uses": 26
   },
   "review-address-feedback": {
     "created_at": "2026-04-14T07:20:00",
@@ -120,10 +130,11 @@
     "path": "braid/templates/review-address-feedback.mmd",
     "recent_outcomes": [
       "ok",
+      "ok",
       "ok"
     ],
     "topology_errors": 0,
-    "uses": 3
+    "uses": 4
   },
   "trp-historian-update": {
     "created_at": "2026-04-16T23:30:00",
@@ -138,16 +149,24 @@
     "generator_model": "hand-authored",
     "hash": "sha256:9fcd256e665a76105d19590d28c439e066be44ec1699c4e0b69ed6eea66c5457",
     "path": "braid/templates/trp-implement-pipeline-stage.mmd",
+    "recent_outcomes": [
+      "ok",
+      "ok"
+    ],
     "topology_errors": 0,
-    "uses": 0
+    "uses": 2
   },
   "trp-reviewer-pass": {
     "created_at": "2026-04-16T23:30:00",
     "generator_model": "hand-authored",
     "hash": "sha256:1f46b683ded2234e1b04823f8c2aff50ae56df3a592fb88fd011c537994574fc",
     "path": "braid/templates/trp-reviewer-pass.mmd",
+    "recent_outcomes": [
+      "ok",
+      "ok"
+    ],
     "topology_errors": 0,
-    "uses": 0
+    "uses": 2
   },
   "trp-ui-component": {
     "created_at": "2026-04-14T00:30:00",
