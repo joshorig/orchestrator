@@ -1,0 +1,9 @@
+{
+  "kind": "qa_preflight",
+  "name": "qa-preflight-rejects-invalid-config",
+  "project_name": "devmini-orchestrator",
+  "contract_kind": "smoke",
+  "script_name": "smoke.sh",
+  "executable": true,
+  "bad_config": true
+}

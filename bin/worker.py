@@ -2865,13 +2865,64 @@ def _run_self_repair_pre_execute_council(task, project, worktree, timeout, memor
 
 
 def _qa_contract_preflight(project, contract_kind, script_rel):
+    """Validate QA contract configuration before invoking any script.
+
+    >>> import json, pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     (root / "qa").mkdir()
+    ...     script = root / "qa" / "smoke.sh"
+    ...     _ = script.write_text("#!/usr/bin/env bash\\nexit 0\\n")
+    ...     _ = script.chmod(0o644)
+    ...     _qa_contract_preflight({"name": "devmini-orchestrator", "path": str(root)}, "smoke", "qa/smoke.sh")["summary"]
+    'QA script not executable'
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     (root / "qa").mkdir()
+    ...     (root / "config").mkdir()
+    ...     script = root / "qa" / "smoke.sh"
+    ...     _ = script.write_text("#!/usr/bin/env bash\\nexit 0\\n")
+    ...     _ = script.chmod(0o755)
+    ...     _ = (root / "config" / "orchestrator.local.json").write_text("{bad json")
+    ...     _qa_contract_preflight({"name": "devmini-orchestrator", "path": str(root)}, "smoke", "qa/smoke.sh")["summary"]
+    'QA config invalid'
+    """
     if not script_rel:
         return {"ok": False, "error": f"no qa.{contract_kind} in config", "summary": "QA contract missing"}
+    if project.get("name") == "devmini-orchestrator":
+        for cfg_rel in ("config/orchestrator.local.json", "config/orchestrator.example.json"):
+            cfg_abs = pathlib.Path(project["path"]) / cfg_rel
+            if not cfg_abs.exists():
+                continue
+            try:
+                json.loads(cfg_abs.read_text())
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "error": f"invalid orchestrator config: {cfg_abs}",
+                    "summary": "QA config invalid",
+                    "detail": f"{cfg_abs}: {exc}",
+                }
     script_abs = pathlib.Path(project["path"]) / script_rel
     if script_abs.exists() and script_abs.is_file():
+        if not os.access(script_abs, os.X_OK):
+            return {
+                "ok": False,
+                "error": f"script not executable: {script_abs}",
+                "summary": "QA script not executable",
+                "detail": str(script_abs),
+            }
         return {"ok": True, "script_abs": script_abs}
     restored, detail = _restore_project_file_from_head(project["path"], script_rel)
     if script_abs.exists() and script_abs.is_file():
+        if not os.access(script_abs, os.X_OK):
+            return {
+                "ok": False,
+                "error": f"script not executable: {script_abs}",
+                "summary": "QA script not executable",
+                "detail": str(script_abs),
+                "restored": restored,
+            }
         return {"ok": True, "script_abs": script_abs, "restored": restored, "detail": detail}
     return {
         "ok": False,

@@ -1,0 +1,5 @@
+{
+  "action": "enqueue_self_repair",
+  "policy_name": "false_blocker_claim_self_repair",
+  "diagnosis": "solver emitted a control-plane false blocker claim; open orchestrator self-repair"
+}

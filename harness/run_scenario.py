@@ -371,6 +371,69 @@ def _run_issue_replan_cap(repo_root, scenario):
         }
 
 
+def _run_false_blocker_attach(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        feats = root / "features"
+        feats.mkdir()
+        old = {
+            "FEATURES_DIR": orchestrator.FEATURES_DIR,
+        }
+        orchestrator.FEATURES_DIR = feats
+        try:
+            orchestrator.write_json_atomic(
+                feats / "feature-self-repair.json",
+                {
+                    "feature_id": "feature-self-repair",
+                    "project": "devmini-orchestrator",
+                    "status": "open",
+                    "summary": "active self repair",
+                    "source": "self-repair:test",
+                    "self_repair": {"enabled": True, "issues": []},
+                },
+            )
+            issue = {
+                "kind": "frontier_task_blocked",
+                "blocker": {"code": "false_blocker_claim", "detail": scenario["detail"]},
+            }
+            task = {"source": scenario["source"]}
+            action, diagnosis, policy = orchestrator._workflow_policy_decision(issue, task, {"name": "demo"})
+        finally:
+            orchestrator.FEATURES_DIR = old["FEATURES_DIR"]
+        return {
+            "action": action,
+            "policy_name": policy,
+            "diagnosis": diagnosis,
+        }
+
+
+def _run_qa_preflight(repo_root, scenario):
+    _, worker = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        (root / "qa").mkdir()
+        (root / "config").mkdir()
+        script = root / "qa" / scenario["script_name"]
+        script.write_text("#!/usr/bin/env bash\nexit 0\n")
+        script.chmod(0o755 if scenario.get("executable", True) else 0o644)
+        if scenario.get("bad_config"):
+            (root / "config" / "orchestrator.local.json").write_text("{bad json")
+        result = worker._qa_contract_preflight(
+            {"name": scenario["project_name"], "path": str(root)},
+            scenario["contract_kind"],
+            f"qa/{scenario['script_name']}",
+        )
+        error = result.get("error")
+        if isinstance(error, str) and error.startswith("invalid orchestrator config: "):
+            error = "invalid orchestrator config: __DYNAMIC__"
+        return {
+            "ok": result.get("ok"),
+            "summary": result.get("summary"),
+            "error": error,
+        }
+
+
 def main(argv):
     if len(argv) != 2:
         raise SystemExit("usage: harness/run_scenario.py <scenario-dir>")
@@ -391,6 +454,10 @@ def main(argv):
         actual = _run_review_feedback_exhaustion(repo_root, scenario)
     elif kind == "issue_replan_cap":
         actual = _run_issue_replan_cap(repo_root, scenario)
+    elif kind == "false_blocker_attach":
+        actual = _run_false_blocker_attach(repo_root, scenario)
+    elif kind == "qa_preflight":
+        actual = _run_qa_preflight(repo_root, scenario)
     else:
         raise SystemExit(f"unknown scenario kind: {kind}")
 

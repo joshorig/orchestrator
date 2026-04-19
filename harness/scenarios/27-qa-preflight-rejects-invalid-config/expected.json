@@ -1,0 +1,5 @@
+{
+  "ok": false,
+  "summary": "QA config invalid",
+  "error": "invalid orchestrator config: __DYNAMIC__"
+}

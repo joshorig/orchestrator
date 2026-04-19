@@ -1,0 +1,6 @@
+{
+  "kind": "false_blocker_attach",
+  "name": "false-blocker-attaches-to-active-self-repair",
+  "source": "review-feedback:task-1",
+  "detail": "github_thread_resolution drift in review workflow"
+}

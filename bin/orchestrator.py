@@ -9398,7 +9398,13 @@ def _repair_qa_contract(task):
         return {"fixed": False, "detail": f"qa.{contract_kind} missing from project config"}
     restored, detail = _restore_project_file_from_head(project["path"], script_rel)
     script_abs = pathlib.Path(project["path"]) / script_rel
-    return {"fixed": bool(script_abs.exists()), "detail": detail or str(script_abs), "restored": restored}
+    if script_abs.exists():
+        try:
+            mode = script_abs.stat().st_mode
+            script_abs.chmod(mode | 0o111)
+        except OSError as exc:
+            return {"fixed": False, "detail": str(exc), "restored": restored}
+    return {"fixed": bool(script_abs.exists()) and os.access(script_abs, os.X_OK), "detail": detail or str(script_abs), "restored": restored}
 
 
 def _workflow_policy_matches(policy, issue, task, project):
@@ -9487,8 +9493,7 @@ def _workflow_policy_matches(policy, issue, task, project):
             or "github_thread_resolution" in detail
         ):
             return False
-        self_repair = get_project(load_config(), "devmini-orchestrator")
-        return not _project_has_open_feature(self_repair["name"])
+        return True
     if when == "qa_target_relocated":
         detail = str((issue.get("blocker") or {}).get("detail") or "")
         m = re.search(r"target ([A-Za-z0-9_-]+) ", detail)
