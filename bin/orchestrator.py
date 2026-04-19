@@ -1287,13 +1287,15 @@ def state_engine_config(*, cfg=None):
     mode = str(os.environ.get("STATE_ENGINE_MODE", base.get("mode", "off")) or "off").strip().lower()
     if mode not in {"off", "mirror", "primary"}:
         mode = "off"
-    path_value = str(
+    path_value = pathlib.Path(
         os.environ.get("STATE_ENGINE_PATH", base.get("path", str(STATE_ENGINE_DB_PATH)))
         or str(STATE_ENGINE_DB_PATH)
     )
+    if not path_value.is_absolute():
+        path_value = (STATE_ROOT / path_value).resolve()
     return {
         "mode": mode,
-        "path": path_value,
+        "path": str(path_value),
         "checkpoint_interval_sec": max(1, int(base.get("checkpoint_interval_sec") or 300)),
         "migrations_dir": str(STATE_MIGRATIONS_DIR),
     }
