@@ -4087,6 +4087,60 @@ def _review_request_change_doctest():
         _review_request_change_doctest.__globals__["o"] = old_o
 
 
+def _complete_review_feedback_target(target_id, target_state, *, task_id, round_no, info):
+    """Return the target to awaiting-review, tolerating stale from-state races.
+
+    >>> calls = []
+    >>> old = {
+    ...     "move_task": _complete_review_feedback_target.__globals__["o"].move_task,
+    ...     "find_task": _complete_review_feedback_target.__globals__["o"].find_task,
+    ...     "append_event": _complete_review_feedback_target.__globals__["o"].append_event,
+    ... }
+    >>> def fake_move(task_id_arg, from_state, to_state, reason="", mutator=None):
+    ...     calls.append(("move", task_id_arg, from_state, to_state, reason))
+    ...     if from_state == "awaiting-review":
+    ...         raise FileNotFoundError("stale")
+    >>> _complete_review_feedback_target.__globals__["o"].move_task = fake_move
+    >>> _complete_review_feedback_target.__globals__["o"].find_task = lambda tid, states=(): ("claimed", {"task_id": tid})
+    >>> _complete_review_feedback_target.__globals__["o"].append_event = lambda *args, **kwargs: calls.append(("event", args, kwargs["details"]["state"]))
+    >>> _complete_review_feedback_target("task-1", "awaiting-review", task_id="feedback-1", round_no=2, info="abc123")
+    'claimed'
+    >>> calls
+    [('move', 'task-1', 'awaiting-review', 'awaiting-review', 'review feedback applied (feedback-1)'), ('event', ('review-feedback', 'target_state_changed'), 'claimed')]
+    >>> for key, value in old.items():
+    ...     setattr(_complete_review_feedback_target.__globals__["o"], key, value)
+    """
+    def mut_target(t):
+        t["finished_at"] = o.now_iso()
+        t["review_feedback_rounds"] = int(round_no or t.get("review_feedback_rounds", 0))
+        if info not in ("", "clean"):
+            t["artifacts"] = t.get("artifacts", []) + [info]
+
+    try:
+        o.move_task(target_id, target_state, "awaiting-review",
+                    reason=f"review feedback applied ({task_id})", mutator=mut_target)
+        return "awaiting-review"
+    except FileNotFoundError:
+        current = o.find_task(
+            target_id,
+            states=("queued", "claimed", "running", "awaiting-review", "awaiting-qa", "done", "failed", "blocked", "abandoned"),
+        )
+        if not current:
+            raise
+        current_state, _ = current
+        if current_state in ("queued", "awaiting-review", "awaiting-qa"):
+            o.move_task(target_id, current_state, "awaiting-review",
+                        reason=f"review feedback applied ({task_id})", mutator=mut_target)
+            return "awaiting-review"
+        o.append_event(
+            "review-feedback",
+            "target_state_changed",
+            task_id=task_id,
+            details={"target_task_id": target_id, "state": current_state},
+        )
+        return current_state
+
+
 def run_review_feedback_task(task, cfg, timeout, log_path):
     task_id = task["task_id"]
     eargs = task.get("engine_args") or {}
@@ -4357,13 +4411,13 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
                       retryable=True, mutator=mut_fail)
             return
 
-        def mut_target(t):
-            t["finished_at"] = o.now_iso()
-            t["review_feedback_rounds"] = int(round_no or t.get("review_feedback_rounds", 0))
-            if info not in ("", "clean"):
-                t["artifacts"] = t.get("artifacts", []) + [info]
-        o.move_task(target_id, target_state, "awaiting-review",
-                    reason=f"review feedback applied ({task_id})", mutator=mut_target)
+        _complete_review_feedback_target(
+            target_id,
+            target_state,
+            task_id=task_id,
+            round_no=round_no,
+            info=info,
+        )
 
         def mut_done(t):
             t["finished_at"] = o.now_iso()
