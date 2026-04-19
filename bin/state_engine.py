@@ -324,15 +324,15 @@ class StateEngine:
                     feature.get("created_at") or "",
                     _iso_to_epoch(feature.get("created_at")),
                     feature.get("status") or "open",
-                    feature.get("project"),
-                    feature.get("pr_body_path"),
+                    _sqlite_text(feature.get("project")),
+                    _sqlite_text(feature.get("pr_body_path")),
                     _int_or_none(feature.get("pr_number") or feature.get("final_pr_number")),
-                    feature.get("pr_url") or feature.get("final_pr_url"),
-                    ((feature.get("final_pr_sweep") or {}).get("last_merge_state")) or feature.get("pr_final_state"),
-                    feature.get("frontier_task_id"),
-                    feature.get("frontier_state"),
-                    feature.get("frontier_updated_at"),
-                    self_repair.get("status"),
+                    _sqlite_text(feature.get("pr_url") or feature.get("final_pr_url")),
+                    _sqlite_text(((feature.get("final_pr_sweep") or {}).get("last_merge_state")) or feature.get("pr_final_state")),
+                    _sqlite_text(feature.get("frontier_task_id")),
+                    _sqlite_text(feature.get("frontier_state")),
+                    _sqlite_text(feature.get("frontier_updated_at")),
+                    _sqlite_text(self_repair.get("status")),
                     int(feature.get("version") or 1),
                     json.dumps(metadata, sort_keys=True),
                 ),
@@ -363,13 +363,13 @@ class StateEngine:
                         feature_id,
                         issue.get("created_at") or feature.get("created_at") or "",
                         _iso_to_epoch(issue.get("created_at") or feature.get("created_at")),
-                        issue.get("status") or "pending",
-                        issue.get("last_deliberation_at"),
-                        issue.get("planner_task_id"),
+                        _sqlite_text(issue.get("status") or "pending"),
+                        _sqlite_text(issue.get("last_deliberation_at")),
+                        _sqlite_text(issue.get("planner_task_id")),
                         int(issue.get("attempts") or 0),
                         int(issue.get("max_attempts") or 3),
-                        issue.get("blocker_code") or ((issue.get("blocker") or {}).get("code")),
-                        issue.get("blocker_summary") or ((issue.get("blocker") or {}).get("summary")),
+                        _sqlite_text(issue.get("blocker_code") or ((issue.get("blocker") or {}).get("code"))),
+                        _sqlite_text(issue.get("blocker_summary") or ((issue.get("blocker") or {}).get("summary"))),
                         json.dumps(issue.get("superseded_task_ids") or []),
                         json.dumps(issue, sort_keys=True),
                     ),
@@ -385,10 +385,10 @@ class StateEngine:
                             issue_id,
                             deliberation.get("created_at") or "",
                             _iso_to_epoch(deliberation.get("created_at")),
-                            deliberation.get("stage"),
-                            deliberation.get("verdict"),
-                            deliberation.get("panel"),
-                            deliberation.get("summary") or "",
+                            _sqlite_text(deliberation.get("stage")),
+                            _sqlite_text(deliberation.get("verdict")),
+                            _sqlite_text(deliberation.get("panel")),
+                            _sqlite_text(deliberation.get("summary") or ""),
                         ),
                     )
 
@@ -1198,6 +1198,14 @@ def _bool_to_int_or_none(value: Any) -> int | None:
     if value is None:
         return None
     return 1 if bool(value) else 0
+
+
+def _sqlite_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, (list, dict, tuple, set)):
+        return json.dumps(value, sort_keys=True)
+    return str(value)
 
 
 def parse_repo_memory_markdown(project: str, source_doc: str, text: str) -> list[dict[str, Any]]:
