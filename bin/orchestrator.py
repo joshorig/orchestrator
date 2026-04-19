@@ -2799,7 +2799,11 @@ def atomic_claim(slot_engine):
         if slot_engine in ("claude", "codex") and project_hard_stopped(task.get("project")):
             continue
         project_name = task.get("project")
-        if project_name and not project_environment_ok(project_name):
+        if (
+            project_name
+            and not project_environment_ok(project_name)
+            and not _task_allows_environment_bypass(task)
+        ):
             continue
         if slot_engine == "codex":
             fid = task.get("feature_id")
@@ -2865,6 +2869,17 @@ def pid_alive(pid):
             return False
         return proc.returncode == 0 and bool((proc.stdout or "").strip())
     return True
+
+
+def _task_allows_environment_bypass(task):
+    """Whether a queued task may run even when its project env is degraded.
+
+    Self-repair lanes must be able to repair the very project/runtime defect
+    that made normal product work ineligible to claim.
+    """
+    eargs = (task or {}).get("engine_args") or {}
+    repair = eargs.get("self_repair") or {}
+    return bool(repair.get("enabled"))
 
 
 def _remove_task_worktree_if_present(task):
