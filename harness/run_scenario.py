@@ -1813,6 +1813,72 @@ def _run_telegram_surface(repo_root, scenario):
     }
 
 
+def _run_task_cost_capture(repo_root, scenario):
+    orchestrator, worker = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        old_env = {
+            "STATE_ENGINE_MODE": os.environ.get("STATE_ENGINE_MODE"),
+            "STATE_ENGINE_PATH": os.environ.get("STATE_ENGINE_PATH"),
+        }
+        old = {
+            "STATE_ROOT": orchestrator.STATE_ROOT,
+            "RUNTIME_DIR": orchestrator.RUNTIME_DIR,
+            "LOGS_DIR": orchestrator.LOGS_DIR,
+            "STATE_ENGINE_DB_PATH": orchestrator.STATE_ENGINE_DB_PATH,
+        }
+        os.environ["STATE_ENGINE_MODE"] = "primary"
+        os.environ["STATE_ENGINE_PATH"] = str(root / "runtime" / "orchestrator.db")
+        orchestrator.STATE_ROOT = root
+        orchestrator.RUNTIME_DIR = root / "runtime"
+        orchestrator.LOGS_DIR = root / "logs"
+        orchestrator.STATE_ENGINE_DB_PATH = root / "runtime" / "orchestrator.db"
+        orchestrator._STATE_ENGINE_CACHE = {"key": None, "engine": None}
+        try:
+            engine = orchestrator.get_state_engine()
+            status = engine.initialize()
+            codex_rows = worker._record_task_costs_from_text(
+                scenario["codex_task_id"],
+                "codex",
+                scenario["codex_model"],
+                scenario["codex_payload"],
+            )
+            claude_rows = worker._record_task_costs_from_text(
+                scenario["claude_task_id"],
+                "claude",
+                scenario["claude_model"],
+                scenario["claude_payload"],
+            )
+            rows = engine.read_task_costs(limit=10)
+            summary = engine.aggregate_task_costs(hours=24)
+        finally:
+            orchestrator._STATE_ENGINE_CACHE = {"key": None, "engine": None}
+            orchestrator.STATE_ROOT = old["STATE_ROOT"]
+            orchestrator.RUNTIME_DIR = old["RUNTIME_DIR"]
+            orchestrator.LOGS_DIR = old["LOGS_DIR"]
+            orchestrator.STATE_ENGINE_DB_PATH = old["STATE_ENGINE_DB_PATH"]
+            if old_env["STATE_ENGINE_MODE"] is None:
+                os.environ.pop("STATE_ENGINE_MODE", None)
+            else:
+                os.environ["STATE_ENGINE_MODE"] = old_env["STATE_ENGINE_MODE"]
+            if old_env["STATE_ENGINE_PATH"] is None:
+                os.environ.pop("STATE_ENGINE_PATH", None)
+            else:
+                os.environ["STATE_ENGINE_PATH"] = old_env["STATE_ENGINE_PATH"]
+        rows_by_task = {row["task_id"]: row for row in rows}
+        return {
+            "integrity_check": status.get("integrity_check"),
+            "codex_rows": codex_rows,
+            "claude_rows": claude_rows,
+            "summary_rows": summary["summary"]["rows_count"],
+            "codex_cost_positive": float(rows_by_task[scenario["codex_task_id"]]["cost_usd"]) > 0,
+            "codex_input_tokens": int(rows_by_task[scenario["codex_task_id"]]["input_tokens"]),
+            "codex_cache_tokens": int(rows_by_task[scenario["codex_task_id"]]["cache_tokens"]),
+            "claude_cost_usd": round(float(rows_by_task[scenario["claude_task_id"]]["cost_usd"]), 4),
+            "claude_output_tokens": int(rows_by_task[scenario["claude_task_id"]]["output_tokens"]),
+        }
+
+
 def main(argv):
     if len(argv) != 2:
         raise SystemExit("usage: harness/run_scenario.py <scenario-dir>")
@@ -1873,6 +1939,8 @@ def main(argv):
         actual = _run_self_repair_observation(repo_root, scenario)
     elif kind == "telegram_surface":
         actual = _run_telegram_surface(repo_root, scenario)
+    elif kind == "task_cost_capture":
+        actual = _run_task_cost_capture(repo_root, scenario)
     else:
         raise SystemExit(f"unknown scenario kind: {kind}")
 

@@ -43,6 +43,13 @@ SELF_REPAIR_COUNCIL_DEFAULT = ("socrates", "feynman", "ada", "torvalds")
 # config["slots"][<slot>]["timeout_sec"] or task["engine_args"]["timeout_sec"].
 DEFAULT_TIMEOUTS = {"claude": 1800, "codex": 3600, "qa": 900}
 USAGE_JSON_RE = re.compile(r'^\s*\{.*"(input_tokens|output_tokens|cost_usd)".*\}\s*$')
+CODEX_TURN_USAGE_RE = re.compile(r'"type"\s*:\s*"turn\.completed"')
+CODEX_TOTAL_TOKENS_RE = re.compile(r"tokens used\s*\n([0-9,]+)", re.IGNORECASE | re.MULTILINE)
+OPENAI_MODEL_PRICING = {
+    "gpt-5.4": {"input": 2.50, "cached_input": 0.25, "output": 15.00},
+    "gpt-5.4-mini": {"input": 0.75, "cached_input": 0.075, "output": 4.50},
+    "gpt-5.4-nano": {"input": 0.20, "cached_input": 0.02, "output": 1.25},
+}
 
 
 def log(msg):
@@ -83,29 +90,109 @@ def _run_bounded(cmd, *, timeout, cwd=None, env=None, stdout=None, stderr=None, 
 def _record_task_costs_from_text(task_id, engine, model, text):
     if not task_id or not text:
         return 0
+    def normalize_model(value):
+        raw = str(value or model or "").strip().lower()
+        for candidate in OPENAI_MODEL_PRICING:
+            if candidate in raw:
+                return candidate
+        return raw or None
+
+    def estimate_openai_cost(payload_model, input_tokens, output_tokens, cache_tokens):
+        key = normalize_model(payload_model)
+        pricing = OPENAI_MODEL_PRICING.get(key or "")
+        if not pricing:
+            return 0.0
+        billable_input = max(int(input_tokens or 0) - int(cache_tokens or 0), 0)
+        return (
+            (billable_input * pricing["input"])
+            + (int(cache_tokens or 0) * pricing["cached_input"])
+            + (int(output_tokens or 0) * pricing["output"])
+        ) / 1_000_000.0
+
+    def extract_payload(payload):
+        if not isinstance(payload, dict):
+            return None
+        if any(key in payload for key in ("input_tokens", "output_tokens", "cost_usd")):
+            return {
+                "engine": str(payload.get("slot") or engine or ""),
+                "model": payload.get("model") or model,
+                "input_tokens": int(payload.get("input_tokens") or 0),
+                "output_tokens": int(payload.get("output_tokens") or 0),
+                "cache_tokens": int(payload.get("cache_tokens") or payload.get("cached_tokens") or 0),
+                "search_tokens": int(payload.get("search_tokens") or 0),
+                "cost_usd": float(payload.get("cost_usd") or 0.0),
+            }
+        usage = payload.get("usage")
+        if not isinstance(usage, dict):
+            return None
+        if payload.get("type") == "turn.completed" or payload.get("type") == "result":
+            cache_tokens = int(
+                usage.get("cached_input_tokens")
+                or usage.get("cache_read_input_tokens")
+                or 0
+            )
+            parsed = {
+                "engine": str(engine or ""),
+                "model": payload.get("model") or model,
+                "input_tokens": int(usage.get("input_tokens") or 0),
+                "output_tokens": int(usage.get("output_tokens") or 0),
+                "cache_tokens": cache_tokens,
+                "search_tokens": 0,
+                "cost_usd": float(payload.get("total_cost_usd") or 0.0),
+            }
+            if not parsed["cost_usd"] and str(engine or "").lower() == "codex":
+                parsed["cost_usd"] = estimate_openai_cost(
+                    parsed["model"],
+                    parsed["input_tokens"],
+                    parsed["output_tokens"],
+                    parsed["cache_tokens"],
+                )
+            return parsed
+        return None
+
     recorded = 0
     for raw_line in str(text).splitlines():
         line = raw_line.strip()
-        if not line or not USAGE_JSON_RE.match(line):
+        if not line or not (USAGE_JSON_RE.match(line) or CODEX_TURN_USAGE_RE.search(line) or '"total_cost_usd"' in line):
             continue
         try:
             payload = json.loads(line)
         except json.JSONDecodeError:
             continue
+        parsed = extract_payload(payload)
+        if not parsed:
+            continue
         try:
             o.record_task_cost(
                 task_id=task_id,
-                engine=str(payload.get("slot") or engine or ""),
-                model=payload.get("model") or model,
-                input_tokens=int(payload.get("input_tokens") or 0),
-                output_tokens=int(payload.get("output_tokens") or 0),
-                cache_tokens=int(payload.get("cache_tokens") or payload.get("cached_tokens") or 0),
-                search_tokens=int(payload.get("search_tokens") or 0),
-                cost_usd=float(payload.get("cost_usd") or 0.0),
+                engine=parsed["engine"],
+                model=parsed["model"],
+                input_tokens=parsed["input_tokens"],
+                output_tokens=parsed["output_tokens"],
+                cache_tokens=parsed["cache_tokens"],
+                search_tokens=parsed["search_tokens"],
+                cost_usd=parsed["cost_usd"],
             )
             recorded += 1
         except Exception:
             continue
+    if recorded == 0 and str(engine or "").lower() == "codex":
+        total_match = CODEX_TOTAL_TOKENS_RE.search(str(text))
+        if total_match:
+            try:
+                o.record_task_cost(
+                    task_id=task_id,
+                    engine="codex",
+                    model=model,
+                    input_tokens=int(total_match.group(1).replace(",", "")),
+                    output_tokens=0,
+                    cache_tokens=0,
+                    search_tokens=0,
+                    cost_usd=0.0,
+                )
+                recorded = 1
+            except Exception:
+                pass
     return recorded
 
 
@@ -1740,7 +1827,7 @@ def run_claude_memory_synthesis(task, cfg, timeout, log_path):
         "-p", user_prompt,
         "--dangerously-skip-permissions",
         "--system-prompt", system_prompt,
-        "--output-format", "text",
+        "--output-format", "json",
         "--model", "sonnet",
         "--max-budget-usd", _claude_budget_flag("memory_synthesis", cfg=cfg, task=task),
         "--no-session-persistence",
@@ -1766,14 +1853,20 @@ def run_claude_memory_synthesis(task, cfg, timeout, log_path):
                       blocker_code="llm_timeout", summary="claude timeout", retryable=True)
             return
         logf.write(f"\n# exit: {proc.returncode}\n# stdout:\n{proc.stdout or ''}\n")
+    _record_task_costs_from_text(task_id, "claude", "sonnet", proc.stdout or "")
+    try:
+        payload = json.loads(proc.stdout or "")
+        raw_text = str(payload.get("result") or "")
+    except json.JSONDecodeError:
+        raw_text = proc.stdout or ""
 
     if proc.returncode != 0:
-        _pause_claude_slot_if_needed(proc.stdout or f"claude exit {proc.returncode}", task=task)
+        _pause_claude_slot_if_needed(raw_text or proc.stdout or f"claude exit {proc.returncode}", task=task)
         fail_task(task_id, "running", f"claude exit {proc.returncode}",
                   blocker_code="llm_exit_error", summary="claude exit error", retryable=True)
         return
 
-    candidate = extract_markdown_document(proc.stdout or "")
+    candidate = extract_markdown_document(raw_text)
     if not markdown_sane(candidate):
         fail_task(task_id, "running", "candidate markdown invalid",
                   blocker_code="model_output_invalid", summary="candidate markdown invalid", retryable=False)
@@ -2159,23 +2252,26 @@ def _run_review_agent(kind, *, prompt, worktree, timeout, logf, last_msg_path):
             "--skip-git-repo-check",
             "-C", str(worktree),
             "--ephemeral",
+            "--json",
             "-o", str(last_msg_path),
             prompt,
         ]
         cwd = None
-        stdout_target = logf
+        stdout_target = subprocess.PIPE
+        stderr_target = subprocess.PIPE
     elif kind == "claude":
         cmd = [
             "claude",
             "-p", prompt,
             "--dangerously-skip-permissions",
-            "--output-format", "text",
+            "--output-format", "json",
             "--model", "sonnet",
             "--max-budget-usd", _claude_budget_flag("review", cfg=o.load_config()),
             "--no-session-persistence",
         ]
         cwd = str(worktree)
         stdout_target = subprocess.PIPE
+        stderr_target = subprocess.STDOUT
     else:
         raise ValueError(f"unknown review agent {kind}")
 
@@ -2185,20 +2281,29 @@ def _run_review_agent(kind, *, prompt, worktree, timeout, logf, last_msg_path):
             cwd=cwd,
             env=_claude_subprocess_env() if kind == "claude" else None,
             stdout=stdout_target,
-            stderr=subprocess.STDOUT,
+            stderr=stderr_target,
             text=True,
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         return {"error": f"{kind} timeout {timeout}s"}
     if kind == "claude":
-        raw = proc.stdout or ""
+        structured = proc.stdout or ""
+        logf.write(structured)
+        _record_task_costs_from_text(last_msg_path.stem.split(".")[0], "claude", "sonnet", structured)
+        try:
+            payload = json.loads(structured)
+            raw = str(payload.get("result") or "")
+        except json.JSONDecodeError:
+            raw = structured
         last_msg_path.write_text(raw)
-        logf.write(raw)
-        _record_task_costs_from_text(last_msg_path.stem.split(".")[0], "claude", "sonnet", raw)
     else:
+        if proc.stderr:
+            logf.write(proc.stderr)
+        if proc.stdout:
+            logf.write(proc.stdout)
         raw = last_msg_path.read_text(errors="replace") if last_msg_path.exists() else ""
-        _record_task_costs_from_text(last_msg_path.stem.split(".")[0], "codex", None, raw)
+        _record_task_costs_from_text(last_msg_path.stem.split(".")[0], "codex", "gpt-5.4", proc.stdout or "")
     if proc.returncode != 0:
         if kind == "claude":
             _pause_claude_slot_if_needed((proc.stderr or raw or f"claude exit {proc.returncode}"), task={"task_id": last_msg_path.stem.split(".")[0]})
@@ -2437,7 +2542,7 @@ def run_claude_template_gen(task, cfg, task_type, timeout, log_path):
         "-p", user_prompt,
         "--dangerously-skip-permissions",
         "--system-prompt", gen_system,
-        "--output-format", "text",
+        "--output-format", "json",
         "--model", "opus",
         "--max-budget-usd", _claude_budget_flag("template_gen", cfg=cfg, task=task, mode=planner_mode),
         "--no-session-persistence",
@@ -2465,14 +2570,20 @@ def run_claude_template_gen(task, cfg, task_type, timeout, log_path):
         logf.write(f"\n# exit: {proc.returncode}\n")
         logf.write("# stdout:\n")
         logf.write(proc.stdout or "")
+    _record_task_costs_from_text(task_id, "claude", "opus", proc.stdout or "")
+    try:
+        payload = json.loads(proc.stdout or "")
+        raw_text = str(payload.get("result") or "")
+    except json.JSONDecodeError:
+        raw_text = proc.stdout or ""
 
     if proc.returncode != 0:
-        _pause_claude_slot_if_needed(proc.stdout or f"claude exit {proc.returncode}", task=task)
+        _pause_claude_slot_if_needed(raw_text or proc.stdout or f"claude exit {proc.returncode}", task=task)
         fail_task(task_id, "running", f"claude exit {proc.returncode}",
                   blocker_code="llm_exit_error", summary="claude exit error", retryable=True)
         return
 
-    graph = extract_mermaid(proc.stdout or "")
+    graph = extract_mermaid(raw_text)
     if not graph:
         fail_task(task_id, "running", "no mermaid block in output",
                   blocker_code="model_output_invalid", summary="template-gen output invalid", retryable=False)
@@ -2547,7 +2658,7 @@ def run_claude_template_refine(task, cfg, task_type, timeout, log_path):
         "-p", user_prompt,
         "--dangerously-skip-permissions",
         "--system-prompt", gen_system,
-        "--output-format", "text",
+        "--output-format", "json",
         "--model", "opus",
         "--max-budget-usd", _claude_budget_flag("template_refine", cfg=cfg, task=task),
         "--no-session-persistence",
@@ -2575,14 +2686,20 @@ def run_claude_template_refine(task, cfg, task_type, timeout, log_path):
                       blocker_code="llm_timeout", summary="claude timeout", retryable=True)
             return
         logf.write(f"\n# exit: {proc.returncode}\n# stdout:\n{proc.stdout or ''}\n")
+    _record_task_costs_from_text(task_id, "claude", "opus", proc.stdout or "")
+    try:
+        payload = json.loads(proc.stdout or "")
+        raw_text = str(payload.get("result") or "")
+    except json.JSONDecodeError:
+        raw_text = proc.stdout or ""
 
     if proc.returncode != 0:
-        _pause_claude_slot_if_needed(proc.stdout or f"claude exit {proc.returncode}", task=task)
+        _pause_claude_slot_if_needed(raw_text or proc.stdout or f"claude exit {proc.returncode}", task=task)
         fail_task(task_id, "running", f"claude exit {proc.returncode}",
                   blocker_code="llm_exit_error", summary="claude exit error", retryable=True)
         return
 
-    candidate = extract_mermaid(proc.stdout or "")
+    candidate = extract_mermaid(raw_text)
     if not candidate:
         fail_task(task_id, "running", "no mermaid block in refine output",
                   blocker_code="model_output_invalid", summary="template-refine output invalid", retryable=False)
@@ -2879,7 +2996,7 @@ def _run_self_repair_council(
         "-p", prompt,
         "--dangerously-skip-permissions",
         "--system-prompt", system_prompt,
-        "--output-format", "text",
+        "--output-format", "json",
         "--model", model,
         "--max-budget-usd", _claude_budget_flag("review", cfg=o.load_config(), task=task),
         "--no-session-persistence",
@@ -2893,10 +3010,14 @@ def _run_self_repair_council(
         env=_claude_subprocess_env(),
         cwd=str(worktree),
     )
-    raw = proc.stdout or ""
+    _record_task_costs_from_text(task.get("task_id"), "claude", model, proc.stdout or "")
+    try:
+        payload = json.loads(proc.stdout or "")
+        raw = str(payload.get("result") or "")
+    except json.JSONDecodeError:
+        raw = proc.stdout or ""
     if last_msg_path:
         last_msg_path.write_text(raw)
-    _record_task_costs_from_text(task.get("task_id"), "claude", model, raw)
     if proc.returncode != 0:
         if _claude_budget_exhausted(proc.stderr or raw or ""):
             _pause_claude_slot_if_needed((proc.stderr or raw or f"claude exit {proc.returncode}"))
@@ -3553,7 +3674,7 @@ def run_claude_planner(task, cfg, timeout, log_path):
         "-p", user_prompt,
         "--dangerously-skip-permissions",
         "--system-prompt", system_prompt,
-        "--output-format", "text",
+        "--output-format", "json",
         "--model", "opus" if planner_mode == "self-repair-plan" else "sonnet",
         "--max-budget-usd", _claude_budget_flag("planner", cfg=cfg, task=task, mode=planner_mode),
         "--disallowedTools", "Bash,Read,Write,Edit,Grep,Glob,Agent,WebFetch,WebSearch",
@@ -3578,14 +3699,20 @@ def run_claude_planner(task, cfg, timeout, log_path):
                       blocker_code="llm_timeout", summary="claude timeout", retryable=True)
             return
         logf.write(f"\n# exit: {proc.returncode}\n# stdout:\n{proc.stdout or ''}\n")
+    model_name = "opus" if planner_mode == "self-repair-plan" else "sonnet"
+    _record_task_costs_from_text(task_id, "claude", model_name, proc.stdout or "")
+    try:
+        payload = json.loads(proc.stdout or "")
+        raw = str(payload.get("result") or "")
+    except json.JSONDecodeError:
+        raw = proc.stdout or ""
 
     if proc.returncode != 0:
-        _pause_claude_slot_if_needed(proc.stdout or f"claude exit {proc.returncode}", task=task)
+        _pause_claude_slot_if_needed(raw or proc.stdout or f"claude exit {proc.returncode}", task=task)
         fail_task(task_id, "running", f"claude exit {proc.returncode}",
                   blocker_code="llm_exit_error", summary="claude exit error", retryable=True)
         return
 
-    raw = proc.stdout or ""
     if planner_mode == "self-repair-plan":
         m = re.search(r"\{.*\}", raw, re.DOTALL)
         if not m:
@@ -4577,6 +4704,7 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
             "--skip-git-repo-check",
             "-C", str(wt),
             "--ephemeral",
+            "--json",
             "-o", str(last_msg_path),
             prompt,
         ]
@@ -4588,7 +4716,7 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
             logf.flush()
             try:
                 proc = _run_bounded(
-                    cmd, stdout=logf, stderr=subprocess.STDOUT, text=True, timeout=timeout,
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout,
                 )
             except subprocess.TimeoutExpired:
                 def mut_fail(t):
@@ -4597,6 +4725,11 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
                 fail_task(task_id, "running", f"review-feedback timeout {timeout}s",
                           blocker_code="llm_timeout", summary="review-feedback timeout", retryable=True, mutator=mut_fail)
                 return
+            if proc.stderr:
+                logf.write(proc.stderr)
+            if proc.stdout:
+                logf.write(proc.stdout)
+        _record_task_costs_from_text(task_id, "codex", "gpt-5.4", proc.stdout or "")
 
         trailer = ""
         if last_msg_path.exists():
@@ -4968,6 +5101,7 @@ def run_pr_feedback_task(task, cfg):
             "--skip-git-repo-check",
             "-C", str(wt),
             "--ephemeral",
+            "--json",
             "-o", str(last_msg_path),
             prompt,
         ]
@@ -4981,7 +5115,7 @@ def run_pr_feedback_task(task, cfg):
             logf.flush()
             try:
                 proc = _run_bounded(
-                    cmd, stdout=logf, stderr=subprocess.STDOUT, text=True, timeout=timeout,
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout,
                 )
             except subprocess.TimeoutExpired:
                 def mut_fail(t):
@@ -4990,6 +5124,11 @@ def run_pr_feedback_task(task, cfg):
                 fail_task(task_id, "running", f"pr-feedback timeout {timeout}s",
                           blocker_code="llm_timeout", summary="pr-feedback timeout", retryable=True, mutator=mut_fail)
                 return
+            if proc.stderr:
+                logf.write(proc.stderr)
+            if proc.stdout:
+                logf.write(proc.stdout)
+        _record_task_costs_from_text(task_id, "codex", "gpt-5.4", proc.stdout or "")
 
         trailer = ""
         if last_msg_path.exists():
@@ -5407,6 +5546,7 @@ def run_codex_slot(task, cfg):
             "--skip-git-repo-check",
             "-C", str(wt_path),
             "--ephemeral",
+            "--json",
             "-o", str(last_msg_path),
             prompt,
         ]
@@ -5418,7 +5558,7 @@ def run_codex_slot(task, cfg):
             logf.flush()
             try:
                 proc = _run_bounded(
-                    cmd, stdout=logf, stderr=subprocess.STDOUT, text=True, timeout=timeout,
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout,
                 )
             except subprocess.TimeoutExpired:
                 # Codex hit the slot wall — that's slot exhaustion, not a graph
@@ -5430,14 +5570,17 @@ def run_codex_slot(task, cfg):
                 fail_task(task_id, "running", f"codex timeout {timeout}s",
                           blocker_code="llm_timeout", summary="codex timeout", retryable=True, mutator=mut_fail)
                 return
+            if proc.stderr:
+                logf.write(proc.stderr)
+            if proc.stdout:
+                logf.write(proc.stdout)
 
         trailer = ""
         if last_msg_path.exists():
             lines = [l.strip() for l in last_msg_path.read_text().splitlines() if l.strip()]
             # Paper's guidance: scan the last few non-empty lines.
             trailer = _find_braid_trailer(lines)
-        if log_path.exists():
-            _record_task_costs_from_text(task_id, "codex", None, log_path.read_text(errors="replace"))
+        _record_task_costs_from_text(task_id, "codex", "gpt-5.4", proc.stdout or "")
 
         if proc.returncode != 0 and not trailer:
             def mut_fail(t):

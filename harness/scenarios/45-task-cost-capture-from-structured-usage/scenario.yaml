@@ -1,0 +1,9 @@
+{
+  "kind": "task_cost_capture",
+  "codex_task_id": "task-codex",
+  "codex_model": "gpt-5.4",
+  "codex_payload": "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1000,\"cached_input_tokens\":200,\"output_tokens\":50}}",
+  "claude_task_id": "task-claude",
+  "claude_model": "sonnet",
+  "claude_payload": "{\"type\":\"result\",\"subtype\":\"success\",\"total_cost_usd\":0.1234,\"usage\":{\"input_tokens\":321,\"cache_read_input_tokens\":21,\"output_tokens\":45},\"result\":\"ok\"}"
+}

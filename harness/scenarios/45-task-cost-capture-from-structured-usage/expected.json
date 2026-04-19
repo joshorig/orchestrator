@@ -1,0 +1,11 @@
+{
+  "integrity_check": "ok",
+  "codex_rows": 1,
+  "claude_rows": 1,
+  "summary_rows": 2,
+  "codex_cost_positive": true,
+  "codex_input_tokens": 1000,
+  "codex_cache_tokens": 200,
+  "claude_cost_usd": 0.1234,
+  "claude_output_tokens": 45
+}
