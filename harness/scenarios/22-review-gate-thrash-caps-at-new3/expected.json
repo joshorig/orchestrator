@@ -1,0 +1,8 @@
+{
+  "ratio_findings": [],
+  "final_state": "abandoned",
+  "blocker_code": "attempt_exhausted",
+  "alert_count": 1,
+  "review_verdict": "request_change",
+  "policy_review_findings": []
+}

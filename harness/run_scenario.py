@@ -54,7 +54,7 @@ def _run_attempt_cap(repo_root, scenario_dir, scenario):
             task["policy_review_findings"] = list(review["policy_review_findings"])
             orchestrator.write_json_atomic(orchestrator.task_path(task["task_id"], scenario["initial_state"]), task)
 
-            ratio_cfg = {
+            ratio_cfg = scenario.get("ratio_cfg") or {
                 "review_policy": {
                     "test_to_code_ratio": {
                         "min_ratio": 0.5,
