@@ -119,11 +119,17 @@ BLOCKER_CODES = (
     "project_regression_failed",
     "runtime_policy_stale",
     "worker_crash",
+    "worker_crash_lock_contention",
+    "worker_crash_subprocess_timeout",
+    "worker_crash_oom_killed",
+    "worker_crash_git_failure",
+    "worker_crash_unhandled",
     "worktree_create_failed",
     "planner_emitted_no_children",
     "feature_has_no_children",
     "missing_child",
     "final_pr_blocked",
+    "finalize_follow_up_dead",
     "canary_missing_recent_success",
     "canary_stale",
     "runtime_env_dirty",
@@ -131,10 +137,12 @@ BLOCKER_CODES = (
     "runtime_unknown_project",
     "runtime_precondition_failed",
     "review_gate_protocol_error",
+    "claude_budget_exhausted",
     "slot_paused",
     "llm_timeout",
     "llm_exit_error",
     "model_output_invalid",
+    "validator_malfunction",
     "qa_contract_error",
     "qa_target_missing",
     "qa_smoke_failed",
@@ -148,8 +156,8 @@ WORKFLOW_REPAIR_POLICY = (
         "kind": "frontier_task_blocked",
         "blocker_code": "template_missing",
         "task_state": "blocked",
-        "action": None,
-        "diagnosis": "waiting for template regeneration",
+        "action": "push_alert",
+        "diagnosis": "template regeneration has not landed; page an operator instead of silently waiting",
         "when": "template_missing_blocked",
     },
     {
@@ -165,8 +173,8 @@ WORKFLOW_REPAIR_POLICY = (
         "name": "template_refine_wait",
         "kind": "frontier_task_blocked",
         "blocker_code": "template_missing_edge",
-        "action": None,
-        "diagnosis": "waiting for template refinement",
+        "action": "push_alert",
+        "diagnosis": "template refinement is pending; page an operator instead of silently waiting",
         "when": "template_refine_waiting",
     },
     {
@@ -178,12 +186,11 @@ WORKFLOW_REPAIR_POLICY = (
         "when": "template_refine_ready",
     },
     {
-        "name": "project_main_dirty_wait",
+        "name": "project_main_dirty_repair",
         "kind": "frontier_task_blocked",
         "blocker_code": "project_main_dirty",
-        "action": None,
-        "diagnosis": "project main checkout still dirty",
-        "when": "project_main_still_dirty",
+        "action": "repair_main_then_retry",
+        "diagnosis": "project main checkout dirty or ahead; attempt bounded checkout repair first",
     },
     {
         "name": "project_main_dirty_retry",
@@ -206,6 +213,41 @@ WORKFLOW_REPAIR_POLICY = (
         "blocker_code": "worker_crash",
         "action": "retry_task",
         "diagnosis": "worker crashed; task is retryable",
+    },
+    {
+        "name": "worker_crash_lock_retry",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "worker_crash_lock_contention",
+        "action": "retry_task",
+        "diagnosis": "worker lost a shared-lock race; retry the task",
+    },
+    {
+        "name": "worker_crash_timeout_retry",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "worker_crash_subprocess_timeout",
+        "action": "retry_task",
+        "diagnosis": "worker subprocess timed out; retry within bounded attempt budget",
+    },
+    {
+        "name": "worker_crash_git_retry",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "worker_crash_git_failure",
+        "action": "retry_task",
+        "diagnosis": "worker hit a transient git failure; retry the task",
+    },
+    {
+        "name": "worker_crash_unhandled_retry",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "worker_crash_unhandled",
+        "action": "retry_task",
+        "diagnosis": "worker crashed unexpectedly; retry the task once through workflow-check",
+    },
+    {
+        "name": "validator_malfunction_retry",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "validator_malfunction",
+        "action": "retry_task",
+        "diagnosis": "a validator path malfunctioned; retry the task without treating it as a real product failure",
     },
     {
         "name": "worktree_create_retry",
@@ -274,8 +316,8 @@ WORKFLOW_REPAIR_POLICY = (
         "name": "template_graph_wait",
         "kind": "frontier_task_blocked",
         "blocker_code": "template_graph_error",
-        "action": None,
-        "diagnosis": "waiting for template regeneration",
+        "action": "push_alert",
+        "diagnosis": "template graph remains broken without a landed fix; page an operator",
         "when": "template_graph_waiting",
     },
     {
@@ -311,18 +353,18 @@ WORKFLOW_REPAIR_POLICY = (
         "when": "review_feedback_stale",
     },
     {
-        "name": "regression_stop",
+        "name": "regression_self_repair",
         "kind": "frontier_task_blocked",
         "blocker_code": "project_regression_failed",
-        "action": None,
-        "diagnosis": "hard-stopped by regression failure",
+        "action": "enqueue_self_repair",
+        "diagnosis": "hard-stopped by regression failure; attach a repair issue so the project does not deadlock silently",
     },
     {
         "name": "delivery_auth_wait",
         "kind": "environment_degraded",
         "blocker_code": "delivery_auth_expired",
-        "action": None,
-        "diagnosis": "delivery credentials are expired; wait for auth refresh",
+        "action": "push_alert",
+        "diagnosis": "delivery credentials are expired; page an operator to refresh auth",
     },
     {
         "name": "false_blocker_claim_self_repair",
@@ -336,15 +378,15 @@ WORKFLOW_REPAIR_POLICY = (
         "name": "false_blocker_claim_report",
         "kind": "frontier_task_blocked",
         "blocker_code": "false_blocker_claim",
-        "action": None,
-        "diagnosis": "solver emitted a false blocker claim; report instead of retrying blindly",
+        "action": "push_alert",
+        "diagnosis": "solver emitted a false blocker claim outside the known self-repair path; page an operator",
     },
     {
-        "name": "qa_contract_report",
+        "name": "qa_contract_repair",
         "kind": "frontier_task_blocked",
         "blocker_code": "qa_contract_error",
-        "action": None,
-        "diagnosis": "QA contract or script configuration is missing; repair config before retrying",
+        "action": "repair_qa_then_retry",
+        "diagnosis": "QA contract or script configuration is missing; attempt bounded repair before retrying",
     },
     {
         "name": "qa_target_missing_retry",
@@ -366,8 +408,8 @@ WORKFLOW_REPAIR_POLICY = (
         "name": "qa_target_missing_report",
         "kind": "frontier_task_blocked",
         "blocker_code": "qa_target_missing",
-        "action": None,
-        "diagnosis": "QA target state or worktree is missing; inspect queue/worktree lifecycle before retrying",
+        "action": "push_alert",
+        "diagnosis": "QA target state or worktree is missing; page an operator to inspect queue/worktree lifecycle",
     },
     {
         "name": "runtime_env_dirty_repair",
@@ -387,8 +429,8 @@ WORKFLOW_REPAIR_POLICY = (
         "name": "runtime_precondition_report",
         "kind": "frontier_task_blocked",
         "blocker_code": "runtime_precondition_failed",
-        "action": None,
-        "diagnosis": "runtime preconditions are missing; repair task inputs before retrying",
+        "action": "push_alert",
+        "diagnosis": "runtime preconditions are missing; page an operator to repair task inputs",
     },
     {
         "name": "review_gate_protocol_retry",
@@ -401,22 +443,29 @@ WORKFLOW_REPAIR_POLICY = (
         "name": "slot_paused_wait",
         "kind": "frontier_task_blocked",
         "blocker_code": "slot_paused",
-        "action": None,
-        "diagnosis": "slot is paused awaiting explicit operator resume",
+        "action": "push_alert",
+        "diagnosis": "slot is paused and requires explicit operator resume",
+    },
+    {
+        "name": "claude_budget_wait",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "claude_budget_exhausted",
+        "action": "push_alert",
+        "diagnosis": "Claude slot budget is exhausted and has been auto-paused; page an operator to resume the slot",
     },
     {
         "name": "unknown_project_report",
         "kind": "frontier_task_blocked",
         "blocker_code": "runtime_unknown_project",
-        "action": None,
-        "diagnosis": "task references an unknown project; repair configuration before retrying",
+        "action": "push_alert",
+        "diagnosis": "task references an unknown project; page an operator to repair configuration",
     },
     {
-        "name": "missing_child_report",
+        "name": "missing_child_self_repair",
         "kind": "missing_child",
         "blocker_code": "missing_child",
-        "action": None,
-        "diagnosis": "feature child task file is missing; inspect queue-state corruption before retrying",
+        "action": "enqueue_self_repair",
+        "diagnosis": "feature child task file is missing; attach a self-repair issue so queue corruption is investigated automatically",
     },
     {
         "name": "planner_empty_retry",
@@ -429,8 +478,8 @@ WORKFLOW_REPAIR_POLICY = (
         "name": "feature_no_children_report",
         "kind": "feature_has_no_children",
         "blocker_code": "feature_has_no_children",
-        "action": None,
-        "diagnosis": "feature is open but has no child tasks to make progress",
+        "action": "push_alert",
+        "diagnosis": "feature is open but has no child tasks to make progress; page an operator",
     },
     {
         "name": "feature_finalize_ready",
@@ -446,6 +495,13 @@ WORKFLOW_REPAIR_POLICY = (
         "diagnosis": "final PR is blocked",
     },
     {
+        "name": "finalize_follow_up_dead_ready",
+        "kind": "finalize_follow_up_dead",
+        "blocker_code": "finalize_follow_up_dead",
+        "action": "mark_ready_for_merge",
+        "diagnosis": "final PR is clean and the stale follow-up lane should be retired",
+    },
+    {
         "name": "canary_enqueue",
         "kind": "canary_missing_recent_success",
         "blocker_code": "canary_missing_recent_success",
@@ -453,11 +509,11 @@ WORKFLOW_REPAIR_POLICY = (
         "diagnosis": "recent successful canary missing",
     },
     {
-        "name": "canary_stale_escalate",
+        "name": "canary_stale_self_repair",
         "kind": "canary_stale",
         "blocker_code": "canary_stale",
-        "action": None,
-        "diagnosis": "synthetic canary has been in-flight too long",
+        "action": "enqueue_self_repair",
+        "diagnosis": "synthetic canary has been in-flight too long; attach a self-repair issue for the stuck validator lane",
     },
 )
 ATTEMPT_ARCHIVE_FIELDS = (
@@ -551,8 +607,8 @@ CONFIG_DEFAULTS = {
         "self_review": True,
     },
     "worker_crash_guard": {
-        "window_seconds": 900,
-        "max_crashes": 3,
+        "window_seconds": 180,
+        "max_crashes": 2,
     },
     "template_regen": {
         "max_attempts": 3,
@@ -1823,6 +1879,15 @@ def clear_task_blocker(task):
     task["blocker"] = None
 
 
+def _is_validator_malfunction(detail):
+    lower = (detail or "").lower()
+    if "braid_topology_error" not in lower and "false blocker claim" not in lower:
+        return False
+    if "orchestrator.json" not in lower:
+        return False
+    return any(token in lower for token in ("validatesmoke", "validatecanary", "smoke", "canary", "lint-templates"))
+
+
 def task_blocker(task):
     """Return explicit blocker metadata or infer it from legacy task fields.
 
@@ -1843,12 +1908,26 @@ def task_blocker(task):
     """
     blocker = task.get("blocker")
     if isinstance(blocker, dict) and blocker.get("code"):
+        detail = str(blocker.get("detail") or "")
+        if blocker.get("code") == "false_blocker_claim" and _is_validator_malfunction(detail):
+            return make_blocker(
+                "validator_malfunction",
+                summary="validator malfunctioned while assessing the task",
+                detail=detail,
+                source=blocker.get("source") or "legacy",
+                retryable=True,
+                confidence=blocker.get("confidence"),
+                metadata=blocker.get("metadata"),
+            )
         return blocker
 
     topo = str(task.get("topology_error") or "")
     failure = str(task.get("failure") or "")
     false_claim = str(task.get("false_blocker_claim") or "")
     detail = " ".join(part for part in (failure, topo, false_claim) if part).strip()
+    if not detail and task.get("task_id") and task.get("state"):
+        _, transition_reason = task_state_entered_at(task["task_id"], task["state"])
+        detail = str(transition_reason or "").strip()
     detail_lower = detail.lower()
 
     if topo == "template_missing":
@@ -1862,15 +1941,29 @@ def task_blocker(task):
     if "refine_rounds_exhausted" in topo:
         return make_blocker("template_refine_exhausted", summary="template refinement exhausted", detail=detail, source="legacy", retryable=False)
     if topo.startswith("BRAID_TOPOLOGY_ERROR:"):
+        if _is_validator_malfunction(detail):
+            return make_blocker("validator_malfunction", summary="validator malfunctioned while assessing the task", detail=detail, source="legacy", retryable=True)
         return make_blocker("template_graph_error", summary="template graph traversal error", detail=detail, source="legacy", retryable=True)
     if failure.startswith("invalid BRAID_REFINE") or "invalid braid_refine" in detail_lower:
         return make_blocker("invalid_braid_refine", summary="invalid BRAID_REFINE contract", detail=detail, source="legacy", retryable=False)
+    if _is_validator_malfunction(detail):
+        return make_blocker("validator_malfunction", summary="validator malfunctioned while assessing the task", detail=detail, source="legacy", retryable=True)
     if false_claim:
         return make_blocker("false_blocker_claim", summary="false blocker claim", detail=detail, source="legacy", retryable=False)
+    if "budget" in detail_lower and any(token in detail_lower for token in ("exhaust", "limit", "max_budget", "max budget")):
+        return make_blocker("claude_budget_exhausted", summary="Claude budget exhausted", detail=detail, source="legacy", retryable=False)
     if "repo-memory secret-scan hit" in detail_lower or "detect-secrets findings" in detail_lower:
         return make_blocker("runtime_policy_stale", summary="worker runtime policy stale", detail=detail, source="legacy", retryable=True)
+    if "shared lock" in detail_lower and "acquire" in detail_lower:
+        return make_blocker("worker_crash_lock_contention", summary="worker crashed on shared lock contention", detail=detail, source="legacy", retryable=True)
+    if "worker crash" in detail_lower and "timeout" in detail_lower:
+        return make_blocker("worker_crash_subprocess_timeout", summary="worker subprocess timed out", detail=detail, source="legacy", retryable=True)
+    if "worker crash" in detail_lower and ("oom" in detail_lower or "out of memory" in detail_lower or "killed" in detail_lower):
+        return make_blocker("worker_crash_oom_killed", summary="worker process was killed by the runtime", detail=detail, source="legacy", retryable=False)
+    if "worker crash" in detail_lower and "git" in detail_lower:
+        return make_blocker("worker_crash_git_failure", summary="worker crashed during a git operation", detail=detail, source="legacy", retryable=True)
     if "worker crash" in detail_lower:
-        return make_blocker("worker_crash", summary="worker crashed mid-task", detail=detail, source="legacy", retryable=True)
+        return make_blocker("worker_crash_unhandled", summary="worker crashed mid-task", detail=detail, source="legacy", retryable=True)
     if "git', 'worktree', 'add'" in failure and "255" in failure:
         return make_blocker("worktree_create_failed", summary="git worktree creation failed", detail=detail, source="legacy", retryable=True)
     if "unknown project" in detail_lower:
@@ -2906,7 +2999,7 @@ AUTO_HANDLE_COMMENT_AUTHORS = {
     "github-advanced-security",
 }
 
-PR_SWEEP_MAX_FEEDBACK_ROUNDS = 20
+PR_SWEEP_MAX_FEEDBACK_ROUNDS = 8
 
 
 def _pr_body_has_orchestrator_mention(body):
@@ -3208,6 +3301,49 @@ def _write_pr_alert(project_name, target_id, pr_number, reason, pr_url):
         "",
     ]
     alert_path.write_text("\n".join(body))
+    return alert_path
+
+
+def _write_workflow_alert(issue, reason):
+    feature_id = issue.get("feature_id") or "env:global"
+    issue_key = issue.get("issue_key") or f"{feature_id}:{issue.get('kind') or 'workflow'}"
+    event_key = f"workflow-alert:{issue_key}"
+    if not should_push_alert(event_key, 6 * 3600):
+        return None
+
+    ts = dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", issue_key)[:120]
+    alert_path = REPORT_DIR / f"workflow-alert_{slug}_{ts}.md"
+    blocker = issue.get("blocker") or {}
+    lines = [
+        f"# WORKFLOW ATTENTION — {issue.get('project') or 'unknown-project'}",
+        "",
+        f"- feature: `{feature_id}`",
+        f"- issue_key: `{issue_key}`",
+        f"- kind: `{issue.get('kind') or '-'}`",
+        f"- task: `{issue.get('task_id') or '-'}`",
+        f"- blocker: `{blocker.get('code') or '-'}`",
+        f"- reason: {reason}",
+        f"- time: {now_iso()}",
+        "",
+    ]
+    if blocker.get("detail"):
+        lines.extend(["## Blocker Detail", "", blocker.get("detail"), ""])
+    if blocker.get("code") in ("slot_paused", "claude_budget_exhausted"):
+        lines.extend([
+            "## Operator Action",
+            "",
+            "Resume the paused slot explicitly:",
+            '`python3 bin/orchestrator.py slot-resume claude --reason "workflow-check recovery"`',
+            "",
+        ])
+    else:
+        lines.extend([
+            "workflow-check could not recover this lane autonomously and has escalated it for human attention.",
+            "",
+        ])
+    alert_path.write_text("\n".join(lines))
     return alert_path
 
 
@@ -6141,7 +6277,7 @@ def _self_repair_issue_live(issue):
     if not task_id:
         return False
     found = find_task(task_id)
-    return bool(found and found[0] not in ("done", "failed", "abandoned"))
+    return bool(found and found[0] in ("queued", "claimed", "running"))
 
 
 def _self_repair_pending_issues(feature):
@@ -6150,11 +6286,10 @@ def _self_repair_pending_issues(feature):
 
 
 def _self_repair_has_active_work(feature):
-    feature_id = (feature or {}).get("feature_id")
-    if not feature_id:
-        return False
-    for item in _feature_related_tasks(feature_id):
-        if item.get("state") not in ("done", "abandoned"):
+    for issue in (((feature or {}).get("self_repair") or {}).get("issues") or []):
+        if issue.get("status") not in (None, "pending", "scheduled", "resolved", "rejected"):
+            return True
+        if _self_repair_issue_live(issue):
             return True
     return False
 
@@ -6275,11 +6410,16 @@ def self_repair_reopen_issue(
         for issue in issues:
             if issue.get("issue_key") != issue_key:
                 continue
+            prior_task_id = issue.get("planner_task_id")
             issue["status"] = "pending"
             issue["planner_task_id"] = None
             issue["reopened_at"] = reopened_at
             issue["last_seen_at"] = reopened_at
             issue["reopen_count"] = int(issue.get("reopen_count", 0) or 0) + 1
+            superseded = list(issue.get("superseded_task_ids") or [])
+            if prior_task_id and prior_task_id not in superseded:
+                superseded.append(prior_task_id)
+            issue["superseded_task_ids"] = superseded
             if summary:
                 issue["summary"] = summary[:240]
             if evidence:
@@ -8527,6 +8667,35 @@ def _suppress_superseded_follow_ups(items):
 def feature_workflow_summary(feature):
     """Build a compact workflow summary with event-backed timing for the frontier task."""
     feature_id = feature.get("feature_id")
+    state_rank = {
+        "running": 0,
+        "claimed": 1,
+        "queued": 2,
+        "awaiting-review": 3,
+        "awaiting-qa": 4,
+        "blocked": 5,
+        "failed": 6,
+        "abandoned": 7,
+        "missing": 8,
+        "done": 9,
+        None: 10,
+    }
+
+    def frontier_sort_key(item):
+        task = item.get("task") or {}
+        created_at = task.get("created_at") or ""
+        try:
+            created_rank = -int(dt.datetime.fromisoformat(created_at).timestamp()) if created_at else 0
+        except ValueError:
+            created_rank = 0
+        return (
+            state_rank.get(item.get("state"), 99),
+            -int(bool(task)),
+            -(1 if item.get("state") in ("running", "claimed", "queued", "awaiting-review", "awaiting-qa") else 0),
+            created_rank,
+            item.get("task_id") or "",
+        )
+
     child_ids = set(feature.get("child_task_ids", []))
     children = []
     for child_id in feature.get("child_task_ids", []):
@@ -8538,10 +8707,10 @@ def feature_workflow_summary(feature):
             children.append({"task_id": child_id, "state": state, "task": task})
 
     frontier = None
-    for child in children:
-        if child["state"] != "done":
-            frontier = child
-            break
+    child_frontier = [child for child in children if child["state"] != "done"]
+    if child_frontier:
+        child_frontier.sort(key=frontier_sort_key)
+        frontier = child_frontier[0]
 
     follow_ups = []
     if frontier is None:
@@ -8556,7 +8725,7 @@ def feature_workflow_summary(feature):
                 continue
             follow_ups.append(item)
         follow_ups = _suppress_superseded_follow_ups(follow_ups)
-        follow_ups.sort(key=_follow_up_frontier_key)
+        follow_ups.sort(key=lambda item: (frontier_sort_key(item), _follow_up_frontier_key(item)))
         if follow_ups:
             frontier = follow_ups[0]
 
@@ -8795,6 +8964,85 @@ def _workflow_check_abandon_task(task, state, reason):
     return True
 
 
+def _workflow_check_mark_ready_for_merge(feature, issue, reason):
+    task = issue.get("task")
+    state = issue.get("task_state")
+    if task and state in ("failed", "blocked"):
+        _workflow_check_abandon_task(
+            task,
+            state,
+            reason=f"workflow-check: {reason[:120]}",
+        )
+
+    feature_id = feature["feature_id"]
+    def mut(f):
+        sweep = dict(f.get("final_pr_sweep") or {})
+        sweep["merge_ready_at"] = now_iso()
+        sweep["merge_ready_reason"] = reason
+        sweep["feedback_task_id"] = None
+        sweep["last_feedback_task_id"] = None
+        f["final_pr_sweep"] = sweep
+    update_feature(feature_id, mut)
+    append_event(
+        "workflow-check",
+        "final_pr_merge_ready",
+        feature_id=feature_id,
+        task_id=issue.get("task_id"),
+        details={"reason": reason, "final_pr_number": feature.get("final_pr_number")},
+    )
+    return True
+
+
+def _repair_project_main_checkout(project):
+    repo_path = pathlib.Path(project["path"])
+    if not repo_path.exists():
+        return {"fixed": False, "detail": f"missing repo path: {repo_path}"}
+    branch = repo_status(repo_path).get("branch")
+    if branch and branch != "main":
+        return {"fixed": False, "detail": f"refusing to auto-repair non-main branch: {branch}"}
+
+    changes = []
+    dirty = repo_status(repo_path).get("dirty")
+    if dirty:
+        stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        proc = subprocess.run(
+            ["git", "-C", str(repo_path), "stash", "push", "-u", "-m", f"orchestrator-auto-main-repair-{stamp}"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        if proc.returncode != 0:
+            return {"fixed": False, "detail": (proc.stderr or proc.stdout or "git stash failed").strip()[:240]}
+        changes.append("git stash push -u")
+
+    for cmd in (
+        ["git", "-C", str(repo_path), "fetch", "origin", "main"],
+        ["git", "-C", str(repo_path), "checkout", "main"],
+        ["git", "-C", str(repo_path), "pull", "--ff-only", "origin", "main"],
+    ):
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False)
+        if proc.returncode != 0:
+            return {"fixed": False, "detail": (proc.stderr or proc.stdout or "git repair failed").strip()[:240], "changes": changes}
+    fixed = _project_main_preflight_issue(project) is None
+    return {"fixed": fixed, "detail": "project main checkout repaired" if fixed else "project main checkout still dirty", "changes": changes}
+
+
+def _repair_qa_contract(task):
+    cfg = load_config()
+    try:
+        project = get_project(cfg, task["project"])
+    except KeyError:
+        return {"fixed": False, "detail": f"unknown project: {task.get('project')}"}
+    contract_kind = ((task.get("engine_args") or {}).get("contract") or "smoke").strip()
+    script_rel = ((task.get("engine_args") or {}).get("script") or ((project.get("qa") or {}).get(contract_kind) or "")).strip()
+    if not script_rel:
+        return {"fixed": False, "detail": f"qa.{contract_kind} missing from project config"}
+    restored, detail = _restore_project_file_from_head(project["path"], script_rel)
+    script_abs = pathlib.Path(project["path"]) / script_rel
+    return {"fixed": bool(script_abs.exists()), "detail": detail or str(script_abs), "restored": restored}
+
+
 def _workflow_policy_matches(policy, issue, task, project):
     if policy.get("kind") and issue.get("kind") != policy["kind"]:
         return False
@@ -8925,11 +9173,70 @@ def _workflow_policy_decision(issue, task, project):
     return None, issue.get("diagnosis") or "workflow issue detected", None
 
 
+def _issue_with_policy(issue, task, project):
+    action, diagnosis, policy = _workflow_policy_decision(issue, task, project)
+    issue["action"] = action
+    issue["diagnosis"] = diagnosis
+    issue["policy"] = policy
+    return issue
+
+
 def _workflow_check_known_task_action(task, state, project):
     blocker = task_blocker(task)
     issue = {"kind": "frontier_task_blocked", "task_state": state, "blocker": blocker}
     action, diagnosis, _ = _workflow_policy_decision(issue, task, project)
     return action, diagnosis
+
+
+def _latest_dead_finalizing_follow_up(feature_id, feedback_task_id=None):
+    follow_up = None
+    if feedback_task_id:
+        found = find_task(feedback_task_id)
+        if found and found[0] in ("failed", "blocked"):
+            return {"task_id": feedback_task_id, "state": found[0], "task": found[1]}
+
+    items = []
+    for item in _feature_related_tasks(feature_id):
+        task = item.get("task") or {}
+        if task.get("role") == "planner":
+            continue
+        if item.get("state") not in ("failed", "blocked"):
+            continue
+        if _follow_up_repair_key(item) is None:
+            continue
+        items.append(item)
+    items = _suppress_superseded_follow_ups(items)
+    items.sort(
+        key=lambda item: (
+            (item.get("task") or {}).get("created_at") or "",
+            item.get("task_id") or "",
+        ),
+        reverse=True,
+    )
+    return items[0] if items else None
+
+
+def _workflow_pr_snapshot(project, feature):
+    snap = _gh_pr_snapshot(project["path"], feature["final_pr_number"])
+    if not snap.get("error"):
+        return snap
+
+    sweep = dict(feature.get("final_pr_sweep") or {})
+    mergeable = sweep.get("last_mergeable") or ""
+    merge_state = sweep.get("last_merge_state") or ""
+    review_decision = sweep.get("last_review_decision") or ""
+    if not any((mergeable, merge_state, review_decision, sweep.get("last_checked_at"))):
+        return snap
+    return {
+        "state": "OPEN",
+        "mergeable": mergeable,
+        "mergeStateStatus": merge_state,
+        "reviewDecision": review_decision,
+        "statusCheckRollup": [],
+        "unresolved_bot_threads": sweep.get("unresolved_bot_threads"),
+        "cached": True,
+        "error": snap.get("error"),
+    }
 
 
 def _workflow_issue_from_summary(feature, workflow, config):
@@ -8986,7 +9293,7 @@ def _workflow_issue_from_summary(feature, workflow, config):
                         return {
                             **issue,
                         }
-            return {
+            issue = {
                 "feature_id": feature_id,
                 "project": project["name"],
                 "summary": feature.get("summary") or feature_id,
@@ -8997,9 +9304,9 @@ def _workflow_issue_from_summary(feature, workflow, config):
                 "blocker": make_blocker("feature_has_no_children", summary="feature has no child tasks", detail="feature is open but has no child tasks to make progress", source="workflow-check", retryable=False),
                 "diagnosis": "feature is open but has no child tasks to make progress",
                 "workflow": workflow,
-                "action": None,
                 "task": None,
             }
+            return _issue_with_policy(issue, None, project)
 
         if _feature_ready_for_finalize(feature):
             issue = {
@@ -9019,10 +9326,94 @@ def _workflow_issue_from_summary(feature, workflow, config):
                 **issue,
             }
 
+    if feature_status == "finalizing" and feature.get("final_pr_number"):
+        snap = _workflow_pr_snapshot(project, feature)
+        merge_state = snap.get("mergeStateStatus", "")
+        mergeable = snap.get("mergeable", "")
+        review_decision = snap.get("reviewDecision", "")
+        sweep = dict(feature.get("final_pr_sweep") or {})
+        if (
+            sweep.get("merge_ready_at")
+            and not sweep.get("feedback_task_id")
+            and not sweep.get("last_feedback_task_id")
+            and mergeable == "MERGEABLE"
+            and merge_state == "CLEAN"
+            and review_decision != "CHANGES_REQUESTED"
+        ):
+            return None
+        if snap.get("state") == "OPEN" and (
+            merge_state in ("BLOCKED", "UNSTABLE", "DIRTY", "BEHIND")
+            or mergeable == "CONFLICTING"
+            or review_decision == "CHANGES_REQUESTED"
+        ):
+            issue = {
+                "feature_id": feature_id,
+                "project": project["name"],
+                "summary": feature.get("summary") or feature_id,
+                "issue_key": f"final-pr:{feature.get('final_pr_number')}:{merge_state}:{review_decision}",
+                "kind": "final_pr_blocked",
+                "task_id": None,
+                "task_state": "finalizing",
+                "blocker": make_blocker(
+                    "final_pr_blocked",
+                    summary="final PR is blocked",
+                    detail=(
+                        f"mergeStateStatus={merge_state or '-'}, "
+                        f"mergeable={mergeable or '-'}, reviewDecision={review_decision or '-'}"
+                    ),
+                    source="workflow-check",
+                    retryable=True,
+                ),
+                "workflow": workflow,
+                "task": None,
+            }
+            issue["action"], issue["diagnosis"], issue["policy"] = _workflow_policy_decision(issue, None, project)
+            return {
+                **issue,
+            }
+        if (
+            snap.get("state") == "OPEN"
+            and mergeable == "MERGEABLE"
+            and merge_state == "CLEAN"
+            and review_decision != "CHANGES_REQUESTED"
+        ):
+            follow_up = _latest_dead_finalizing_follow_up(
+                feature_id,
+                sweep.get("feedback_task_id") or sweep.get("last_feedback_task_id"),
+            )
+            if follow_up:
+                task = follow_up.get("task")
+                blocker = task_blocker(task or {})
+                issue = {
+                    "feature_id": feature_id,
+                    "project": project["name"],
+                    "summary": feature.get("summary") or feature_id,
+                    "issue_key": f"finalize-follow-up-dead:{feature_id}:{follow_up.get('task_id')}:{follow_up.get('state')}",
+                    "kind": "finalize_follow_up_dead",
+                    "task_id": follow_up.get("task_id"),
+                    "task_state": follow_up.get("state"),
+                    "blocker": make_blocker(
+                        "finalize_follow_up_dead",
+                        summary="clean final PR is blocked by a dead follow-up lane",
+                        detail=(
+                            f"final PR #{feature.get('final_pr_number')} is CLEAN/MERGEABLE but "
+                            f"follow-up task {follow_up.get('task_id')} is {follow_up.get('state')}"
+                            + (f" ({(blocker or {}).get('code')})" if blocker else "")
+                        ),
+                        source="workflow-check",
+                        retryable=True,
+                        metadata={"follow_up_task_id": follow_up.get("task_id")},
+                    ),
+                    "diagnosis": "final PR is mergeable but the last repair lane died; surface merge readiness and retire the dead follow-up",
+                    "workflow": workflow,
+                    "task": task,
+                }
+                return _issue_with_policy(issue, task, project)
+
     if frontier.get("state") == "missing" and frontier.get("task_id"):
         child_id = frontier["task_id"]
         if not find_task(child_id):
-            return {
+            issue = {
                 "feature_id": feature_id,
                 "project": project["name"],
                 "summary": feature.get("summary") or feature_id,
@@ -9033,9 +9424,9 @@ def _workflow_issue_from_summary(feature, workflow, config):
                 "blocker": make_blocker("missing_child", summary="feature child task file missing", detail="feature child task file is missing from the queue state tree", source="workflow-check", retryable=False),
                 "diagnosis": "feature child task file is missing from the queue state tree",
                 "workflow": workflow,
-                "action": None,
                 "task": None,
             }
+            return _issue_with_policy(issue, None, project)
     if frontier.get("task_id") and frontier.get("state") in ("failed", "blocked", "abandoned"):
         found = find_task(frontier["task_id"])
         if found:
@@ -9156,41 +9547,6 @@ def _workflow_issue_from_summary(feature, workflow, config):
                 return issue
             return None
 
-    if feature_status == "finalizing" and feature.get("final_pr_number"):
-        snap = _gh_pr_snapshot(project["path"], feature["final_pr_number"])
-        merge_state = snap.get("mergeStateStatus", "")
-        mergeable = snap.get("mergeable", "")
-        review_decision = snap.get("reviewDecision", "")
-        if snap.get("state") == "OPEN" and (
-            merge_state in ("BLOCKED", "UNSTABLE", "DIRTY", "BEHIND")
-            or mergeable == "CONFLICTING"
-            or review_decision == "CHANGES_REQUESTED"
-        ):
-            issue = {
-                "feature_id": feature_id,
-                "project": project["name"],
-                "summary": feature.get("summary") or feature_id,
-                "issue_key": f"final-pr:{feature.get('final_pr_number')}:{merge_state}:{review_decision}",
-                "kind": "final_pr_blocked",
-                "task_id": None,
-                "task_state": "finalizing",
-                "blocker": make_blocker(
-                    "final_pr_blocked",
-                    summary="final PR is blocked",
-                    detail=(
-                        f"mergeStateStatus={merge_state or '-'}, "
-                        f"mergeable={mergeable or '-'}, reviewDecision={review_decision or '-'}"
-                    ),
-                    source="workflow-check",
-                    retryable=True,
-                ),
-                "workflow": workflow,
-                "task": None,
-            }
-            issue["action"], issue["diagnosis"], issue["policy"] = _workflow_policy_decision(issue, None, project)
-            return {
-                **issue,
-            }
     return None
 
 
@@ -9503,6 +9859,45 @@ def tick_workflow_check():
             elif action == "enqueue_qa":
                 cached_action("tick_qa", tick_qa)
                 outcome = "qa sweep enqueued"
+            elif action == "repair_main_then_retry":
+                repair = cached_action(
+                    f"repair_main:{issue.get('project')}",
+                    lambda: _repair_project_main_checkout(project),
+                )
+                ok = False
+                if repair.get("fixed") and issue.get("task"):
+                    ok = _workflow_check_retry_task(
+                        issue["task"],
+                        issue["task_state"],
+                        reason="workflow-check: project main checkout repaired, retrying task",
+                    )
+                outcome = (
+                    f"project-main repair fixed={repair.get('fixed')} detail={repair.get('detail')}; "
+                    f"{'task requeued' if ok else 'retry deferred'}"
+                )
+            elif action == "repair_qa_then_retry":
+                repair = cached_action(
+                    f"repair_qa:{issue.get('task_id')}",
+                    lambda: _repair_qa_contract(issue["task"]),
+                )
+                ok = False
+                if repair.get("fixed") and issue.get("task"):
+                    ok = _workflow_check_retry_task(
+                        issue["task"],
+                        issue["task_state"],
+                        reason="workflow-check: QA contract repaired, retrying task",
+                    )
+                outcome = (
+                    f"qa-contract repair fixed={repair.get('fixed')} detail={repair.get('detail')}; "
+                    f"{'task requeued' if ok else 'retry deferred'}"
+                )
+            elif action == "mark_ready_for_merge":
+                ok = _workflow_check_mark_ready_for_merge(
+                    feature,
+                    issue,
+                    reason=issue["diagnosis"],
+                )
+                outcome = "dead follow-up retired; feature marked merge-ready" if ok else "mark-merge-ready failed"
             elif action == "enqueue_self_repair":
                 out = cached_action(
                     f"self_repair:{issue['issue_key']}",
@@ -9515,6 +9910,9 @@ def tick_workflow_check():
                     ),
                 )
                 outcome = f"self-repair result: {json.dumps(out, sort_keys=True)}"
+            elif action == "push_alert":
+                alert_path = _write_workflow_alert(issue, issue["diagnosis"])
+                outcome = f"operator alert written: {alert_path}" if alert_path else "operator alert already recently sent"
             else:
                 outcome = f"unknown action {action}"
 

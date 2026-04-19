@@ -156,6 +156,31 @@ def _pause_claude_slot_if_needed(reason, *, task=None):
     return True
 
 
+def _classify_worker_crash(exc, tb_text=""):
+    """Map worker crashes onto typed blocker codes so workflow-check can repair them.
+
+    >>> _classify_worker_crash(TimeoutError("could not acquire shared lock lvc-standard.lock"))
+    ('worker_crash_lock_contention', True)
+    >>> import subprocess
+    >>> _classify_worker_crash(subprocess.TimeoutExpired(["git"], 30))
+    ('worker_crash_subprocess_timeout', True)
+    >>> _classify_worker_crash(RuntimeError("git fetch failed"))
+    ('worker_crash_git_failure', True)
+    """
+    import subprocess
+
+    detail = " ".join(part for part in (str(exc or ""), tb_text or "") if part).lower()
+    if ("shared lock" in detail or ".lock" in detail) and "acquire" in detail:
+        return "worker_crash_lock_contention", True
+    if isinstance(exc, subprocess.TimeoutExpired) or "timed out" in detail or "timeout" in detail:
+        return "worker_crash_subprocess_timeout", True
+    if "oom" in detail or "out of memory" in detail or "killed" in detail:
+        return "worker_crash_oom_killed", False
+    if "git " in detail or "git'" in detail or "git:" in detail or "git-" in detail:
+        return "worker_crash_git_failure", True
+    return "worker_crash_unhandled", True
+
+
 def _claude_budget_flag(kind, *, cfg, task=None, mode=None):
     return f"{o.claude_budget_usd(kind, cfg=cfg, task=task, mode=mode):.2f}"
 
@@ -1871,6 +1896,29 @@ def _run_specialized_review_gate(
     return result
 
 
+def _review_gate_protocol_failure(task_id, target_id, gate_name, error, *, summary):
+    _mark_review_target_for_retry(
+        target_id,
+        error,
+        blocker_code="review_gate_protocol_error",
+        metadata={"gate_name": gate_name},
+    )
+    o.append_event(
+        "review-gate",
+        "protocol_error",
+        task_id=task_id,
+        details={"target_task_id": target_id, "gate_name": gate_name, "error": str(error)[:240]},
+    )
+    fail_task(
+        task_id,
+        "running",
+        str(error),
+        blocker_code="review_gate_protocol_error",
+        summary=summary,
+        retryable=True,
+    )
+
+
 def _run_review_agent(kind, *, prompt, worktree, timeout, logf, last_msg_path):
     if kind == "codex":
         cmd = [
@@ -2517,6 +2565,7 @@ def self_repair_council_prompt(task, project, memory_ctx):
 
 SELF_REPAIR_REASONING_BLOCKERS = {
     "false_blocker_claim",
+    "validator_malfunction",
     "template_graph_error",
     "qa_target_missing",
     "qa_smoke_failed",
@@ -2537,15 +2586,26 @@ def _self_repair_issue_ref(task):
     }
 
 
+def _is_validator_malfunction(detail):
+    lower = (detail or "").lower()
+    if "orchestrator.json" not in lower:
+        return False
+    return any(token in lower for token in ("validatesmoke", "validatecanary", "smoke", "canary", "lint-templates"))
+
+
 def _parse_council_json(raw):
     m = re.search(r"\{.*\}", raw or "", re.DOTALL)
     if not m:
         raise ValueError("no json object in council output")
-    return json.loads(m.group(0))
+    parsed = json.loads(m.group(0))
+    if not isinstance(parsed, dict):
+        raise ValueError("council output must decode to a JSON object")
+    return parsed
 
 
 def _run_self_repair_council(
     *,
+    task,
     stage,
     panel,
     prompt_body,
@@ -2603,11 +2663,14 @@ def _run_self_repair_council(
     if last_msg_path:
         last_msg_path.write_text(raw)
     if proc.returncode != 0:
+        if _claude_budget_exhausted(proc.stderr or raw or ""):
+            _pause_claude_slot_if_needed((proc.stderr or raw or f"claude exit {proc.returncode}"))
+            return {"error": "claude budget exhausted", "blocker_code": "claude_budget_exhausted"}
         return {"error": (proc.stderr or raw or f"claude exit {proc.returncode}").strip()[:400]}
     try:
         data = _parse_council_json(raw)
     except Exception as exc:
-        return {"error": f"invalid council output: {exc}"}
+        return {"error": f"invalid council output: {exc}", "blocker_code": "review_gate_protocol_error"}
     data.setdefault("panel", list(panel))
     data.setdefault("stage", stage)
     data["raw"] = raw
@@ -2647,6 +2710,12 @@ def _self_repair_reopen_current_issue(task, *, blocker_code, reason, deliberatio
     evidence = ref["issue_evidence"]
     if reason:
         evidence = (evidence + "\n\n[REOPEN REASON]\n" + reason).strip()
+    if deliberation and task.get("task_id"):
+        deliberation = dict(deliberation)
+        prior = list(deliberation.get("superseded_task_ids") or [])
+        if task["task_id"] not in prior:
+            prior.append(task["task_id"])
+        deliberation["superseded_task_ids"] = prior
     return o.self_repair_reopen_issue(
         ref["feature_id"],
         ref["issue_key"],
@@ -2674,6 +2743,7 @@ def _run_self_repair_pre_execute_council(task, project, worktree, timeout, memor
         f"[PROJECT MEMORY]\n{memory_ctx}\n"
     )
     result = _run_self_repair_council(
+        task=task,
         stage="pre_execute",
         panel=panel,
         prompt_body=prompt_body,
@@ -2684,6 +2754,23 @@ def _run_self_repair_pre_execute_council(task, project, worktree, timeout, memor
     if not result.get("error"):
         _self_repair_record_council(task, "pre_execute", result)
     return result
+
+
+def _qa_contract_preflight(project, contract_kind, script_rel):
+    if not script_rel:
+        return {"ok": False, "error": f"no qa.{contract_kind} in config", "summary": "QA contract missing"}
+    script_abs = pathlib.Path(project["path"]) / script_rel
+    if script_abs.exists() and script_abs.is_file():
+        return {"ok": True, "script_abs": script_abs}
+    restored, detail = _restore_project_file_from_head(project["path"], script_rel)
+    if script_abs.exists() and script_abs.is_file():
+        return {"ok": True, "script_abs": script_abs, "restored": restored, "detail": detail}
+    return {
+        "ok": False,
+        "error": f"script missing: {script_abs}",
+        "summary": "QA script missing",
+        "detail": detail or str(script_abs),
+    }
 
 
 def _run_self_repair_blocker_verifier(task, project, worktree, timeout, blocker_code, detail, memory_ctx):
@@ -2699,6 +2786,7 @@ def _run_self_repair_blocker_verifier(task, project, worktree, timeout, blocker_
         f"[PROJECT MEMORY]\n{memory_ctx}\n"
     )
     result = _run_self_repair_council(
+        task=task,
         stage="blocker_verifier",
         panel=panel,
         prompt_body=prompt_body,
@@ -2726,6 +2814,7 @@ def _run_self_repair_final_adjudication(task, target, target_wt, target_base, ch
         f"[PROJECT MEMORY]\n{memory_ctx}\n"
     )
     result = _run_self_repair_council(
+        task=task,
         stage="final_adjudication",
         panel=panel,
         prompt_body=prompt_body,
@@ -3079,7 +3168,7 @@ def enqueue_braid_refine(task, project_name, trailer, *, from_state):
         return
 
     rounds = int(task.get("refine_round", 0))
-    if rounds >= 1:
+    if rounds >= 3:
         o.braid_template_record_use(bt, topology_error=True)
         regen = o.request_template_regen(
             bt,
@@ -3587,7 +3676,7 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
         )
         if codex_result.get("error"):
             o.braid_template_record_use(reviewer_template, topology_error=True)
-            blocker = "llm_timeout" if "timeout" in codex_result["error"] else "llm_exit_error"
+            blocker = codex_result.get("blocker_code") or ("llm_timeout" if "timeout" in codex_result["error"] else "llm_exit_error")
             _mark_review_target_for_retry(target_id, codex_result["error"])
             fail_task(task_id, "running", codex_result["error"],
                       blocker_code=blocker, summary="codex reviewer failed", retryable=True)
@@ -3640,7 +3729,7 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
             )
             if claude_result.get("error"):
                 o.braid_template_record_use(reviewer_template, topology_error=True)
-                blocker = "llm_timeout" if "timeout" in claude_result["error"] else "llm_exit_error"
+                blocker = claude_result.get("blocker_code") or ("llm_timeout" if "timeout" in claude_result["error"] else "llm_exit_error")
                 _mark_review_target_for_retry(target_id, claude_result["error"])
                 fail_task(task_id, "running", claude_result["error"],
                           blocker_code=blocker, summary="claude reviewer failed", retryable=True)
@@ -3682,26 +3771,36 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
 
         if final_verdict == "approve":
             for gate_name in gate_names:
-                gate_result = _run_specialized_review_gate(
-                    gate_name,
-                    task_id=task_id,
-                    target=target,
-                    target_wt=target_wt,
-                    target_base=target_base,
-                    changed_files=changed_files,
-                    diff_text=diff_text,
-                    roadmap_ctx=roadmap_ctx,
-                    memory_ctx=memory_ctx,
-                    panel=gate_panels.get(gate_name) or review_panel,
-                    timeout=review_timeout,
-                    logf=logf,
-                )
+                try:
+                    gate_result = _run_specialized_review_gate(
+                        gate_name,
+                        task_id=task_id,
+                        target=target,
+                        target_wt=target_wt,
+                        target_base=target_base,
+                        changed_files=changed_files,
+                        diff_text=diff_text,
+                        roadmap_ctx=roadmap_ctx,
+                        memory_ctx=memory_ctx,
+                        panel=gate_panels.get(gate_name) or review_panel,
+                        timeout=review_timeout,
+                        logf=logf,
+                    )
+                except Exception as exc:
+                    _review_gate_protocol_failure(
+                        task_id,
+                        target_id,
+                        gate_name,
+                        f"{gate_name} raised {exc.__class__.__name__}: {exc}",
+                        summary=f"{gate_name} protocol failure",
+                    )
+                    return
                 if gate_result.get("error"):
                     blocker = gate_result.get("blocker_code") or "review_gate_protocol_error"
                     _mark_review_target_for_retry(
                         target_id,
                         gate_result["error"],
-                        blocker_code="review_gate_protocol_error",
+                        blocker_code=blocker,
                         metadata={"gate_name": gate_name},
                     )
                     o.append_event(
@@ -3752,26 +3851,36 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
 
         self_repair_adjudication = None
         if final_verdict == "approve" and is_self_repair_target:
-            self_repair_adjudication = _run_self_repair_final_adjudication(
-                target,
-                target,
-                target_wt,
-                target_base,
-                changed_files,
-                diff_text,
-                combined_findings,
-                memory_ctx,
-                review_timeout,
-            )
+            try:
+                self_repair_adjudication = _run_self_repair_final_adjudication(
+                    target,
+                    target,
+                    target_wt,
+                    target_base,
+                    changed_files,
+                    diff_text,
+                    combined_findings,
+                    memory_ctx,
+                    review_timeout,
+                )
+            except Exception as exc:
+                _review_gate_protocol_failure(
+                    task_id,
+                    target_id,
+                    "self-repair-adjudication",
+                    f"self-repair-adjudication raised {exc.__class__.__name__}: {exc}",
+                    summary="self-repair final adjudication failed",
+                )
+                return
             if self_repair_adjudication.get("error"):
                 _mark_review_target_for_retry(
                     target_id,
                     self_repair_adjudication["error"],
-                    blocker_code="review_gate_protocol_error",
+                    blocker_code=self_repair_adjudication.get("blocker_code") or "review_gate_protocol_error",
                     metadata={"gate_name": "self-repair-adjudication"},
                 )
                 fail_task(task_id, "running", self_repair_adjudication["error"],
-                          blocker_code="review_gate_protocol_error", summary="self-repair final adjudication failed", retryable=True)
+                          blocker_code=self_repair_adjudication.get("blocker_code") or "review_gate_protocol_error", summary="self-repair final adjudication failed", retryable=True)
                 return
             combined_findings = (combined_findings + "\n\n" + self_repair_adjudication.get("raw", "")).strip()
             final_verdict = "approve" if self_repair_adjudication.get("verdict") == "approve" else (
@@ -3851,10 +3960,10 @@ def _handle_review_request_change(reviewer_task_id, project_name, target, review
     """Route reviewer request_change into feedback retry or terminal failure.
 
     >>> _review_request_change_doctest()
-    ((('move', 'failed', 'review rounds exhausted (20)', 21), ('alert', 'review rounds exhausted (20)')), (('enqueue', 2, 'review-address-feedback'), ('move', 'queued', 'review feedback round 2', 2)))
+    ((('move', 'failed', 'review rounds exhausted (8)', 21), ('alert', 'review rounds exhausted (8)')), (('enqueue', 2, 'review-address-feedback'), ('move', 'queued', 'review feedback round 2', 2)))
     """
     rounds = int(target.get("review_feedback_rounds", 0)) + 1
-    MAX_ROUNDS = 20
+    MAX_ROUNDS = 8
     target_id = target["task_id"]
     if rounds > MAX_ROUNDS:
         def mut_fail_target(t):
@@ -4873,7 +4982,7 @@ def run_codex_slot(task, cfg):
             if pre_execute.get("error"):
                 _self_repair_reopen_current_issue(
                     task,
-                    blocker_code="llm_exit_error",
+                    blocker_code=pre_execute.get("blocker_code") or "llm_exit_error",
                     reason=pre_execute["error"],
                     deliberation={
                         "stage": "pre_execute",
@@ -4980,21 +5089,22 @@ def run_codex_slot(task, cfg):
                 # enqueue a useless regen, do NOT block downstream work
                 # on this project.
                 if self_repair_meta.get("enabled"):
+                    blocker_code = "validator_malfunction" if _is_validator_malfunction(trailer) else "false_blocker_claim"
                     verifier = _run_self_repair_blocker_verifier(
                         task,
                         project,
                         wt_path,
                         timeout,
-                        "false_blocker_claim",
+                        blocker_code,
                         trailer,
                         memory_ctx,
                     )
                     _self_repair_reopen_current_issue(
                         task,
-                        blocker_code="false_blocker_claim",
-                        reason=verifier.get("reason") or f"false blocker claim: {trailer[:120]}",
+                        blocker_code=blocker_code,
+                        reason=verifier.get("reason") or f"{blocker_code}: {trailer[:120]}",
                         deliberation={**verifier, "stage": "blocker_verifier", "task_id": task_id},
-                        summary_suffix="replan",
+                        summary_suffix="validator-malfunction" if blocker_code == "validator_malfunction" else "replan",
                     )
                     def mut_abandon_false(t):
                         t["finished_at"] = o.now_iso()
@@ -5013,18 +5123,20 @@ def run_codex_slot(task, cfg):
                     t["finished_at"] = o.now_iso()
                     t["topology_error"] = None
                     t["false_blocker_claim"] = trailer
+                    blocker_code = "validator_malfunction" if _is_validator_malfunction(trailer) else "false_blocker_claim"
                     o.set_task_blocker(
                         t,
-                        "false_blocker_claim",
-                        summary="false blocker claim",
+                        blocker_code,
+                        summary="validator malfunction" if blocker_code == "validator_malfunction" else "false blocker claim",
                         detail=trailer,
                         source="worker",
-                        retryable=False,
+                        retryable=True if blocker_code == "validator_malfunction" else False,
                     )
                 fail_task(
                     task_id, "running", f"false blocker claim: {trailer[:80]}",
-                    blocker_code="false_blocker_claim", summary="false blocker claim",
-                    retryable=False, mutator=mut_fail_false,
+                    blocker_code="validator_malfunction" if _is_validator_malfunction(trailer) else "false_blocker_claim",
+                    summary="validator malfunction" if _is_validator_malfunction(trailer) else "false blocker claim",
+                    retryable=True if _is_validator_malfunction(trailer) else False, mutator=mut_fail_false,
                 )
                 return
             if topology_reason_code(trailer) == "baseline_red":
@@ -5297,9 +5409,10 @@ def run_qa_slot(task, cfg):
     # engine_args.script lets a test harness or one-off task swap the contract
     # script without editing config (e.g., synthetic regression simulators).
     script_rel = eargs.get("script") or qa_cfg.get(contract_kind)
-    if not script_rel:
-        fail_task(task_id, "claimed", f"no qa.{contract_kind} in config",
-                  blocker_code="qa_contract_error", summary="QA contract missing", retryable=False)
+    preflight = _qa_contract_preflight(project, contract_kind, script_rel)
+    if not preflight.get("ok"):
+        fail_task(task_id, "claimed", preflight["error"],
+                  blocker_code="qa_contract_error", summary=preflight.get("summary") or "QA contract missing", detail=preflight.get("detail"), retryable=False)
         return
 
     # Resolve target + script path + cwd based on contract.
@@ -5371,29 +5484,21 @@ def run_qa_slot(task, cfg):
         # Always run the canonical smoke.sh (latest version) but point REPO_ROOT
         # at the worktree so it tests the worktree's code. This avoids stale
         # smoke.sh copies in worktrees created before script edits.
-        script_abs = pathlib.Path(project["path"]) / script_rel
+        script_abs = pathlib.Path(preflight["script_abs"])
         run_cwd = target_wt
         smoke_env_repo_root = target_wt
     else:  # regression
-        script_abs = pathlib.Path(project["path"]) / script_rel
+        script_abs = pathlib.Path(preflight["script_abs"])
         run_cwd = project["path"]
         smoke_env_repo_root = None
-
-    if not script_abs.exists():
-        restored, detail = _restore_project_file_from_head(project["path"], script_rel)
-        if restored and script_abs.exists():
-            o.append_event(
-                "qa",
-                "qa_script_restored",
-                task_id=task_id,
-                feature_id=task.get("feature_id"),
-                details={"project": project["name"], "script": script_rel},
-            )
-        else:
-            fail_task(task_id, "claimed", f"script missing: {script_abs}",
-                      blocker_code="qa_contract_error", summary="QA script missing", detail=detail,
-                      retryable=False)
-            return
+    if preflight.get("restored"):
+        o.append_event(
+            "qa",
+            "qa_script_restored",
+            task_id=task_id,
+            feature_id=task.get("feature_id"),
+            details={"project": project["name"], "script": script_rel},
+        )
 
     timeout = eargs.get(
         "timeout_sec",
@@ -5824,13 +5929,23 @@ def main():
     except Exception as exc:
         import traceback
         log_path = o.LOGS_DIR / f"{task['task_id']}.log"
+        tb_text = traceback.format_exc()
         with log_path.open("a") as f:
-            f.write(f"\n# worker crashed:\n{traceback.format_exc()}\n")
+            f.write(f"\n# worker crashed:\n{tb_text}\n")
         o.record_worker_crash(slot, task_id=task["task_id"], detail=str(exc))
-        # Best-effort: try to move the task to failed wherever it is now.
+        blocker_code, retryable = _classify_worker_crash(exc, tb_text)
+        # Best-effort: move through the normal failure path so blocker metadata is persisted.
         for st in ("running", "claimed"):
             if o.task_path(task["task_id"], st).exists():
-                o.move_task(task["task_id"], st, "failed", reason=f"worker crash: {exc}")
+                fail_task(
+                    task["task_id"],
+                    st,
+                    f"worker crash: {exc}",
+                    blocker_code=blocker_code,
+                    summary="worker crashed mid-task",
+                    detail=f"{exc}\n\n{tb_text[-4000:]}".strip(),
+                    retryable=retryable,
+                )
                 break
     finally:
         o.clear_claim_pid(task["task_id"])
