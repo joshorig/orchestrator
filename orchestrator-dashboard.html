@@ -6,216 +6,779 @@
   <title>devmini orchestrator dashboard</title>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
   <style>
+    * { box-sizing: border-box; }
     :root {
       --bg: #020617;
-      --surface: rgba(15, 23, 42, 0.72);
+      --bg-2: #06111f;
+      --surface: rgba(15, 23, 42, 0.78);
+      --surface-2: rgba(15, 23, 42, 0.52);
       --border: #1e293b;
+      --border-strong: #334155;
       --text: #e2e8f0;
       --muted: #94a3b8;
+      --dim: #64748b;
       --cyan: #22d3ee;
       --emerald: #34d399;
       --amber: #fbbf24;
+      --orange: #fb923c;
       --rose: #fb7185;
+      --violet: #a78bfa;
+      --slate: #64748b;
     }
-    * { box-sizing: border-box; }
     body {
       margin: 0;
+      min-height: 100vh;
       padding: 20px;
-      background: radial-gradient(circle at top, rgba(34,211,238,0.12), transparent 30%), var(--bg);
+      background:
+        radial-gradient(circle at top left, rgba(34, 211, 238, 0.12), transparent 26%),
+        radial-gradient(circle at top right, rgba(167, 139, 250, 0.08), transparent 22%),
+        linear-gradient(180deg, var(--bg-2), var(--bg));
       color: var(--text);
       font: 12px/1.5 "JetBrains Mono", monospace;
     }
-    h1, h2, p { margin: 0; }
-    .header, .grid { display: grid; gap: 16px; }
-    .header { grid-template-columns: 1.4fr 1fr 1fr 1fr; margin-bottom: 16px; }
-    .grid { grid-template-columns: 1.4fr 1fr; }
+    a { color: var(--cyan); text-decoration: none; }
+    h1, h2, h3, p { margin: 0; }
+    code { color: var(--cyan); font-family: inherit; }
+    .header {
+      display: grid;
+      grid-template-columns: minmax(280px, 1.5fr) 2fr;
+      gap: 16px;
+      margin-bottom: 16px;
+      align-items: start;
+    }
     .card {
       background: var(--surface);
       border: 1px solid var(--border);
-      border-radius: 14px;
+      border-radius: 16px;
       padding: 16px;
-      backdrop-filter: blur(10px);
+      backdrop-filter: blur(12px);
+      box-shadow: 0 20px 60px rgba(2, 6, 23, 0.28);
     }
-    .title { display: flex; flex-direction: column; gap: 6px; }
-    .subtitle, .muted { color: var(--muted); }
-    .metric { font-size: 28px; font-weight: 700; margin-top: 8px; }
-    .metric.ok { color: var(--emerald); }
-    .metric.warn { color: var(--amber); }
-    .metric.crit { color: var(--rose); }
-    .list { display: grid; gap: 10px; }
-    .row {
+    .title-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+    .pulse {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: var(--cyan);
+      box-shadow: 0 0 18px rgba(34, 211, 238, 0.7);
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(0.82); }
+    }
+    .title h1 { font-size: 20px; }
+    .subtitle { color: var(--muted); margin-bottom: 8px; }
+    .timestamp { color: var(--dim); font-size: 11px; }
+    .scorecards {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(130px, 1fr));
+      gap: 12px;
+    }
+    .tile {
       border: 1px solid var(--border);
-      border-radius: 10px;
+      border-radius: 14px;
+      padding: 12px;
+      background: var(--surface-2);
+      cursor: pointer;
+      transition: transform 0.12s ease, border-color 0.12s ease;
+    }
+    .tile:hover { transform: translateY(-1px); border-color: var(--border-strong); }
+    .tile.active { border-color: var(--cyan); box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.4) inset; }
+    .tile-label {
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 10px;
+      margin-bottom: 6px;
+    }
+    .tile-value { font-size: 24px; font-weight: 700; }
+    .tile-sub { color: var(--dim); margin-top: 4px; font-size: 11px; }
+    .ok { color: var(--emerald); }
+    .warn { color: var(--amber); }
+    .crit { color: var(--rose); }
+    .filter-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 0 0 16px;
+      min-height: 28px;
+    }
+    .filter-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid rgba(34, 211, 238, 0.35);
+      border-radius: 999px;
+      padding: 4px 10px;
+      background: rgba(34, 211, 238, 0.08);
+      color: var(--cyan);
+      font-size: 11px;
+    }
+    .filter-pill button {
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      padding: 0;
+      font: inherit;
+    }
+    .filter-hint { color: var(--dim); font-size: 11px; }
+    .layout {
+      display: grid;
+      grid-template-columns: 280px minmax(0, 1fr) 330px;
+      gap: 16px;
+    }
+    .section-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: baseline;
+      margin-bottom: 12px;
+    }
+    .section-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+    }
+    .section-sub { font-size: 11px; color: var(--dim); }
+    .stack { display: grid; gap: 16px; }
+    .agent-list, .feature-list, .mini-list { display: grid; gap: 10px; }
+    .agent-row, .mini-row, .task-row, .event-row {
+      border: 1px solid var(--border);
+      border-radius: 12px;
       padding: 10px 12px;
       background: rgba(15, 23, 42, 0.45);
     }
-    .row strong, .accent { color: var(--cyan); }
-    .chip {
+    .agent-row.active { border-color: var(--cyan); }
+    .agent-top, .mini-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: baseline;
+      margin-bottom: 6px;
+    }
+    .agent-role { color: var(--text); font-weight: 700; }
+    .status-badge, .state-chip, .tag, .queue-pill {
       display: inline-block;
-      padding: 2px 8px;
       border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 10px;
       border: 1px solid var(--border);
       color: var(--muted);
-      margin-right: 6px;
-      margin-top: 6px;
+      text-transform: lowercase;
     }
-    .chip.blocked, .chip.failed { color: var(--rose); border-color: rgba(251,113,133,0.45); }
-    .chip.awaiting-review { color: var(--amber); border-color: rgba(251,191,36,0.45); }
-    .chip.running { color: var(--emerald); border-color: rgba(52,211,153,0.45); }
-    .section-title { margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
-    @media (max-width: 960px) {
-      .header, .grid { grid-template-columns: 1fr; }
+    .status-running, .state-running { color: var(--emerald); border-color: rgba(52, 211, 153, 0.45); }
+    .status-idle, .state-queued, .state-claimed, .state-done { color: var(--cyan); border-color: rgba(34, 211, 238, 0.4); }
+    .status-queued, .state-awaiting-review, .state-awaiting-qa { color: var(--amber); border-color: rgba(251, 191, 36, 0.45); }
+    .status-failed, .status-blocked, .state-blocked, .state-failed, .state-abandoned { color: var(--rose); border-color: rgba(251, 113, 133, 0.45); }
+    .agent-detail, .mini-detail, .muted { color: var(--muted); }
+    .tiny { color: var(--dim); font-size: 11px; }
+    .feature-card {
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 14px;
+      background: rgba(15, 23, 42, 0.52);
+    }
+    .feature-card.stale { border-left: 4px solid var(--amber); }
+    .feature-card.blocked { border-left: 4px solid var(--rose); }
+    .feature-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 8px;
+    }
+    .feature-id { font-size: 14px; font-weight: 700; }
+    .feature-project {
+      color: var(--amber);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-top: 2px;
+    }
+    .feature-summary { color: var(--text); margin-bottom: 10px; }
+    .feature-meta, .feature-frontier, .feature-delivery, .feature-repair {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .meta-box, .frontier-box, .delivery-box, .repair-box, .tasks-box, .events-box {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px;
+      background: rgba(2, 6, 23, 0.28);
+    }
+    .box-k {
+      color: var(--dim);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 10px;
+      margin-bottom: 4px;
+    }
+    .box-v { color: var(--text); }
+    .task-list, .event-list { display: grid; gap: 8px; }
+    .task-row.frontier { border-color: rgba(251, 113, 133, 0.45); }
+    .task-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 6px;
+      align-items: baseline;
+      flex-wrap: wrap;
+    }
+    .task-id { color: var(--cyan); }
+    .task-summary { color: var(--text); margin-bottom: 6px; }
+    .task-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+    }
+    .tag {
+      border-radius: 8px;
+      text-transform: none;
+      padding: 2px 6px;
+    }
+    .tag.blocker { color: var(--rose); border-color: rgba(251, 113, 133, 0.35); }
+    .tag.review { color: var(--amber); border-color: rgba(251, 191, 36, 0.35); }
+    .event-row {
+      display: grid;
+      grid-template-columns: auto auto 1fr;
+      gap: 8px;
+      align-items: baseline;
+    }
+    .event-role { color: var(--cyan); }
+    .event-name { color: var(--text); }
+    .queue-bar {
+      display: flex;
+      border-radius: 12px;
+      overflow: hidden;
+      background: rgba(15, 23, 42, 0.55);
+      height: 24px;
+      margin-bottom: 12px;
+    }
+    .queue-seg {
+      min-width: 2px;
+      cursor: pointer;
+      transition: filter 0.12s ease;
+    }
+    .queue-seg:hover { filter: brightness(1.2); }
+    .queue-seg.active { box-shadow: 0 0 0 2px rgba(226, 232, 240, 0.5) inset; }
+    .queue-legend {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .queue-item {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: center;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 8px 10px;
+      background: rgba(15, 23, 42, 0.4);
+      cursor: pointer;
+    }
+    .queue-item.active { border-color: var(--cyan); }
+    .queue-name {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--muted);
+    }
+    .queue-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+    }
+    td {
+      padding: 8px 4px;
+      border-top: 1px solid var(--border);
+    }
+    tr:first-child td { border-top: 0; }
+    tr.active td { background: rgba(34, 211, 238, 0.08); }
+    tr.clickable { cursor: pointer; }
+    td.right { text-align: right; }
+    td.code { color: var(--rose); font-weight: 700; }
+    .empty {
+      color: var(--dim);
+      font-style: italic;
+      text-align: center;
+      padding: 16px 8px;
+    }
+    @media (max-width: 1280px) {
+      .layout { grid-template-columns: 1fr; }
+      .header { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 900px) {
+      .scorecards { grid-template-columns: repeat(2, minmax(130px, 1fr)); }
+      .feature-meta, .feature-frontier, .feature-delivery, .feature-repair { grid-template-columns: 1fr; }
+      .queue-legend { grid-template-columns: 1fr; }
     }
   </style>
 </head>
 <body>
   <section class="header">
     <div class="card title">
-      <h1>devmini orchestrator</h1>
-      <p class="subtitle">workflow state, queue, blockers, recent transitions</p>
-      <p class="muted" id="timestamp">loading…</p>
+      <div class="title-row">
+        <span class="pulse"></span>
+        <h1>devmini orchestrator</h1>
+      </div>
+      <p class="subtitle">workflow state, feature frontier, queue pressure, blockers, self-repair, and delivery state</p>
+      <p class="timestamp" id="timestamp">loading…</p>
     </div>
-    <div class="card">
-      <p class="section-title">Environment</p>
-      <div class="metric" id="envMetric">-</div>
-      <p class="muted" id="envSub">-</p>
-    </div>
-    <div class="card">
-      <p class="section-title">Workflow Issues</p>
-      <div class="metric" id="issueMetric">-</div>
-      <p class="muted" id="issueSub">-</p>
-    </div>
-    <div class="card">
-      <p class="section-title">Frontier Blocked</p>
-      <div class="metric" id="blockedMetric">-</div>
-      <p class="muted" id="blockedSub">-</p>
-    </div>
+    <div class="scorecards" id="scorecards"></div>
   </section>
 
-  <section class="grid">
-    <div class="card">
-      <p class="section-title">Features</p>
-      <div class="list" id="features"></div>
-    </div>
-    <div class="list">
+  <div class="filter-bar" id="filters"></div>
+
+  <section class="layout">
+    <aside class="stack">
       <div class="card">
-        <p class="section-title">Dashboard Server</p>
-        <div class="list" id="dashboardServer"></div>
+        <div class="section-head">
+          <span class="section-title">Agent Roster</span>
+          <span class="section-sub" id="agentCount">-</span>
+        </div>
+        <div class="agent-list" id="agents"></div>
       </div>
       <div class="card">
-        <p class="section-title">Queue</p>
-        <div class="list" id="queue"></div>
+        <div class="section-head">
+          <span class="section-title">Dashboard Server</span>
+          <span class="section-sub">live config</span>
+        </div>
+        <div class="mini-list" id="server"></div>
       </div>
       <div class="card">
-        <p class="section-title">Blockers</p>
-        <div class="list" id="blockers"></div>
+        <div class="section-head">
+          <span class="section-title">Claude Budget</span>
+          <span class="section-sub">24h hit tail</span>
+        </div>
+        <div class="mini-list" id="budget"></div>
+      </div>
+    </aside>
+
+    <main class="stack">
+      <div class="card">
+        <div class="section-head">
+          <span class="section-title">Feature Pipeline</span>
+          <span class="section-sub" id="featureCount">-</span>
+        </div>
+        <div class="feature-list" id="features"></div>
+      </div>
+    </main>
+
+    <aside class="stack">
+      <div class="card">
+        <div class="section-head">
+          <span class="section-title">Queue Depth</span>
+          <span class="section-sub" id="queueTotal">-</span>
+        </div>
+        <div class="queue-bar" id="queueBar"></div>
+        <div class="queue-legend" id="queueLegend"></div>
       </div>
       <div class="card">
-        <p class="section-title">Claude Budget</p>
-        <div class="list" id="claudeBudget"></div>
+        <div class="section-head">
+          <span class="section-title">Blocker Codes</span>
+          <span class="section-sub" id="blockerCount">-</span>
+        </div>
+        <table><tbody id="blockers"></tbody></table>
       </div>
       <div class="card">
-        <p class="section-title">Recent Transitions</p>
-        <div class="list" id="transitions"></div>
+        <div class="section-head">
+          <span class="section-title">Recent Transitions</span>
+          <span class="section-sub">tail</span>
+        </div>
+        <div class="mini-list" id="transitions"></div>
       </div>
-    </div>
+    </aside>
   </section>
 
   <script>
-    const feedUrl = "state/runtime/dashboard-feed.json";
+    const FEED_URL = "state/runtime/dashboard-feed.json";
+    const FILTERS = {
+      project: null,
+      frontierState: null,
+      blockerCode: null,
+      agentStatus: null,
+    };
+    const QUEUE_COLORS = {
+      queued: "#22d3ee",
+      claimed: "#0ea5e9",
+      running: "#34d399",
+      blocked: "#fb7185",
+      "awaiting-review": "#fbbf24",
+      "awaiting-qa": "#fb923c",
+      done: "#64748b",
+      failed: "#f43f5e",
+      abandoned: "#94a3b8",
+    };
+    let latestData = null;
 
     function esc(value) {
-      return String(value ?? "").replace(/[&<>]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[ch]));
+      return String(value ?? "").replace(/[&<>"]/g, ch => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        "\"": "&quot;"
+      }[ch]));
     }
 
-    function metricClass(ok, warn) {
-      if (ok) return "metric ok";
-      if (warn) return "metric warn";
-      return "metric crit";
+    function metricTone(ok, warn) {
+      if (ok) return "ok";
+      if (warn) return "warn";
+      return "crit";
+    }
+
+    function queueColor(state) {
+      return QUEUE_COLORS[state] || "#64748b";
+    }
+
+    function formatTs(ts) {
+      if (!ts) return "-";
+      return ts.replace("T", " ").replace("Z", "");
+    }
+
+    function activeFilters() {
+      return Object.entries(FILTERS).filter(([, value]) => value);
+    }
+
+    function setFilter(key, value) {
+      FILTERS[key] = FILTERS[key] === value ? null : value;
+      render(latestData);
+    }
+
+    function clearFilter(key) {
+      FILTERS[key] = null;
+      render(latestData);
+    }
+
+    function renderFilters() {
+      const rows = activeFilters();
+      const host = document.getElementById("filters");
+      if (!rows.length) {
+        host.innerHTML = `<span class="filter-hint">No filters active. Click a scorecard, queue state, blocker code, project tag, or agent status to focus the view.</span>`;
+        return;
+      }
+      host.innerHTML = rows.map(([key, value]) => `
+        <span class="filter-pill">
+          <span>${esc(key)}=${esc(value)}</span>
+          <button type="button" onclick="clearFilter('${esc(key)}')">x</button>
+        </span>
+      `).join("");
+    }
+
+    function featureMatches(feature) {
+      if (FILTERS.project && feature.project !== FILTERS.project) return false;
+      if (FILTERS.frontierState && (feature.frontier?.state || "") !== FILTERS.frontierState) return false;
+      if (FILTERS.blockerCode && ((feature.frontier?.blocker?.code || "") !== FILTERS.blockerCode)) return false;
+      return true;
+    }
+
+    function renderScorecards(data) {
+      const envOk = Number(data.health.environment_ok) === 1 && Number(data.health.environment_error_count) === 0;
+      const issues = Number(data.health.workflow_check_issue_count || 0);
+      const blocked = Number(data.health.feature_frontier_blocked_count || 0);
+      const open = Number(data.health.feature_open_count || 0);
+      const running = (data.queue || []).find(row => row.state === "running")?.count || 0;
+      const tiles = [
+        {
+          key: "environment",
+          label: "Environment",
+          value: envOk ? "OK" : `${data.health.environment_error_count}`,
+          sub: envOk ? "runtime healthy" : "blocking errors",
+          tone: metricTone(envOk, !envOk && Number(data.health.environment_error_count) < 3),
+          onClick: ""
+        },
+        {
+          key: "workflow",
+          label: "Workflow Issues",
+          value: issues,
+          sub: "workflow-check findings",
+          tone: metricTone(issues === 0, issues < 3),
+          onClick: ""
+        },
+        {
+          key: "blocked",
+          label: "Frontier Blocked",
+          value: `${blocked}/${open}`,
+          sub: "open features",
+          tone: metricTone(blocked === 0, blocked < 3),
+          onClick: "setFilter('frontierState','blocked')"
+        },
+        {
+          key: "running",
+          label: "Running Tasks",
+          value: running,
+          sub: "active queue",
+          tone: metricTone(running > 0, running === 0),
+          onClick: "setFilter('frontierState','running')"
+        }
+      ];
+      document.getElementById("scorecards").innerHTML = tiles.map(tile => `
+        <div class="tile ${FILTERS.frontierState && tile.key === FILTERS.frontierState ? "active" : ""}" ${tile.onClick ? `onclick="${tile.onClick}"` : ""}>
+          <div class="tile-label">${esc(tile.label)}</div>
+          <div class="tile-value ${tile.tone}">${esc(tile.value)}</div>
+          <div class="tile-sub">${esc(tile.sub)}</div>
+        </div>
+      `).join("");
+    }
+
+    function renderAgents(data) {
+      const rows = (data.agents || []).filter(row => !FILTERS.agentStatus || row.status === FILTERS.agentStatus);
+      document.getElementById("agentCount").textContent = `${rows.length}/${data.agents.length} visible`;
+      document.getElementById("agents").innerHTML = rows.length ? rows.map(row => `
+        <div class="agent-row ${FILTERS.agentStatus === row.status ? "active" : ""}">
+          <div class="agent-top">
+            <span class="agent-role">${esc(row.role)}</span>
+            <span class="status-badge status-${esc(row.status)}" onclick="event.stopPropagation(); setFilter('agentStatus','${esc(row.status)}')">${esc(row.status)}</span>
+          </div>
+          <div class="agent-detail">${esc(row.detail || "No detail.")}</div>
+          <div class="tiny">updated ${esc(formatTs(row.updated_at))}</div>
+        </div>
+      `).join("") : `<div class="empty">No agents match the active filter.</div>`;
+    }
+
+    function renderServer(data) {
+      const server = data.dashboard_server || {};
+      document.getElementById("server").innerHTML = `
+        <div class="mini-row">
+          <div class="mini-top"><strong>URL</strong><span class="tiny">dashboard</span></div>
+          <div><a href="${esc(server.dashboard_url || "#")}">${esc(server.dashboard_url || "-")}</a></div>
+        </div>
+        <div class="mini-row">
+          <div class="mini-top"><strong>Bind</strong><span class="tiny">listener</span></div>
+          <div class="mini-detail">${esc(server.host || "-")}:${esc(server.port || "-")}</div>
+        </div>
+        <div class="mini-row">
+          <div class="mini-top"><strong>Allowed CIDRs</strong><span class="tiny">${esc((server.allowed_cidrs || []).length)} entries</span></div>
+          <div class="mini-detail">${esc((server.allowed_cidrs || []).join(", "))}</div>
+        </div>
+      `;
+    }
+
+    function renderBudget(data) {
+      const budget = data.claude_budget || {};
+      const configured = budget.configured || {};
+      const recent = budget.recent_hits || [];
+      const lanes = Object.keys(configured);
+      const laneRows = lanes.map(name => `
+        <div class="mini-row">
+          <div class="mini-top"><strong>${esc(name)}</strong><span class="tiny">$${Number(configured[name] || 0).toFixed(2)}</span></div>
+          <div class="mini-detail">24h cap hits: ${esc((budget.hits_24h || {})[name] || 0)}</div>
+        </div>
+      `).join("");
+      const recentRows = recent.length ? recent.slice(-4).reverse().map(hit => `
+        <div class="mini-row">
+          <div class="mini-top"><strong>${esc(hit.lane)}</strong><span class="tiny">${esc(formatTs(hit.ts))}</span></div>
+          <div class="mini-detail">${esc(hit.project || hit.role || "-")}</div>
+        </div>
+      `).join("") : `<div class="empty">No cap hits in the last 24h.</div>`;
+      document.getElementById("budget").innerHTML = laneRows + recentRows;
+    }
+
+    function renderQueue(data) {
+      const queue = data.queue || [];
+      const total = queue.reduce((sum, row) => sum + Number(row.count || 0), 0);
+      document.getElementById("queueTotal").textContent = `${total} tasks`;
+      document.getElementById("queueBar").innerHTML = queue.map(row => {
+        const count = Number(row.count || 0);
+        const width = total ? Math.max((count / total) * 100, count > 0 ? 1.5 : 0) : 0;
+        return `<div class="queue-seg ${FILTERS.frontierState === row.state ? "active" : ""}" onclick="setFilter('frontierState','${esc(row.state)}')" style="width:${width}%;background:${queueColor(row.state)}" title="${esc(row.state)} ${count}"></div>`;
+      }).join("");
+      document.getElementById("queueLegend").innerHTML = queue.map(row => `
+        <div class="queue-item ${FILTERS.frontierState === row.state ? "active" : ""}" onclick="setFilter('frontierState','${esc(row.state)}')">
+          <span class="queue-name"><span class="queue-dot" style="background:${queueColor(row.state)}"></span>${esc(row.state)}</span>
+          <span class="queue-pill">${esc(row.count)}</span>
+        </div>
+      `).join("");
+    }
+
+    function renderBlockers(data) {
+      const blockers = data.blocker_codes || [];
+      document.getElementById("blockerCount").textContent = blockers.length ? `${blockers.length} active codes` : "0 active";
+      document.getElementById("blockers").innerHTML = blockers.length ? blockers.map(row => `
+        <tr class="clickable ${FILTERS.blockerCode === row.code ? "active" : ""}" onclick="setFilter('blockerCode','${esc(row.code)}')">
+          <td class="code">${esc(row.code)}</td>
+          <td class="right">${esc(row.count)}</td>
+          <td class="right tiny">${esc(row.pct_of_blocked)}%</td>
+        </tr>
+      `).join("") : `<tr><td colspan="3" class="empty">No blocked tasks.</td></tr>`;
+    }
+
+    function renderTransitions(data) {
+      const rows = data.recent_transitions || [];
+      document.getElementById("transitions").innerHTML = rows.length ? rows.slice(-10).reverse().map(row => `
+        <div class="mini-row">
+          <div class="mini-top"><strong>${esc(row.task_id)}</strong><span class="tiny">${esc(formatTs(row.ts))}</span></div>
+          <div class="mini-detail">${esc(row.from_state)} → ${esc(row.to_state)}</div>
+          <div class="tiny">${esc(row.reason || "")}</div>
+        </div>
+      `).join("") : `<div class="empty">No recent transitions.</div>`;
+    }
+
+    function renderFeature(feature) {
+      const tasks = feature.tasks || [];
+      const events = feature.recent_events || [];
+      const delivery = feature.delivery || {};
+      const repair = feature.self_repair || {};
+      const stale = Number(feature.frontier?.age_seconds || 0) > 3600;
+      const blocked = feature.frontier?.state === "blocked" || Boolean(feature.frontier?.blocker?.code);
+      const childStates = Object.entries(feature.child_states || {});
+      const followUpStates = Object.entries(feature.follow_up_states || {});
+      return `
+        <div class="feature-card ${stale ? "stale" : ""} ${blocked ? "blocked" : ""}">
+          <div class="feature-top">
+            <div>
+              <div class="feature-id">${esc(feature.feature_id)}</div>
+              <div class="feature-project" onclick="setFilter('project','${esc(feature.project)}')">${esc(feature.project)}</div>
+            </div>
+            <div>
+              <span class="state-chip state-${esc(feature.status || "open")}">${esc(feature.status || "open")}</span>
+            </div>
+          </div>
+
+          <div class="feature-summary">${esc(feature.summary || "")}</div>
+
+          <div class="feature-meta">
+            <div class="meta-box">
+              <div class="box-k">Roadmap</div>
+              <div class="box-v">${esc(feature.roadmap?.id || "-")} ${feature.roadmap?.title ? `· ${esc(feature.roadmap.title)}` : ""}</div>
+              <div class="tiny">${esc(feature.roadmap?.source || feature.branch || "")}</div>
+            </div>
+            <div class="meta-box">
+              <div class="box-k">Created</div>
+              <div class="box-v">${esc(formatTs(feature.created_at))}</div>
+              <div class="tiny">${esc(feature.branch || "")}</div>
+            </div>
+          </div>
+
+          <div class="feature-frontier">
+            <div class="frontier-box">
+              <div class="box-k">Frontier</div>
+              <div class="box-v">
+                <span class="state-chip state-${esc(feature.frontier?.state || "queued")}" onclick="setFilter('frontierState','${esc(feature.frontier?.state || "queued")}')">${esc(feature.frontier?.state || "-")}</span>
+                ${feature.frontier?.task_id ? `<code>${esc(feature.frontier.task_id)}</code>` : ""}
+              </div>
+              <div class="tiny">age ${esc(feature.frontier?.age_text || "-")} · attempt ${esc(feature.frontier?.attempt || "-")}</div>
+              <div class="mini-detail">${esc(feature.frontier?.reason || "")}</div>
+            </div>
+            <div class="frontier-box">
+              <div class="box-k">Blocker</div>
+              <div class="box-v">${feature.frontier?.blocker?.code ? `<span class="tag blocker" onclick="setFilter('blockerCode','${esc(feature.frontier.blocker.code)}')">${esc(feature.frontier.blocker.code)}</span>` : "none"}</div>
+              <div class="mini-detail">${esc(feature.frontier?.blocker?.detail || feature.frontier?.blocker?.summary || "")}</div>
+            </div>
+          </div>
+
+          <div class="feature-delivery">
+            <div class="delivery-box">
+              <div class="box-k">Delivery</div>
+              <div class="box-v">${delivery.final_pr_url ? `<a href="${esc(delivery.final_pr_url)}">PR #${esc(delivery.final_pr_number || "-")}</a>` : "no final PR"}</div>
+              <div class="tiny">finalized ${esc(formatTs(delivery.finalized_at))} · merged ${esc(formatTs(delivery.merged_at))}</div>
+            </div>
+            <div class="delivery-box">
+              <div class="box-k">PR Sweep</div>
+              <div class="box-v">feedback rounds ${esc((delivery.final_pr_sweep || {}).feedback_rounds || 0)}</div>
+              <div class="tiny">unresolved bot threads ${esc((delivery.final_pr_sweep || {}).unresolved_bot_threads || 0)} · mergeable ${esc((delivery.final_pr_sweep || {}).last_mergeable || "-")}</div>
+            </div>
+          </div>
+
+          <div class="feature-repair">
+            <div class="repair-box">
+              <div class="box-k">Self Repair</div>
+              <div class="box-v">${repair.enabled ? esc(repair.status || "enabled") : "disabled"}</div>
+              <div class="tiny">${esc(repair.issue_count || 0)} attached issues</div>
+            </div>
+            <div class="repair-box">
+              <div class="box-k">Task Spread</div>
+              <div class="box-v">${childStates.length} child · ${followUpStates.length} follow-up</div>
+              <div class="tiny">${childStates.map(([, state]) => state).join(", ") || "no child tasks recorded"}</div>
+            </div>
+          </div>
+
+          <div class="tasks-box" style="margin-bottom:10px;">
+            <div class="box-k">Tasks</div>
+            <div class="task-list">
+              ${tasks.length ? tasks.map(task => `
+                <div class="task-row ${task.is_frontier ? "frontier" : ""}">
+                  <div class="task-head">
+                    <div>
+                      <div class="task-id">${esc(task.task_id)}</div>
+                      <div class="tiny">${esc(task.kind)} · ${esc(task.role || "-")} · ${esc(task.engine || "-")}</div>
+                    </div>
+                    <div>
+                      <span class="state-chip state-${esc(task.state || "queued")}">${esc(task.state || "-")}</span>
+                    </div>
+                  </div>
+                  <div class="task-summary">${esc(task.summary || "")}</div>
+                  <div class="task-meta">
+                    <span class="tag">attempt ${esc(task.attempt || 1)}</span>
+                    ${task.blocker?.code ? `<span class="tag blocker">${esc(task.blocker.code)}</span>` : ""}
+                    ${task.review_verdict ? `<span class="tag review">review ${esc(task.review_verdict)}</span>` : ""}
+                    ${task.review_feedback_rounds ? `<span class="tag review">feedback ${esc(task.review_feedback_rounds)}</span>` : ""}
+                    ${task.resolve_thread_failures ? `<span class="tag blocker">thread failures ${esc(task.resolve_thread_failures)}</span>` : ""}
+                    ${task.artifacts_count ? `<span class="tag">artifacts ${esc(task.artifacts_count)}</span>` : ""}
+                  </div>
+                  <div class="tiny">created ${esc(formatTs(task.created_at))} · started ${esc(formatTs(task.started_at))} · finished ${esc(formatTs(task.finished_at))}</div>
+                </div>
+              `).join("") : `<div class="empty">No task detail exported for this feature.</div>`}
+            </div>
+          </div>
+
+          <div class="events-box">
+            <div class="box-k">Recent Workflow Events</div>
+            <div class="event-list">
+              ${events.length ? events.map(event => `
+                <div class="event-row">
+                  <span class="tiny">${esc(formatTs(event.ts))}</span>
+                  <span class="event-role">${esc(event.role || "-")}</span>
+                  <span><span class="event-name">${esc(event.event || "-")}</span> <span class="tiny">${esc(event.task_id || "")}</span></span>
+                </div>
+              `).join("") : `<div class="empty">No recent feature events.</div>`}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderFeatures(data) {
+      const rows = (data.features || []).filter(featureMatches);
+      document.getElementById("featureCount").textContent = `${rows.length}/${data.features.length} visible`;
+      document.getElementById("features").innerHTML = rows.length ? rows.map(renderFeature).join("") : `<div class="empty">No features match the active filters.</div>`;
     }
 
     function render(data) {
-      document.getElementById("timestamp").textContent = `updated ${data.timestamp}`;
-
-      const envOk = Number(data.health.environment_ok) === 1 && Number(data.health.environment_error_count) === 0;
-      const envMetric = document.getElementById("envMetric");
-      envMetric.className = metricClass(envOk, !envOk && Number(data.health.environment_error_count) < 2);
-      envMetric.textContent = envOk ? "OK" : `${data.health.environment_error_count} errors`;
-      document.getElementById("envSub").textContent = `${data.agents.length} agents visible`;
-
-      const issues = Number(data.health.workflow_check_issue_count || 0);
-      const issueMetric = document.getElementById("issueMetric");
-      issueMetric.className = metricClass(issues === 0, issues > 0 && issues < 3);
-      issueMetric.textContent = issues;
-      document.getElementById("issueSub").textContent = "workflow-check";
-
-      const blocked = Number(data.health.feature_frontier_blocked_count || 0);
-      const blockedMetric = document.getElementById("blockedMetric");
-      blockedMetric.className = metricClass(blocked === 0, blocked > 0 && blocked < 3);
-      blockedMetric.textContent = `${blocked}/${data.health.feature_open_count}`;
-      document.getElementById("blockedSub").textContent = "open features";
-
-      document.getElementById("features").innerHTML = data.features.length ? data.features.map(feature => `
-        <div class="row">
-          <div><strong>${esc(feature.feature_id)}</strong> · ${esc(feature.project)}</div>
-          <div>${esc(feature.summary || "")}</div>
-          <div class="muted">frontier: ${esc(feature.frontier.state || "-")} · ${esc(feature.frontier.task_id || "-")} · ${esc(feature.frontier.age_text || "fresh")}</div>
-          ${feature.frontier.blocker && feature.frontier.blocker.code ? `<span class="chip blocked">${esc(feature.frontier.blocker.code)}</span>` : ""}
-          ${feature.self_repair && feature.self_repair.issue_count ? `<span class="chip">${feature.self_repair.issue_count} self-repair</span>` : ""}
-        </div>
-      `).join("") : `<div class="muted">No open features.</div>`;
-
-      document.getElementById("queue").innerHTML = data.queue.map(row => `
-        <div class="row"><strong>${esc(row.state)}</strong> <span class="accent">${esc(row.count)}</span></div>
-      `).join("");
-
-      document.getElementById("blockers").innerHTML = data.blocker_codes.length ? data.blocker_codes.map(row => `
-        <div class="row"><strong>${esc(row.code)}</strong> <span class="accent">${esc(row.count)}</span> <span class="muted">${esc(row.pct_of_blocked)}%</span></div>
-      `).join("") : `<div class="muted">No blocked tasks.</div>`;
-
-      const server = data.dashboard_server || {};
-      document.getElementById("dashboardServer").innerHTML = `
-        <div class="row">
-          <div><strong>${esc(server.dashboard_url || "-")}</strong></div>
-          <div class="muted">bind ${esc(server.host || "-")}:${esc(server.port || "-")}</div>
-        </div>
-        <div class="row">
-          <div><strong>Allowed CIDRs</strong></div>
-          <div class="muted">${esc((server.allowed_cidrs || []).join(", "))}</div>
-        </div>
-      `;
-
-      const configured = data.claude_budget.configured || {};
-      const hits = data.claude_budget.hits_24h || {};
-      const lanes = Object.keys(configured);
-      document.getElementById("claudeBudget").innerHTML = lanes.map(lane => `
-        <div class="row">
-          <div><strong>${esc(lane)}</strong> <span class="accent">$${esc(configured[lane].toFixed ? configured[lane].toFixed(2) : configured[lane])}</span></div>
-          <div class="muted">24h cap hits: ${esc(hits[lane] || 0)}</div>
-        </div>
-      `).join("") + (
-        data.claude_budget.recent_hits.length
-          ? data.claude_budget.recent_hits.slice(-4).reverse().map(hit => `
-            <div class="row">
-              <div><strong>${esc(hit.lane)}</strong> · ${esc(hit.project || hit.role || "-")}</div>
-              <div class="muted">${esc(hit.ts)}</div>
-            </div>
-          `).join("")
-          : `<div class="muted">No budget-cap hits in the last 24h.</div>`
-      );
-
-      document.getElementById("transitions").innerHTML = data.recent_transitions.length ? data.recent_transitions.slice(-8).reverse().map(row => `
-        <div class="row">
-          <div><strong>${esc(row.task_id)}</strong></div>
-          <div class="muted">${esc(row.from_state)} → ${esc(row.to_state)}</div>
-          <div class="muted">${esc(row.ts)}</div>
-        </div>
-      `).join("") : `<div class="muted">No recent transitions.</div>`;
+      if (!data) return;
+      latestData = data;
+      document.getElementById("timestamp").textContent = `updated ${formatTs(data.timestamp)}`;
+      renderFilters();
+      renderScorecards(data);
+      renderAgents(data);
+      renderServer(data);
+      renderBudget(data);
+      renderQueue(data);
+      renderBlockers(data);
+      renderTransitions(data);
+      renderFeatures(data);
     }
 
     async function refresh() {
-      const response = await fetch(feedUrl, { cache: "no-store" });
-      render(await response.json());
+      const response = await fetch(FEED_URL, { cache: "no-store" });
+      const data = await response.json();
+      render(data);
     }
 
     refresh();
