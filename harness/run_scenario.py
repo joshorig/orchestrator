@@ -253,6 +253,65 @@ def _run_self_repair_resolution(repo_root, scenario):
         }
 
 
+def _run_review_feedback_exhaustion(repo_root, scenario):
+    orchestrator, worker = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        queue_root = root / "queue"
+        for state in orchestrator.STATES:
+            (queue_root / state).mkdir(parents=True, exist_ok=True)
+        old_orch = {
+            "QUEUE_ROOT": orchestrator.QUEUE_ROOT,
+            "REPORT_DIR": orchestrator.REPORT_DIR,
+            "_write_pr_alert": orchestrator._write_pr_alert,
+        }
+        old_worker = {
+            "o": worker.o,
+        }
+        alerts = []
+        orchestrator.QUEUE_ROOT = queue_root
+        orchestrator.REPORT_DIR = root / "reports"
+        worker.o = orchestrator
+        worker.o._write_pr_alert = lambda project_name, target_id, pr_number, reason, pr_url: alerts.append(
+            {"project": project_name, "task_id": target_id, "reason": reason}
+        )
+        try:
+            task = orchestrator.new_task(
+                role="implementer",
+                engine="codex",
+                project=scenario["project"],
+                summary=scenario["summary"],
+                source="scenario-review-feedback-exhaustion",
+                feature_id=scenario["feature_id"],
+                braid_template=scenario["braid_template"],
+            )
+            task["task_id"] = scenario["task_id"]
+            task["state"] = "awaiting-review"
+            task["review_feedback_rounds"] = int(scenario["initial_review_feedback_rounds"])
+            orchestrator.write_json_atomic(orchestrator.task_path(task["task_id"], "awaiting-review"), task)
+            worker._handle_review_request_change(
+                scenario["reviewer_task_id"],
+                scenario["project"],
+                task,
+                scenario["review_findings"],
+                lambda t: t.update({"reviewed_by": scenario["reviewer_task_id"]}),
+            )
+            failed = orchestrator.read_json(orchestrator.task_path(task["task_id"], "failed"), {})
+        finally:
+            orchestrator.QUEUE_ROOT = old_orch["QUEUE_ROOT"]
+            orchestrator.REPORT_DIR = old_orch["REPORT_DIR"]
+            orchestrator._write_pr_alert = old_orch["_write_pr_alert"]
+            worker.o = old_worker["o"]
+        return {
+            "state": failed.get("state"),
+            "blocker_code": ((failed.get("blocker") or {}).get("code")),
+            "retryable": ((failed.get("blocker") or {}).get("retryable")),
+            "review_feedback_rounds": failed.get("review_feedback_rounds"),
+            "failure": failed.get("failure"),
+            "alert_count": len(alerts),
+        }
+
+
 def main(argv):
     if len(argv) != 2:
         raise SystemExit("usage: harness/run_scenario.py <scenario-dir>")
@@ -269,6 +328,8 @@ def main(argv):
         actual = _run_r16_override(repo_root, scenario)
     elif kind == "self_repair_resolution":
         actual = _run_self_repair_resolution(repo_root, scenario)
+    elif kind == "review_feedback_exhaustion":
+        actual = _run_review_feedback_exhaustion(repo_root, scenario)
     else:
         raise SystemExit(f"unknown scenario kind: {kind}")
 

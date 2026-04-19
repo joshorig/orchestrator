@@ -1,0 +1,8 @@
+{
+  "state": "failed",
+  "blocker_code": "review_feedback_exhausted",
+  "retryable": false,
+  "review_feedback_rounds": 9,
+  "failure": "review rounds exhausted (8)",
+  "alert_count": 1
+}

@@ -1,0 +1,12 @@
+{
+  "kind": "review_feedback_exhaustion",
+  "name": "max-rounds-emits-typed-blocker",
+  "task_id": "task-scenario-24",
+  "reviewer_task_id": "reviewer-scenario-24",
+  "feature_id": "feature-scenario-24",
+  "project": "devmini-orchestrator",
+  "summary": "Synthetic review feedback exhaustion",
+  "braid_template": "orchestrator-self-repair",
+  "initial_review_feedback_rounds": 8,
+  "review_findings": "config resolution still prefers canonical orchestrator.local.json"
+}

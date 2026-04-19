@@ -137,6 +137,7 @@ BLOCKER_CODES = (
     "runtime_unknown_project",
     "runtime_precondition_failed",
     "review_gate_protocol_error",
+    "review_feedback_exhausted",
     "claude_budget_exhausted",
     "slot_paused",
     "llm_timeout",
@@ -439,6 +440,13 @@ WORKFLOW_REPAIR_POLICY = (
         "blocker_code": "review_gate_protocol_error",
         "action": "enqueue_reviewer",
         "diagnosis": "review-gate protocol failed; retry the reviewer lane once with typed blocker context",
+    },
+    {
+        "name": "review_feedback_exhausted_alert",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "review_feedback_exhausted",
+        "action": "push_alert",
+        "diagnosis": "review feedback rounds were exhausted and the task now requires human triage",
     },
     {
         "name": "slot_paused_wait",

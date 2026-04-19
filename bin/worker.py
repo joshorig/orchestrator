@@ -4076,7 +4076,7 @@ def _handle_review_request_change(reviewer_task_id, project_name, target, review
     """Route reviewer request_change into feedback retry or terminal failure.
 
     >>> _review_request_change_doctest()
-    ((('move', 'failed', 'review rounds exhausted (8)', 21), ('alert', 'review rounds exhausted (8)')), (('enqueue', 2, 'review-address-feedback'), ('move', 'queued', 'review feedback round 2', 2)))
+    ((('fail', 'review_feedback_exhausted', False, 21), ('alert', 'review rounds exhausted (8)')), (('enqueue', 2, 'review-address-feedback'), ('move', 'queued', 'review feedback round 2', 2)))
     """
     rounds = int(target.get("review_feedback_rounds", 0)) + 1
     MAX_ROUNDS = 8
@@ -4085,9 +4085,15 @@ def _handle_review_request_change(reviewer_task_id, project_name, target, review
         def mut_fail_target(t):
             mut_target(t)
             t["review_feedback_rounds"] = rounds
-        o.move_task(
-            target_id, "awaiting-review", "failed",
-            reason=f"review rounds exhausted ({MAX_ROUNDS})", mutator=mut_fail_target,
+        fail_task(
+            target_id,
+            "awaiting-review",
+            f"review rounds exhausted ({MAX_ROUNDS})",
+            blocker_code="review_feedback_exhausted",
+            summary=f"review rounds exhausted ({MAX_ROUNDS})",
+            detail=review_findings,
+            retryable=False,
+            mutator=mut_fail_target,
         )
         o._write_pr_alert(
             project_name,
@@ -4144,7 +4150,14 @@ def _review_request_change_doctest():
         def _write_pr_alert(self, project_name, target_id, pr_number, reason, pr_url):
             calls.append(("alert", reason))
     old_o = _review_request_change_doctest.__globals__["o"]
+    old_fail_task = _review_request_change_doctest.__globals__["fail_task"]
+    def fake_fail_task(task_id, from_state, reason, **kwargs):
+        body = {"review_feedback_rounds": 0}
+        if kwargs.get("mutator"):
+            kwargs["mutator"](body)
+        calls.append(("fail", kwargs.get("blocker_code"), kwargs.get("retryable"), body.get("review_feedback_rounds")))
     _review_request_change_doctest.__globals__["o"] = FakeO()
+    _review_request_change_doctest.__globals__["fail_task"] = fake_fail_task
     try:
         _handle_review_request_change("reviewer-1", "demo", {"task_id": "task-a", "project": "demo", "feature_id": "f1", "base_branch": "main", "worktree": "/tmp/wt", "review_feedback_rounds": 20}, "need tests", lambda t: t.update({"reviewed_by": "reviewer-1"}))
         exhausted = (calls[0], calls[1])
@@ -4154,6 +4167,7 @@ def _review_request_change_doctest():
         return (exhausted, retried)
     finally:
         _review_request_change_doctest.__globals__["o"] = old_o
+        _review_request_change_doctest.__globals__["fail_task"] = old_fail_task
 
 
 def _complete_review_feedback_target(target_id, target_state, *, task_id, round_no, info):
