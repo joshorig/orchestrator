@@ -181,6 +181,53 @@ def _classify_worker_crash(exc, tb_text=""):
     return "worker_crash_unhandled", True
 
 
+def _handle_worker_crash(task, slot, exc, tb_text):
+    """Persist worker crash state through the typed failure path.
+
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     task_id = "task-lock"
+    ...     calls = []
+    ...     old = {
+    ...         "LOGS_DIR": o.LOGS_DIR,
+    ...         "record_worker_crash": o.record_worker_crash,
+    ...         "task_path": o.task_path,
+    ...         "fail_task": _handle_worker_crash.__globals__["fail_task"],
+    ...     }
+    ...     o.LOGS_DIR = pathlib.Path(tmp)
+    ...     o.record_worker_crash = lambda slot_name, **kwargs: calls.append(("record", slot_name, kwargs["task_id"], kwargs["detail"]))
+    ...     o.task_path = lambda tid, state: pathlib.Path(tmp) / state / f"{tid}.json"
+    ...     (pathlib.Path(tmp) / "claimed").mkdir()
+    ...     _ = (pathlib.Path(tmp) / "claimed" / f"{task_id}.json").write_text("{}")
+    ...     _handle_worker_crash.__globals__["fail_task"] = lambda tid, state, reason, **kwargs: calls.append(("fail", tid, state, reason, kwargs["blocker_code"], kwargs["retryable"]))
+    ...     _handle_worker_crash({"task_id": task_id}, "codex", TimeoutError("could not acquire shared lock lvc-standard.lock"), "traceback text")
+    ...     o.LOGS_DIR = old["LOGS_DIR"]
+    ...     o.record_worker_crash = old["record_worker_crash"]
+    ...     o.task_path = old["task_path"]
+    ...     _handle_worker_crash.__globals__["fail_task"] = old["fail_task"]
+    ...     calls
+    [('record', 'codex', 'task-lock', 'could not acquire shared lock lvc-standard.lock'), ('fail', 'task-lock', 'claimed', 'worker crash: could not acquire shared lock lvc-standard.lock', 'worker_crash_lock_contention', True)]
+    """
+    log_path = o.LOGS_DIR / f"{task['task_id']}.log"
+    with log_path.open("a") as f:
+        f.write(f"\n# worker crashed:\n{tb_text}\n")
+    o.record_worker_crash(slot, task_id=task["task_id"], detail=str(exc))
+    blocker_code, retryable = _classify_worker_crash(exc, tb_text)
+    # Best-effort: move through the normal failure path so blocker metadata is persisted.
+    for st in ("running", "claimed"):
+        if o.task_path(task["task_id"], st).exists():
+            fail_task(
+                task["task_id"],
+                st,
+                f"worker crash: {exc}",
+                blocker_code=blocker_code,
+                summary="worker crashed mid-task",
+                detail=f"{exc}\n\n{tb_text[-4000:]}".strip(),
+                retryable=retryable,
+            )
+            break
+
+
 def _claude_budget_flag(kind, *, cfg, task=None, mode=None):
     return f"{o.claude_budget_usd(kind, cfg=cfg, task=task, mode=mode):.2f}"
 
@@ -5928,25 +5975,8 @@ def main():
             run_qa_slot(task, cfg)
     except Exception as exc:
         import traceback
-        log_path = o.LOGS_DIR / f"{task['task_id']}.log"
         tb_text = traceback.format_exc()
-        with log_path.open("a") as f:
-            f.write(f"\n# worker crashed:\n{tb_text}\n")
-        o.record_worker_crash(slot, task_id=task["task_id"], detail=str(exc))
-        blocker_code, retryable = _classify_worker_crash(exc, tb_text)
-        # Best-effort: move through the normal failure path so blocker metadata is persisted.
-        for st in ("running", "claimed"):
-            if o.task_path(task["task_id"], st).exists():
-                fail_task(
-                    task["task_id"],
-                    st,
-                    f"worker crash: {exc}",
-                    blocker_code=blocker_code,
-                    summary="worker crashed mid-task",
-                    detail=f"{exc}\n\n{tb_text[-4000:]}".strip(),
-                    retryable=retryable,
-                )
-                break
+        _handle_worker_crash(task, slot, exc, tb_text)
     finally:
         o.clear_claim_pid(task["task_id"])
         o.write_agent_status(f"worker-{slot}", "idle", "")
