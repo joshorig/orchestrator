@@ -2169,6 +2169,29 @@ def _nudge_engine_workers(engine):
     return attempted
 
 
+def _nudge_idle_queued_workers():
+    """Kick idle engine workers when runnable queued work exists.
+
+    This is a recovery path for cases where launchd keeps a worker label loaded
+    but does not promptly respawn it after a clean no-work exit.
+    """
+    active = engine_active_counts()
+    queued_by_engine = {"claude": 0, "codex": 0, "qa": 0}
+    for p in queue_dir("queued").glob("*.json"):
+        task = read_json(p, {})
+        eng = task.get("engine")
+        if eng in queued_by_engine:
+            queued_by_engine[eng] += 1
+    nudged = {}
+    for eng, count in queued_by_engine.items():
+        if count <= 0 or active.get(eng, 0) > 0:
+            continue
+        labels = _nudge_engine_workers(eng)
+        if labels:
+            nudged[eng] = labels
+    return nudged
+
+
 def move_task(task_id, from_state, to_state, reason="", mutator=None):
     """Atomically move a task file between state subdirs. Returns (new_path, task_dict).
 
@@ -2539,6 +2562,9 @@ def reap():
                 )
                 reaped += 1
     tick_braid_auto_regen(load_config())
+    nudged = _nudge_idle_queued_workers()
+    if nudged:
+        append_event("reaper", "idle_workers_nudged", details=nudged)
     return reaped
 
 
