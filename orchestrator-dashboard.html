@@ -38,7 +38,7 @@
     }
     a { color: var(--cyan); text-decoration: none; }
     h1, h2, h3, p { margin: 0; }
-    code { color: var(--cyan); font-family: inherit; }
+    code, pre { font-family: inherit; }
     .header {
       display: grid;
       grid-template-columns: minmax(280px, 1.5fr) 2fr;
@@ -178,6 +178,9 @@
     .status-idle, .state-queued, .state-claimed, .state-done { color: var(--cyan); border-color: rgba(34, 211, 238, 0.4); }
     .status-queued, .state-awaiting-review, .state-awaiting-qa { color: var(--amber); border-color: rgba(251, 191, 36, 0.45); }
     .status-failed, .status-blocked, .state-blocked, .state-failed, .state-abandoned { color: var(--rose); border-color: rgba(251, 113, 133, 0.45); }
+    .status-approve, .state-approve { color: var(--emerald); border-color: rgba(52, 211, 153, 0.45); }
+    .status-reject, .state-reject, .status-request_change, .state-request_change { color: var(--rose); border-color: rgba(251, 113, 133, 0.45); }
+    .status-pending, .state-pending, .status-abstain, .state-abstain { color: var(--amber); border-color: rgba(251, 191, 36, 0.45); }
     .agent-detail, .mini-detail, .muted { color: var(--muted); }
     .tiny { color: var(--dim); font-size: 11px; }
     .feature-card {
@@ -202,13 +205,48 @@
       text-transform: uppercase;
       letter-spacing: 0.08em;
       margin-top: 2px;
+      cursor: pointer;
     }
     .feature-summary { color: var(--text); margin-bottom: 10px; }
+    .feature-sections { display: grid; gap: 8px; }
+    .feature-section {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: rgba(2, 6, 23, 0.28);
+      overflow: hidden;
+    }
+    .feature-section[open] { border-color: var(--border-strong); }
+    .feature-section > summary {
+      list-style: none;
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      cursor: pointer;
+      padding: 10px 12px;
+    }
+    .feature-section > summary::-webkit-details-marker { display: none; }
+    .feature-section > summary:hover { background: rgba(15, 23, 42, 0.28); }
+    .summary-label {
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 10px;
+      font-weight: 700;
+    }
+    .summary-value {
+      color: var(--dim);
+      font-size: 11px;
+      text-align: right;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .section-body { padding: 0 10px 10px; }
     .feature-meta, .feature-frontier, .feature-delivery, .feature-repair {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 8px;
-      margin-bottom: 10px;
     }
     .meta-box, .frontier-box, .delivery-box, .repair-box, .tasks-box, .events-box {
       border: 1px solid var(--border);
@@ -225,7 +263,13 @@
     }
     .box-v { color: var(--text); }
     .task-list, .event-list { display: grid; gap: 8px; }
+    .task-row {
+      cursor: pointer;
+      transition: transform 0.12s ease, border-color 0.12s ease;
+    }
+    .task-row:hover { transform: translateY(-1px); border-color: var(--border-strong); }
     .task-row.frontier { border-color: rgba(251, 113, 133, 0.45); }
+    .agent-task-row { cursor: pointer; }
     .task-head {
       display: flex;
       justify-content: space-between;
@@ -320,6 +364,124 @@
       text-align: center;
       padding: 16px 8px;
     }
+    .modal-scrim {
+      position: fixed;
+      inset: 0;
+      background: rgba(2, 6, 23, 0.78);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      z-index: 50;
+    }
+    .modal-scrim.open { display: flex; }
+    .modal {
+      width: min(960px, 100%);
+      max-height: calc(100vh - 40px);
+      overflow: auto;
+      background: #081120;
+      border: 1px solid var(--border-strong);
+      border-radius: 18px;
+      padding: 18px;
+      box-shadow: 0 30px 80px rgba(2, 6, 23, 0.55);
+    }
+    .close {
+      float: right;
+      cursor: pointer;
+      color: var(--muted);
+      font-size: 18px;
+      line-height: 1;
+    }
+    .close:hover { color: var(--text); }
+    .modal-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: baseline;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+    .modal-head h2 { font-size: 16px; }
+    .modal-sub { color: var(--muted); font-size: 11px; }
+    .modal-grid {
+      display: grid;
+      grid-template-columns: 120px 1fr;
+      gap: 6px 12px;
+      font-size: 11px;
+      margin: 12px 0 16px;
+    }
+    .modal-grid .k, .timeline .k, .kv-grid .k {
+      color: var(--dim);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 10px;
+    }
+    .tabs {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 14px;
+    }
+    .tab {
+      padding: 8px 0;
+      color: var(--muted);
+      border-bottom: 2px solid transparent;
+      cursor: pointer;
+      font-size: 11px;
+    }
+    .tab.active { color: var(--cyan); border-bottom-color: var(--cyan); }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+    .timeline {
+      display: grid;
+      grid-template-columns: 120px 160px;
+      gap: 6px 12px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      background: rgba(15, 23, 42, 0.34);
+    }
+    .timeline .v { color: var(--text); }
+    .kv-grid {
+      display: grid;
+      grid-template-columns: 140px 1fr;
+      gap: 6px 12px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      background: rgba(15, 23, 42, 0.34);
+    }
+    .pill-inline {
+      display: inline-block;
+      margin: 0 6px 6px 0;
+      padding: 3px 8px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 10px;
+    }
+    .gate-list, .finding-list, .evidence-list { display: grid; gap: 8px; }
+    .gate-row, .finding-row, .evidence-row {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 12px;
+      background: rgba(15, 23, 42, 0.34);
+      font-size: 11px;
+    }
+    .gate-name { color: var(--cyan); margin-bottom: 4px; }
+    .gate-panel { color: var(--muted); }
+    .log-tail {
+      background: #020617;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      color: #cbd5e1;
+      font-size: 11px;
+      white-space: pre-wrap;
+      overflow: auto;
+      max-height: 280px;
+    }
     @media (max-width: 1280px) {
       .layout { grid-template-columns: 1fr; }
       .header { grid-template-columns: 1fr; }
@@ -328,6 +490,7 @@
       .scorecards { grid-template-columns: repeat(2, minmax(130px, 1fr)); }
       .feature-meta, .feature-frontier, .feature-delivery, .feature-repair { grid-template-columns: 1fr; }
       .queue-legend { grid-template-columns: 1fr; }
+      .modal-grid, .timeline, .kv-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -354,6 +517,13 @@
           <span class="section-sub" id="agentCount">-</span>
         </div>
         <div class="agent-list" id="agents"></div>
+      </div>
+      <div class="card">
+        <div class="section-head">
+          <span class="section-title">Agent Tasks</span>
+          <span class="section-sub" id="agentTaskCount">select an agent</span>
+        </div>
+        <div class="mini-list" id="agentTasks"></div>
       </div>
       <div class="card">
         <div class="section-head">
@@ -407,13 +577,20 @@
     </aside>
   </section>
 
+  <div class="modal-scrim" id="modalScrim" onclick="if (event.target.id === 'modalScrim') closeTaskModal()">
+    <div class="modal" id="taskModal"></div>
+  </div>
+
   <script>
-    const FEED_URL = "state/runtime/dashboard-feed.json";
+    const DASHBOARD_API_URL = "/api/dashboard";
+    const DASHBOARD_EVENTS_URL = "/api/dashboard/events";
     const FILTERS = {
       project: null,
       frontierState: null,
       blockerCode: null,
       agentStatus: null,
+      agentRole: null,
+      featureStatus: null,
     };
     const QUEUE_COLORS = {
       queued: "#22d3ee",
@@ -425,8 +602,17 @@
       done: "#64748b",
       failed: "#f43f5e",
       abandoned: "#94a3b8",
+      approve: "#34d399",
+      reject: "#fb7185",
+      pending: "#fbbf24",
+      abstain: "#94a3b8",
     };
     let latestData = null;
+    let taskIndex = {};
+    let eventSource = null;
+    let reconnectTimer = null;
+    let pollingTimer = null;
+    const FEATURE_SECTION_STATE = {};
 
     function esc(value) {
       return String(value ?? "").replace(/[&<>"]/g, ch => ({
@@ -435,6 +621,14 @@
         ">": "&gt;",
         "\"": "&quot;"
       }[ch]));
+    }
+
+    function escAttr(value) {
+      return esc(value).replace(/'/g, "&#39;");
+    }
+
+    function nl2br(value) {
+      return esc(value || "").replace(/\n/g, "<br>");
     }
 
     function metricTone(ok, warn) {
@@ -454,6 +648,17 @@
 
     function activeFilters() {
       return Object.entries(FILTERS).filter(([, value]) => value);
+    }
+
+    function sectionStateKey(featureId, section) {
+      return `${featureId}::${section}`;
+    }
+
+    function sectionIsOpen(featureId, section, defaultOpen = false) {
+      const key = sectionStateKey(featureId, section);
+      return Object.prototype.hasOwnProperty.call(FEATURE_SECTION_STATE, key)
+        ? FEATURE_SECTION_STATE[key]
+        : defaultOpen;
     }
 
     function setFilter(key, value) {
@@ -476,13 +681,14 @@
       host.innerHTML = rows.map(([key, value]) => `
         <span class="filter-pill">
           <span>${esc(key)}=${esc(value)}</span>
-          <button type="button" onclick="clearFilter('${esc(key)}')">x</button>
+          <button type="button" onclick="clearFilter('${escAttr(key)}')">x</button>
         </span>
       `).join("");
     }
 
     function featureMatches(feature) {
       if (FILTERS.project && feature.project !== FILTERS.project) return false;
+      if (FILTERS.featureStatus && (feature.status || "") !== FILTERS.featureStatus) return false;
       if (FILTERS.frontierState && (feature.frontier?.state || "") !== FILTERS.frontierState) return false;
       if (FILTERS.blockerCode && ((feature.frontier?.blocker?.code || "") !== FILTERS.blockerCode)) return false;
       return true;
@@ -541,15 +747,43 @@
       const rows = (data.agents || []).filter(row => !FILTERS.agentStatus || row.status === FILTERS.agentStatus);
       document.getElementById("agentCount").textContent = `${rows.length}/${data.agents.length} visible`;
       document.getElementById("agents").innerHTML = rows.length ? rows.map(row => `
-        <div class="agent-row ${FILTERS.agentStatus === row.status ? "active" : ""}">
+        <div class="agent-row ${(FILTERS.agentStatus === row.status || FILTERS.agentRole === row.role) ? "active" : ""}" onclick="setFilter('agentRole','${escAttr(row.role)}')">
           <div class="agent-top">
             <span class="agent-role">${esc(row.role)}</span>
-            <span class="status-badge status-${esc(row.status)}" onclick="event.stopPropagation(); setFilter('agentStatus','${esc(row.status)}')">${esc(row.status)}</span>
+            <span class="status-badge status-${esc(row.status)}" onclick="event.stopPropagation(); setFilter('agentStatus','${escAttr(row.status)}')">${esc(row.status)}</span>
           </div>
           <div class="agent-detail">${esc(row.detail || "No detail.")}</div>
           <div class="tiny">updated ${esc(formatTs(row.updated_at))}</div>
         </div>
       `).join("") : `<div class="empty">No agents match the active filter.</div>`;
+    }
+
+    function renderAgentTasks() {
+      const host = document.getElementById("agentTasks");
+      const count = document.getElementById("agentTaskCount");
+      if (!FILTERS.agentRole) {
+        count.textContent = "select an agent";
+        host.innerHTML = `<div class="empty">Click an agent row to see tasks for that role.</div>`;
+        return;
+      }
+      const rows = Object.values(taskIndex)
+        .filter((task) => task.role === FILTERS.agentRole && (task.state === "running" || task.finished_at))
+        .sort((a, b) => {
+          if (a.state === "running" && b.state !== "running") return -1;
+          if (a.state !== "running" && b.state === "running") return 1;
+          return String(b.finished_at || b.started_at || b.created_at || "").localeCompare(String(a.finished_at || a.started_at || a.created_at || ""));
+        });
+      count.textContent = `${rows.length} task${rows.length === 1 ? "" : "s"}`;
+      host.innerHTML = rows.length ? rows.map((task) => `
+        <div class="mini-row agent-task-row" onclick="showTaskModal('${escAttr(task.task_id)}')">
+          <div class="mini-top">
+            <strong>${esc(task.task_id)}</strong>
+            <span class="state-chip state-${esc(task.state || "queued")}">${esc(task.state || "-")}</span>
+          </div>
+          <div class="mini-detail">${esc(task.summary || "")}</div>
+          <div class="tiny">${esc(task.project || "-")} · ${esc(formatTs(task.finished_at || task.started_at || task.created_at))}</div>
+        </div>
+      `).join("") : `<div class="empty">No running or completed tasks for ${esc(FILTERS.agentRole)}.</div>`;
     }
 
     function renderServer(data) {
@@ -597,10 +831,10 @@
       document.getElementById("queueBar").innerHTML = queue.map(row => {
         const count = Number(row.count || 0);
         const width = total ? Math.max((count / total) * 100, count > 0 ? 1.5 : 0) : 0;
-        return `<div class="queue-seg ${FILTERS.frontierState === row.state ? "active" : ""}" onclick="setFilter('frontierState','${esc(row.state)}')" style="width:${width}%;background:${queueColor(row.state)}" title="${esc(row.state)} ${count}"></div>`;
+        return `<div class="queue-seg ${FILTERS.frontierState === row.state ? "active" : ""}" onclick="setFilter('frontierState','${escAttr(row.state)}')" style="width:${width}%;background:${queueColor(row.state)}" title="${esc(row.state)} ${count}"></div>`;
       }).join("");
       document.getElementById("queueLegend").innerHTML = queue.map(row => `
-        <div class="queue-item ${FILTERS.frontierState === row.state ? "active" : ""}" onclick="setFilter('frontierState','${esc(row.state)}')">
+        <div class="queue-item ${FILTERS.frontierState === row.state ? "active" : ""}" onclick="setFilter('frontierState','${escAttr(row.state)}')">
           <span class="queue-name"><span class="queue-dot" style="background:${queueColor(row.state)}"></span>${esc(row.state)}</span>
           <span class="queue-pill">${esc(row.count)}</span>
         </div>
@@ -611,7 +845,7 @@
       const blockers = data.blocker_codes || [];
       document.getElementById("blockerCount").textContent = blockers.length ? `${blockers.length} active codes` : "0 active";
       document.getElementById("blockers").innerHTML = blockers.length ? blockers.map(row => `
-        <tr class="clickable ${FILTERS.blockerCode === row.code ? "active" : ""}" onclick="setFilter('blockerCode','${esc(row.code)}')">
+        <tr class="clickable ${FILTERS.blockerCode === row.code ? "active" : ""}" onclick="setFilter('blockerCode','${escAttr(row.code)}')">
           <td class="code">${esc(row.code)}</td>
           <td class="right">${esc(row.count)}</td>
           <td class="right tiny">${esc(row.pct_of_blocked)}%</td>
@@ -630,6 +864,27 @@
       `).join("") : `<div class="empty">No recent transitions.</div>`;
     }
 
+    function indexTasks(data) {
+      taskIndex = {};
+      (data.features || []).forEach((feature) => {
+        (feature.tasks || []).forEach((task) => {
+          taskIndex[task.task_id] = { ...task, featureSummary: feature.summary };
+        });
+      });
+    }
+
+    function featureSection(title, summary, body, open = false) {
+      return `
+        <details class="feature-section" data-section="${escAttr(title)}" data-default-open="${open ? "1" : "0"}" ${open ? "open" : ""}>
+          <summary>
+            <span class="summary-label">${esc(title)}</span>
+            <span class="summary-value">${summary}</span>
+          </summary>
+          <div class="section-body">${body}</div>
+        </details>
+      `;
+    }
+
     function renderFeature(feature) {
       const tasks = feature.tasks || [];
       const events = feature.recent_events || [];
@@ -640,133 +895,286 @@
       const childStates = Object.entries(feature.child_states || {});
       const followUpStates = Object.entries(feature.follow_up_states || {});
       return `
-        <div class="feature-card ${stale ? "stale" : ""} ${blocked ? "blocked" : ""}">
+        <div class="feature-card ${stale ? "stale" : ""} ${blocked ? "blocked" : ""}" data-feature-id="${escAttr(feature.feature_id)}">
           <div class="feature-top">
             <div>
               <div class="feature-id">${esc(feature.feature_id)}</div>
-              <div class="feature-project" onclick="setFilter('project','${esc(feature.project)}')">${esc(feature.project)}</div>
+              <div class="feature-project" onclick="setFilter('project','${escAttr(feature.project)}')">${esc(feature.project)}</div>
             </div>
             <div>
-              <span class="state-chip state-${esc(feature.status || "open")}">${esc(feature.status || "open")}</span>
+              <span class="state-chip state-${esc(feature.status || "open")}" onclick="setFilter('featureStatus','${escAttr(feature.status || "open")}')">${esc(feature.status || "open")}</span>
             </div>
           </div>
 
           <div class="feature-summary">${esc(feature.summary || "")}</div>
 
-          <div class="feature-meta">
-            <div class="meta-box">
-              <div class="box-k">Roadmap</div>
-              <div class="box-v">${esc(feature.roadmap?.id || "-")} ${feature.roadmap?.title ? `· ${esc(feature.roadmap.title)}` : ""}</div>
-              <div class="tiny">${esc(feature.roadmap?.source || feature.branch || "")}</div>
-            </div>
-            <div class="meta-box">
-              <div class="box-k">Created</div>
-              <div class="box-v">${esc(formatTs(feature.created_at))}</div>
-              <div class="tiny">${esc(feature.branch || "")}</div>
-            </div>
-          </div>
-
-          <div class="feature-frontier">
-            <div class="frontier-box">
-              <div class="box-k">Frontier</div>
-              <div class="box-v">
-                <span class="state-chip state-${esc(feature.frontier?.state || "queued")}" onclick="setFilter('frontierState','${esc(feature.frontier?.state || "queued")}')">${esc(feature.frontier?.state || "-")}</span>
-                ${feature.frontier?.task_id ? `<code>${esc(feature.frontier.task_id)}</code>` : ""}
+          <div class="feature-sections">
+            ${featureSection("Frontier", `${esc(feature.frontier?.state || "-")} ${feature.frontier?.task_id ? `· ${esc(feature.frontier.task_id)}` : ""}`, `
+              <div class="feature-frontier">
+                <div class="frontier-box">
+                  <div class="box-k">Frontier</div>
+                  <div class="box-v">
+                    <span class="state-chip state-${esc(feature.frontier?.state || "queued")}" onclick="setFilter('frontierState','${escAttr(feature.frontier?.state || "queued")}')">${esc(feature.frontier?.state || "-")}</span>
+                    ${feature.frontier?.task_id ? `<code>${esc(feature.frontier.task_id)}</code>` : ""}
+                  </div>
+                  <div class="tiny">age ${esc(feature.frontier?.age_text || "-")} · attempt ${esc(feature.frontier?.attempt || "-")}</div>
+                  <div class="mini-detail">${esc(feature.frontier?.reason || "")}</div>
+                </div>
+                <div class="frontier-box">
+                  <div class="box-k">Blocker</div>
+                  <div class="box-v">${feature.frontier?.blocker?.code ? `<span class="tag blocker" onclick="setFilter('blockerCode','${escAttr(feature.frontier.blocker.code)}')">${esc(feature.frontier.blocker.code)}</span>` : "none"}</div>
+                  <div class="mini-detail">${esc(feature.frontier?.blocker?.detail || feature.frontier?.blocker?.summary || "")}</div>
+                </div>
               </div>
-              <div class="tiny">age ${esc(feature.frontier?.age_text || "-")} · attempt ${esc(feature.frontier?.attempt || "-")}</div>
-              <div class="mini-detail">${esc(feature.frontier?.reason || "")}</div>
-            </div>
-            <div class="frontier-box">
-              <div class="box-k">Blocker</div>
-              <div class="box-v">${feature.frontier?.blocker?.code ? `<span class="tag blocker" onclick="setFilter('blockerCode','${esc(feature.frontier.blocker.code)}')">${esc(feature.frontier.blocker.code)}</span>` : "none"}</div>
-              <div class="mini-detail">${esc(feature.frontier?.blocker?.detail || feature.frontier?.blocker?.summary || "")}</div>
-            </div>
-          </div>
-
-          <div class="feature-delivery">
-            <div class="delivery-box">
-              <div class="box-k">Delivery</div>
-              <div class="box-v">${delivery.final_pr_url ? `<a href="${esc(delivery.final_pr_url)}">PR #${esc(delivery.final_pr_number || "-")}</a>` : "no final PR"}</div>
-              <div class="tiny">finalized ${esc(formatTs(delivery.finalized_at))} · merged ${esc(formatTs(delivery.merged_at))}</div>
-            </div>
-            <div class="delivery-box">
-              <div class="box-k">PR Sweep</div>
-              <div class="box-v">feedback rounds ${esc((delivery.final_pr_sweep || {}).feedback_rounds || 0)}</div>
-              <div class="tiny">unresolved bot threads ${esc((delivery.final_pr_sweep || {}).unresolved_bot_threads || 0)} · mergeable ${esc((delivery.final_pr_sweep || {}).last_mergeable || "-")}</div>
-            </div>
-          </div>
-
-          <div class="feature-repair">
-            <div class="repair-box">
-              <div class="box-k">Self Repair</div>
-              <div class="box-v">${repair.enabled ? esc(repair.status || "enabled") : "disabled"}</div>
-              <div class="tiny">${esc(repair.issue_count || 0)} attached issues</div>
-            </div>
-            <div class="repair-box">
-              <div class="box-k">Task Spread</div>
-              <div class="box-v">${childStates.length} child · ${followUpStates.length} follow-up</div>
-              <div class="tiny">${childStates.map(([, state]) => state).join(", ") || "no child tasks recorded"}</div>
-            </div>
-          </div>
-
-          <div class="tasks-box" style="margin-bottom:10px;">
-            <div class="box-k">Tasks</div>
-            <div class="task-list">
-              ${tasks.length ? tasks.map(task => `
-                <div class="task-row ${task.is_frontier ? "frontier" : ""}">
-                  <div class="task-head">
-                    <div>
-                      <div class="task-id">${esc(task.task_id)}</div>
-                      <div class="tiny">${esc(task.kind)} · ${esc(task.role || "-")} · ${esc(task.engine || "-")}</div>
-                    </div>
-                    <div>
-                      <span class="state-chip state-${esc(task.state || "queued")}">${esc(task.state || "-")}</span>
-                    </div>
-                  </div>
-                  <div class="task-summary">${esc(task.summary || "")}</div>
-                  <div class="task-meta">
-                    <span class="tag">attempt ${esc(task.attempt || 1)}</span>
-                    ${task.blocker?.code ? `<span class="tag blocker">${esc(task.blocker.code)}</span>` : ""}
-                    ${task.review_verdict ? `<span class="tag review">review ${esc(task.review_verdict)}</span>` : ""}
-                    ${task.review_feedback_rounds ? `<span class="tag review">feedback ${esc(task.review_feedback_rounds)}</span>` : ""}
-                    ${task.resolve_thread_failures ? `<span class="tag blocker">thread failures ${esc(task.resolve_thread_failures)}</span>` : ""}
-                    ${task.artifacts_count ? `<span class="tag">artifacts ${esc(task.artifacts_count)}</span>` : ""}
-                  </div>
-                  <div class="tiny">created ${esc(formatTs(task.created_at))} · started ${esc(formatTs(task.started_at))} · finished ${esc(formatTs(task.finished_at))}</div>
+            `, sectionIsOpen(feature.feature_id, "Frontier", true))}
+            ${featureSection("Roadmap", `${esc(feature.roadmap?.id || "-")} ${feature.branch ? `· ${esc(feature.branch)}` : ""}`, `
+              <div class="feature-meta">
+                <div class="meta-box">
+                  <div class="box-k">Roadmap</div>
+                  <div class="box-v">${esc(feature.roadmap?.id || "-")} ${feature.roadmap?.title ? `· ${esc(feature.roadmap.title)}` : ""}</div>
+                  <div class="tiny">${esc(feature.roadmap?.source || feature.branch || "")}</div>
                 </div>
-              `).join("") : `<div class="empty">No task detail exported for this feature.</div>`}
-            </div>
-          </div>
-
-          <div class="events-box">
-            <div class="box-k">Recent Workflow Events</div>
-            <div class="event-list">
-              ${events.length ? events.map(event => `
-                <div class="event-row">
-                  <span class="tiny">${esc(formatTs(event.ts))}</span>
-                  <span class="event-role">${esc(event.role || "-")}</span>
-                  <span><span class="event-name">${esc(event.event || "-")}</span> <span class="tiny">${esc(event.task_id || "")}</span></span>
+                <div class="meta-box">
+                  <div class="box-k">Created</div>
+                  <div class="box-v">${esc(formatTs(feature.created_at))}</div>
+                  <div class="tiny">${esc(feature.branch || "")}</div>
                 </div>
-              `).join("") : `<div class="empty">No recent feature events.</div>`}
-            </div>
+              </div>
+            `, sectionIsOpen(feature.feature_id, "Roadmap", false))}
+            ${featureSection("Delivery", delivery.final_pr_number ? `PR #${esc(delivery.final_pr_number)}` : "no final PR", `
+              <div class="feature-delivery">
+                <div class="delivery-box">
+                  <div class="box-k">Delivery</div>
+                  <div class="box-v">${delivery.final_pr_url ? `<a href="${esc(delivery.final_pr_url)}">PR #${esc(delivery.final_pr_number || "-")}</a>` : "no final PR"}</div>
+                  <div class="tiny">finalized ${esc(formatTs(delivery.finalized_at))} · merged ${esc(formatTs(delivery.merged_at))}</div>
+                </div>
+                <div class="delivery-box">
+                  <div class="box-k">PR Sweep</div>
+                  <div class="box-v">feedback rounds ${esc((delivery.final_pr_sweep || {}).feedback_rounds || 0)}</div>
+                  <div class="tiny">unresolved bot threads ${esc((delivery.final_pr_sweep || {}).unresolved_bot_threads || 0)} · mergeable ${esc((delivery.final_pr_sweep || {}).last_mergeable || "-")}</div>
+                </div>
+              </div>
+            `, sectionIsOpen(feature.feature_id, "Delivery", false))}
+            ${featureSection("Repair", `${repair.enabled ? esc(repair.status || "enabled") : "disabled"} · ${esc(repair.issue_count || 0)} issues`, `
+              <div class="feature-repair">
+                <div class="repair-box">
+                  <div class="box-k">Self Repair</div>
+                  <div class="box-v">${repair.enabled ? esc(repair.status || "enabled") : "disabled"}</div>
+                  <div class="tiny">${esc(repair.issue_count || 0)} attached issues</div>
+                </div>
+                <div class="repair-box">
+                  <div class="box-k">Task Spread</div>
+                  <div class="box-v">${childStates.length} child · ${followUpStates.length} follow-up</div>
+                  <div class="tiny">${childStates.map(([, state]) => state).join(", ") || "no child tasks recorded"}</div>
+                </div>
+              </div>
+            `, sectionIsOpen(feature.feature_id, "Repair", false))}
+            ${featureSection("Tasks", `${tasks.length} task${tasks.length === 1 ? "" : "s"}`, `
+              <div class="tasks-box">
+                <div class="box-k">Tasks</div>
+                <div class="task-list">
+                  ${tasks.length ? tasks.map(task => `
+                    <div class="task-row ${task.is_frontier ? "frontier" : ""}" onclick="showTaskModal('${escAttr(task.task_id)}')">
+                      <div class="task-head">
+                        <div>
+                          <div class="task-id">${esc(task.task_id)}</div>
+                          <div class="tiny">${esc(task.kind)} · ${esc(task.role || "-")} · ${esc(task.engine || "-")}</div>
+                        </div>
+                        <div>
+                          <span class="state-chip state-${esc(task.state || "queued")}">${esc(task.state || "-")}</span>
+                        </div>
+                      </div>
+                      <div class="task-summary">${esc(task.summary || "")}</div>
+                      <div class="task-meta">
+                        <span class="tag">attempt ${esc(task.attempt || 1)}</span>
+                        ${task.blocker?.code ? `<span class="tag blocker">${esc(task.blocker.code)}</span>` : ""}
+                        ${task.review_verdict ? `<span class="tag review">review ${esc(task.review_verdict)}</span>` : ""}
+                        ${task.review_feedback_rounds ? `<span class="tag review">feedback ${esc(task.review_feedback_rounds)}</span>` : ""}
+                        ${task.resolve_thread_failures ? `<span class="tag blocker">thread failures ${esc(task.resolve_thread_failures)}</span>` : ""}
+                        ${task.artifacts_count ? `<span class="tag">artifacts ${esc(task.artifacts_count)}</span>` : ""}
+                      </div>
+                      <div class="tiny">created ${esc(formatTs(task.created_at))} · started ${esc(formatTs(task.started_at))} · finished ${esc(formatTs(task.finished_at))}</div>
+                    </div>
+                  `).join("") : `<div class="empty">No task detail exported for this feature.</div>`}
+                </div>
+              </div>
+            `, sectionIsOpen(feature.feature_id, "Tasks", false))}
+            ${featureSection("Events", `${events.length} recent event${events.length === 1 ? "" : "s"}`, `
+              <div class="events-box">
+                <div class="box-k">Recent Workflow Events</div>
+                <div class="event-list">
+                  ${events.length ? events.map(event => `
+                    <div class="event-row">
+                      <span class="tiny">${esc(formatTs(event.ts))}</span>
+                      <span class="event-role">${esc(event.role || "-")}</span>
+                      <span><span class="event-name">${esc(event.event || "-")}</span> <span class="tiny">${esc(event.task_id || "")}</span></span>
+                    </div>
+                  `).join("") : `<div class="empty">No recent feature events.</div>`}
+                </div>
+              </div>
+            `, sectionIsOpen(feature.feature_id, "Events", false))}
           </div>
         </div>
       `;
+    }
+
+    function wireFeatureSections() {
+      document.querySelectorAll(".feature-card").forEach((card) => {
+        const featureId = card.dataset.featureId;
+        card.querySelectorAll(".feature-section").forEach((section) => {
+          const title = section.dataset.section;
+          const key = sectionStateKey(featureId, title);
+          if (Object.prototype.hasOwnProperty.call(FEATURE_SECTION_STATE, key)) {
+            section.open = FEATURE_SECTION_STATE[key];
+          }
+          section.addEventListener("toggle", () => {
+            FEATURE_SECTION_STATE[key] = section.open;
+          });
+        });
+      });
     }
 
     function renderFeatures(data) {
       const rows = (data.features || []).filter(featureMatches);
       document.getElementById("featureCount").textContent = `${rows.length}/${data.features.length} visible`;
       document.getElementById("features").innerHTML = rows.length ? rows.map(renderFeature).join("") : `<div class="empty">No features match the active filters.</div>`;
+      wireFeatureSections();
+    }
+
+    function timelineRow(label, ts) {
+      if (!ts) return "";
+      return `<div class="k">${esc(label)}</div><div class="v">${esc(formatTs(ts))}</div>`;
+    }
+
+    function showTaskModal(taskId) {
+      const task = taskIndex[taskId];
+      const modal = document.getElementById("taskModal");
+      if (!task) {
+        modal.innerHTML = `<span class="close" onclick="closeTaskModal()">✕</span><div class="empty">No detail found for ${esc(taskId)}.</div>`;
+        document.getElementById("modalScrim").classList.add("open");
+        return;
+      }
+      const gates = (task.review_gates || []).map((gate) => {
+        const panel = task.review_gate_panels?.[gate] || [];
+        return `
+          <div class="gate-row">
+            <div class="gate-name">${esc(gate)}</div>
+            <div>${task.review_verdict ? `<span class="state-chip state-${esc(task.review_verdict)}">${esc(task.review_verdict)}</span>` : `<span class="tiny">pending</span>`}</div>
+            ${panel.length ? `<div class="gate-panel">${panel.map(item => `<span class="pill-inline">${esc(item)}</span>`).join("")}</div>` : ""}
+          </div>
+        `;
+      }).join("");
+      const findings = (task.policy_review_findings || []).map((item) => `<div class="finding-row">${esc(item)}</div>`).join("");
+      const evidence = (task.resolved_thread_evidence || []).map((item) => `
+        <div class="evidence-row">
+          <div>${esc(item.path || item.thread_id || "thread")}</div>
+          <div class="tiny">${esc(item.evidence || item.comment_id || "")}</div>
+        </div>
+      `).join("");
+      const deliveryRows = [
+        ["PR", task.pr_url ? `<a href="${esc(task.pr_url)}">#${esc(task.pr_number || "-")}</a>` : (task.pr_number ? `#${esc(task.pr_number)}` : "not opened")],
+        ["Commit", task.push_commit_sha ? `<code>${esc(task.push_commit_sha)}</code> · ${esc(task.push_commit_count || 0)} commit(s)` : "not pushed"],
+        ["PR body", task.pr_body_path ? `<code>${esc(task.pr_body_path)}</code>` : "-"],
+        ["Review request", task.review_request_error ? esc(task.review_request_error) : (task.review_requested_at ? `requested at ${esc(formatTs(task.review_requested_at))}` : "none")],
+        ["PR sweep", Object.keys(task.pr_sweep || {}).length ? nl2br(JSON.stringify(task.pr_sweep, null, 2)) : "<span class='tiny'>No PR sweep data.</span>"],
+        ["Local deploy", Object.keys(task.local_deploy || {}).length ? nl2br(JSON.stringify(task.local_deploy, null, 2)) : "<span class='tiny'>No local deploy data.</span>"],
+      ];
+      modal.innerHTML = `
+        <span class="close" onclick="closeTaskModal()">✕</span>
+        <div class="modal-head">
+          <div>
+            <h2>${esc(task.summary || task.task_id)}</h2>
+            <div class="modal-sub">${esc(task.role || "-")} · ${esc(task.engine || "-")} · <code>${esc(task.task_id)}</code>${task.feature_id ? ` · <code>${esc(task.feature_id)}</code>` : ""}</div>
+          </div>
+          <span class="state-chip state-${esc(task.state || "queued")}">${esc(task.state || "-")}</span>
+        </div>
+
+        <div class="modal-grid">
+          <div class="k">project</div><div>${esc(task.project || "-")}</div>
+          <div class="k">kind</div><div>${esc(task.kind || "-")}</div>
+          <div class="k">attempt</div><div>${esc(task.attempt || 1)}</div>
+          <div class="k">worktree</div><div>${esc(task.worktree || "-")}</div>
+          <div class="k">branch</div><div>${esc(task.push_branch || task.base_branch || "-")}${task.push_base_branch ? ` → ${esc(task.push_base_branch)}` : ""}</div>
+        </div>
+
+        <div class="tabs">
+          <div class="tab active" data-tab="timeline">Timeline</div>
+          <div class="tab" data-tab="review">Review</div>
+          <div class="tab" data-tab="qa">QA Scope</div>
+          <div class="tab" data-tab="delivery">Delivery</div>
+        </div>
+
+        <div class="tab-panel active" data-panel="timeline">
+          <div class="timeline">
+            ${timelineRow("created", task.created_at)}
+            ${timelineRow("claimed", task.claimed_at)}
+            ${timelineRow("started", task.started_at)}
+            ${timelineRow("reviewed", task.reviewed_at)}
+            ${timelineRow("qa passed", task.qa_passed_at)}
+            ${timelineRow("pushed", task.pushed_at)}
+            ${timelineRow("pr opened", task.pr_created_at)}
+            ${timelineRow("review req", task.review_requested_at)}
+            ${timelineRow("finished", task.finished_at)}
+          </div>
+          ${task.blocker?.code ? `<div class="finding-row" style="margin-top:12px"><strong>${esc(task.blocker.code)}</strong><div class="tiny">${esc(task.blocker.detail || task.blocker.summary || "")}</div></div>` : ""}
+          ${task.failure || task.qa_failure || task.push_failure || task.deploy_failure ? `<div class="finding-row" style="margin-top:12px">${esc(task.failure || task.qa_failure || task.push_failure || task.deploy_failure)}</div>` : ""}
+        </div>
+
+        <div class="tab-panel" data-panel="review">
+          <div class="kv-grid">
+            <div class="k">verdict</div><div>${task.review_verdict ? esc(task.review_verdict) : "pending"}</div>
+            <div class="k">reviewed by</div><div>${esc(task.reviewed_by || "-")}</div>
+            <div class="k">rounds</div><div>${esc(task.review_feedback_rounds || 0)}</div>
+            <div class="k">council</div><div>${(task.review_council_panel || []).length ? task.review_council_panel.map(item => `<span class="pill-inline">${esc(item)}</span>`).join("") : "<span class='tiny'>none recorded</span>"}</div>
+          </div>
+          <div class="section-title" style="margin-top:12px">Review Gates</div>
+          <div class="gate-list">${gates || `<div class="empty">No review gates recorded.</div>`}</div>
+          <div class="section-title" style="margin-top:12px">Policy Findings</div>
+          <div class="finding-list">${findings || `<div class="empty">No policy findings recorded.</div>`}</div>
+        </div>
+
+        <div class="tab-panel" data-panel="qa">
+          <div class="kv-grid">
+            <div class="k">qa verdict</div><div>${task.qa_passed_at ? "passed" : (task.qa_failure ? esc(task.qa_failure) : "pending")}</div>
+            <div class="k">gate output</div><div>${task.qa_gate_output ? nl2br(task.qa_gate_output) : "<span class='tiny'>No semantic QA gate output recorded.</span>"}</div>
+            <div class="k">log path</div><div>${task.log_path ? `<code>${esc(task.log_path)}</code>` : "<span class='tiny'>No task log found.</span>"}</div>
+            <div class="k">artifacts</div><div>${esc(task.artifacts_count || 0)}</div>
+          </div>
+          <div class="section-title" style="margin-top:12px">Log Tail</div>
+          <div class="log-tail">${task.log_tail && task.log_tail.length ? esc(task.log_tail.join("\n")) : "No log output captured."}</div>
+        </div>
+
+        <div class="tab-panel" data-panel="delivery">
+          <div class="kv-grid">
+            ${deliveryRows.map(([k, v]) => `<div class="k">${k}</div><div>${v}</div>`).join("")}
+          </div>
+          ${evidence ? `<div class="section-title" style="margin-top:12px">Resolved Thread Evidence</div><div class="evidence-list">${evidence}</div>` : ""}
+        </div>
+      `;
+      modal.querySelectorAll(".tab").forEach((tab) => {
+        tab.addEventListener("click", () => {
+          modal.querySelectorAll(".tab").forEach((item) => item.classList.remove("active"));
+          modal.querySelectorAll(".tab-panel").forEach((item) => item.classList.remove("active"));
+          tab.classList.add("active");
+          modal.querySelector(`.tab-panel[data-panel="${tab.dataset.tab}"]`).classList.add("active");
+        });
+      });
+      document.getElementById("modalScrim").classList.add("open");
+    }
+
+    function closeTaskModal() {
+      document.getElementById("modalScrim").classList.remove("open");
     }
 
     function render(data) {
       if (!data) return;
       latestData = data;
+      indexTasks(data);
       document.getElementById("timestamp").textContent = `updated ${formatTs(data.timestamp)}`;
       renderFilters();
       renderScorecards(data);
       renderAgents(data);
+      renderAgentTasks();
       renderServer(data);
       renderBudget(data);
       renderQueue(data);
@@ -776,13 +1184,55 @@
     }
 
     async function refresh() {
-      const response = await fetch(FEED_URL, { cache: "no-store" });
+      const response = await fetch(DASHBOARD_API_URL, { cache: "no-store" });
       const data = await response.json();
       render(data);
     }
 
-    refresh();
-    setInterval(refresh, 5000);
+    function startPolling() {
+      if (pollingTimer) return;
+      pollingTimer = setInterval(() => {
+        refresh().catch(() => {});
+      }, 5000);
+    }
+
+    function stopPolling() {
+      if (!pollingTimer) return;
+      clearInterval(pollingTimer);
+      pollingTimer = null;
+    }
+
+    function scheduleReconnect() {
+      if (reconnectTimer) return;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        connectEvents();
+      }, 3000);
+    }
+
+    function connectEvents() {
+      if (!window.EventSource) {
+        startPolling();
+        return;
+      }
+      if (eventSource) eventSource.close();
+      eventSource = new EventSource(DASHBOARD_EVENTS_URL);
+      eventSource.addEventListener("dashboard", (event) => {
+        stopPolling();
+        render(JSON.parse(event.data));
+      });
+      eventSource.onerror = () => {
+        if (eventSource) {
+          eventSource.close();
+          eventSource = null;
+        }
+        startPolling();
+        scheduleReconnect();
+      };
+    }
+
+    refresh().catch(() => {});
+    connectEvents();
   </script>
 </body>
 </html>

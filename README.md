@@ -355,7 +355,7 @@ The runtime now emits structured metric rows to `state/runtime/metrics.jsonl`. `
 
 ## Dashboard
 
-`bin/dashboard_feed.py` writes `state/runtime/dashboard-feed.json` for the live dashboard. `bin/dashboard_server.py` serves [orchestrator-dashboard.html](orchestrator-dashboard.html) and the feed directly.
+`bin/dashboard_feed.py` still writes `state/runtime/dashboard-feed.json` for snapshots and compatibility. `bin/dashboard_server.py` now serves [orchestrator-dashboard.html](orchestrator-dashboard.html), a live `GET /api/dashboard` snapshot, and an SSE stream at `GET /api/dashboard/events` so the page can update without polling the feed file over HTTP.
 
 For launchd installs, use [launchd/com.devmini.orchestrator.dashboard-feed.plist](launchd/com.devmini.orchestrator.dashboard-feed.plist) as the tracked template for the 5-second feed writer job.
 

@@ -20,30 +20,74 @@ def _safe_int(value, default=0):
         return default
 
 
+def _read_task_log(task_id, *, tail_lines=80, max_chars=12000):
+    log_path = o.LOGS_DIR / f"{task_id}.log"
+    if not log_path.exists():
+        return {"path": None, "tail": []}
+    text = log_path.read_text(errors="replace")
+    tail = text.splitlines()[-tail_lines:]
+    if sum(len(line) for line in tail) > max_chars:
+        joined = "\n".join(tail)
+        tail = joined[-max_chars:].splitlines()
+    return {"path": str(log_path), "tail": tail}
+
+
 def _task_snapshot(task_id, state, task):
     task = dict(task or {})
     blocker = task.get("blocker") or o.task_blocker(task) or {}
     transitions = o.read_transitions(task_id=task_id, limit=6)
+    log_info = _read_task_log(task_id)
     return {
         "task_id": task_id,
         "state": state,
         "role": task.get("role"),
         "engine": task.get("engine"),
+        "project": task.get("project"),
+        "feature_id": task.get("feature_id"),
+        "parent_task_id": task.get("parent_task_id"),
         "summary": task.get("summary"),
         "source": task.get("source"),
         "attempt": _safe_int(task.get("attempt"), 1),
+        "base_branch": task.get("base_branch"),
         "created_at": task.get("created_at"),
         "claimed_at": task.get("claimed_at"),
         "started_at": task.get("started_at"),
+        "reviewed_at": task.get("reviewed_at"),
+        "qa_passed_at": task.get("qa_passed_at"),
+        "pushed_at": task.get("pushed_at"),
+        "pr_created_at": task.get("pr_created_at"),
+        "review_requested_at": task.get("review_requested_at"),
         "finished_at": task.get("finished_at"),
         "worktree": task.get("worktree"),
         "blocker": blocker,
         "failure": task.get("failure"),
+        "qa_failure": task.get("qa_failure"),
+        "push_failure": task.get("push_failure"),
+        "deploy_failure": task.get("deploy_failure"),
         "review_verdict": task.get("review_verdict"),
+        "reviewed_by": task.get("reviewed_by"),
+        "policy_review_findings": list(task.get("policy_review_findings") or []),
         "review_feedback_rounds": _safe_int(task.get("review_feedback_rounds"), 0),
         "review_gates": list(task.get("review_gates") or []),
+        "review_gate_panels": dict(task.get("review_gate_panels") or {}),
+        "review_council_panel": list(task.get("review_council_panel") or []),
         "resolved_thread_count": _safe_int(task.get("resolved_thread_count"), 0),
         "resolve_thread_failures": _safe_int(task.get("resolve_thread_failures"), 0),
+        "resolved_thread_evidence": list(task.get("resolved_thread_evidence") or []),
+        "qa_gate_output": task.get("qa_gate_output"),
+        "pr_number": task.get("pr_number"),
+        "pr_url": task.get("pr_url"),
+        "pr_body_path": task.get("pr_body_path"),
+        "push_commit_sha": task.get("push_commit_sha"),
+        "push_commit_count": _safe_int(task.get("push_commit_count"), 0),
+        "push_branch": task.get("push_branch"),
+        "push_base_branch": task.get("push_base_branch"),
+        "pr_create_failure": task.get("pr_create_failure"),
+        "review_request_error": task.get("review_request_error"),
+        "pr_sweep": dict(task.get("pr_sweep") or {}),
+        "local_deploy": dict(task.get("local_deploy") or {}),
+        "log_path": log_info["path"],
+        "log_tail": log_info["tail"],
         "artifacts_count": len(task.get("artifacts") or []),
         "transitions": transitions,
     }
@@ -262,7 +306,9 @@ def _dashboard_server():
     }
 
 
-def build_feed():
+def build_feed(*, emit_runtime_metrics=False):
+    if emit_runtime_metrics:
+        o.emit_runtime_metrics_snapshot(source="dashboard-feed")
     return {
         "timestamp": o.now_iso(),
         "health": _health(),
@@ -277,8 +323,7 @@ def build_feed():
 
 
 def main():
-    o.emit_runtime_metrics_snapshot(source="dashboard-feed")
-    o.write_json_atomic(o.DASHBOARD_FEED_PATH, build_feed())
+    o.write_json_atomic(o.DASHBOARD_FEED_PATH, build_feed(emit_runtime_metrics=True))
     print(o.DASHBOARD_FEED_PATH)
 
 
