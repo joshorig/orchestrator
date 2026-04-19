@@ -1,0 +1,12 @@
+{
+  "claimed_count": 6,
+  "claimed_ids_distinct": 6,
+  "queued_remaining": 4,
+  "claimed_fs_count": 6,
+  "pid_file_count": 6,
+  "pid_matches_claimed": true,
+  "duplicate_state_tasks": [],
+  "claim_states": [
+    "claimed"
+  ]
+}

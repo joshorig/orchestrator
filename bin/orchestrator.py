@@ -3245,22 +3245,30 @@ def atomic_claim(slot_engine):
         )
         return None
 
-    queued = queue_dir("queued")
-    candidates = sorted(queued.glob("*.json"), key=lambda p: p.stat().st_mtime)
+    if _state_engine_read_enabled():
+        candidates = iter_tasks(states=("queued",), engine=slot_engine)
+    else:
+        queued = queue_dir("queued")
+        candidates = sorted(queued.glob("*.json"), key=lambda p: p.stat().st_mtime)
     busy_features = in_flight_feature_ids() if slot_engine == "codex" else set()
     paused_templates = {
         name for name, entry in load_braid_index().items()
         if entry.get("dispatch_paused")
     } if slot_engine == "codex" else set()
-    for src in candidates:
-        try:
-            task = read_json(src)
-        except (OSError, json.JSONDecodeError):
-            continue
-        if task is None:
-            continue
-        if task.get("engine") != slot_engine:
-            continue
+    for candidate in candidates:
+        if _state_engine_read_enabled():
+            task = dict(candidate or {})
+            src = task_path(task.get("task_id"), "queued")
+        else:
+            src = candidate
+            try:
+                task = read_json(src)
+            except (OSError, json.JSONDecodeError):
+                continue
+            if task is None:
+                continue
+            if task.get("engine") != slot_engine:
+                continue
         if slot_engine in ("claude", "codex") and project_hard_stopped(task.get("project")):
             continue
         project_name = task.get("project")
@@ -3290,13 +3298,28 @@ def atomic_claim(slot_engine):
             if blocked:
                 continue
         dst = task_path(task["task_id"], "claimed")
-        try:
-            os.rename(src, dst)
-        except FileNotFoundError:
-            continue  # lost the race
-        task["state"] = "claimed"
-        task["claimed_at"] = now_iso()
-        write_json_atomic(dst, task)
+        if _state_engine_read_enabled():
+            claimed = get_state_engine().claim_task(
+                task["task_id"],
+                slot_engine=slot_engine,
+                claimed_at=now_iso(),
+            )
+            if claimed is None:
+                continue
+            task = claimed
+            try:
+                src.unlink()
+            except FileNotFoundError:
+                pass
+            write_json_atomic(dst, task)
+        else:
+            try:
+                os.rename(src, dst)
+            except FileNotFoundError:
+                continue  # lost the race
+            task["state"] = "claimed"
+            task["claimed_at"] = now_iso()
+            write_json_atomic(dst, task)
         append_transition(task["task_id"], "queued", "claimed", slot_engine)
         return task
     return None
@@ -7450,12 +7473,10 @@ def in_flight_feature_ids():
     executed by a codex worker.
     """
     fids = set()
-    for state in ("claimed", "running"):
-        for p in queue_dir(state).glob("*.json"):
-            t = read_json(p, {})
-            fid = t.get("feature_id") if t else None
-            if fid:
-                fids.add(fid)
+    for t in iter_tasks(states=("claimed", "running")):
+        fid = t.get("feature_id") if t else None
+        if fid:
+            fids.add(fid)
     return fids
 
 

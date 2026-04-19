@@ -4,6 +4,7 @@ import json
 import pathlib
 import sys
 import tempfile
+import threading
 
 
 def _load_module(name, path):
@@ -1218,6 +1219,101 @@ def _run_fs_to_engine_migration(repo_root, scenario):
         }
 
 
+def _run_atomic_claim_concurrency(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        queue_root = root / "queue"
+        claims_dir = root / "state" / "runtime" / "claims"
+        for state in orchestrator.STATES:
+            (queue_root / state).mkdir(parents=True, exist_ok=True)
+        claims_dir.mkdir(parents=True, exist_ok=True)
+        old = {
+            "QUEUE_ROOT": orchestrator.QUEUE_ROOT,
+            "RUNTIME_DIR": orchestrator.RUNTIME_DIR,
+            "CLAIMS_DIR": orchestrator.CLAIMS_DIR,
+            "now_iso": orchestrator.now_iso,
+            "project_environment_ok": orchestrator.project_environment_ok,
+            "project_hard_stopped": orchestrator.project_hard_stopped,
+            "load_braid_index": orchestrator.load_braid_index,
+            "crash_loop_guard_status": orchestrator.crash_loop_guard_status,
+            "slot_paused": orchestrator.slot_paused,
+        }
+        orchestrator.QUEUE_ROOT = queue_root
+        orchestrator.RUNTIME_DIR = root / "state" / "runtime"
+        orchestrator.CLAIMS_DIR = claims_dir
+        orchestrator.now_iso = lambda: "2026-04-19T20:10:00"
+        orchestrator.project_environment_ok = lambda *args, **kwargs: True
+        orchestrator.project_hard_stopped = lambda *args, **kwargs: False
+        orchestrator.load_braid_index = lambda: {}
+        orchestrator.crash_loop_guard_status = lambda *args, **kwargs: {"suppressed": False, "crashes": [], "window_seconds": 180, "max_crashes": 2}
+        orchestrator.slot_paused = lambda *args, **kwargs: None
+        try:
+            task_count = int(scenario["task_count"])
+            worker_count = int(scenario["worker_count"])
+            for idx in range(task_count):
+                task = {
+                    "task_id": f"task-37-{idx:02d}",
+                    "engine": scenario["engine"],
+                    "role": "implementer",
+                    "project": "demo",
+                    "summary": f"claim me {idx}",
+                    "source": "scenario-37",
+                    "state": "queued",
+                    "blocker": None,
+                    "attempt": 1,
+                    "created_at": f"2026-04-19T20:10:{idx:02d}",
+                    "claimed_at": None,
+                    "started_at": None,
+                    "finished_at": None,
+                }
+                orchestrator.write_json_atomic(orchestrator.task_path(task["task_id"], "queued"), task)
+
+            barrier = threading.Barrier(worker_count)
+            lock = threading.Lock()
+            claimed_ids = []
+            claim_states = []
+
+            def worker_claim(worker_idx):
+                barrier.wait()
+                task = orchestrator.atomic_claim(scenario["engine"])
+                if task:
+                    orchestrator.write_claim_pid(task["task_id"], scenario["engine"], worktree=f"worker-{worker_idx}")
+                    with lock:
+                        claimed_ids.append(task["task_id"])
+                        claim_states.append(task["state"])
+
+            threads = [
+                threading.Thread(target=worker_claim, args=(idx,), daemon=True)
+                for idx in range(worker_count)
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10)
+            queued_ids = sorted(p.stem for p in (queue_root / "queued").glob("*.json"))
+            claimed_ids_fs = sorted(p.stem for p in (queue_root / "claimed").glob("*.json"))
+            pid_task_ids = sorted(p.stem for p in claims_dir.glob("*.pid"))
+            states_seen = {}
+            for state in orchestrator.STATES:
+                for path in (queue_root / state).glob("*.json"):
+                    states_seen.setdefault(path.stem, []).append(state)
+        finally:
+            for key, value in old.items():
+                setattr(orchestrator, key, value)
+        duplicate_state_tasks = sorted(task_id for task_id, states in states_seen.items() if len(states) > 1)
+        return {
+            "claimed_count": len(claimed_ids),
+            "claimed_ids_distinct": len(set(claimed_ids)),
+            "queued_remaining": len(queued_ids),
+            "claimed_fs_count": len(claimed_ids_fs),
+            "pid_file_count": len(pid_task_ids),
+            "pid_matches_claimed": pid_task_ids == claimed_ids_fs,
+            "duplicate_state_tasks": duplicate_state_tasks,
+            "claim_states": sorted(set(claim_states)),
+        }
+
+
 def main(argv):
     if len(argv) != 2:
         raise SystemExit("usage: harness/run_scenario.py <scenario-dir>")
@@ -1260,6 +1356,8 @@ def main(argv):
         actual = _run_state_engine_mirror(repo_root, scenario)
     elif kind == "fs_to_engine_migration":
         actual = _run_fs_to_engine_migration(repo_root, scenario)
+    elif kind == "atomic_claim_concurrency":
+        actual = _run_atomic_claim_concurrency(repo_root, scenario)
     else:
         raise SystemExit(f"unknown scenario kind: {kind}")
 

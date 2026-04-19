@@ -1,0 +1,6 @@
+{
+  "kind": "atomic_claim_concurrency",
+  "engine": "codex",
+  "task_count": 10,
+  "worker_count": 6
+}

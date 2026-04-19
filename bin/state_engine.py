@@ -20,6 +20,7 @@ import hashlib
 import json
 import pathlib
 import sqlite3
+import threading
 import time
 from typing import Any, Iterable
 
@@ -66,7 +67,7 @@ class StateEngine:
 
     def __init__(self, config: StateEngineConfig):
         self.config = config
-        self._conn: sqlite3.Connection | None = None
+        self._local = threading.local()
 
     def initialize(self) -> dict[str, Any]:
         if not self.config.enabled:
@@ -82,21 +83,23 @@ class StateEngine:
         return self.status(conn=conn, applied_in_run=applied)
 
     def connect(self) -> sqlite3.Connection:
-        if self._conn is None:
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
             self.config.db_path.parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(self.config.db_path)
+            conn = sqlite3.connect(self.config.db_path, timeout=30)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA foreign_keys = ON")
             conn.execute("PRAGMA journal_mode = WAL")
             conn.execute("PRAGMA synchronous = NORMAL")
             conn.execute("PRAGMA temp_store = MEMORY")
-            self._conn = conn
-        return self._conn
+            self._local.conn = conn
+        return conn
 
     def close(self) -> None:
-        if self._conn is not None:
-            self._conn.close()
-            self._conn = None
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            conn.close()
+            self._local.conn = None
 
     def status(self, *, conn: sqlite3.Connection | None = None, applied_in_run: int = 0) -> dict[str, Any]:
         conn = conn or self.connect()
@@ -574,6 +577,49 @@ class StateEngine:
             sql += f" LIMIT {int(limit)}"
         rows = conn.execute(sql, params).fetchall()
         return [json.loads(row["metadata_json"]) for row in rows]
+
+    def claim_task(self, task_id: str, *, slot_engine: str, claimed_at: str, conn: sqlite3.Connection | None = None) -> dict[str, Any] | None:
+        conn = conn or self.connect()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT metadata_json FROM tasks WHERE task_id = ? AND state = 'queued' LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            if not row:
+                conn.rollback()
+                return None
+            task = json.loads(row["metadata_json"])
+            task["state"] = "claimed"
+            task["claimed_at"] = claimed_at
+            task["claimed_slot"] = slot_engine
+            cur = conn.execute(
+                """
+                UPDATE tasks
+                   SET state = 'claimed',
+                       state_updated_at = ?,
+                       claimed_at = ?,
+                       claimed_slot = ?,
+                       metadata_json = ?
+                 WHERE task_id = ?
+                   AND state = 'queued'
+                """,
+                (
+                    claimed_at,
+                    claimed_at,
+                    slot_engine,
+                    json.dumps(task, sort_keys=True),
+                    task_id,
+                ),
+            )
+            if (cur.rowcount or 0) <= 0:
+                conn.rollback()
+                return None
+            conn.commit()
+            return task
+        except Exception:
+            conn.rollback()
+            raise
 
     def _ensure_bootstrap_tables(self, conn: sqlite3.Connection) -> None:
         with conn:
