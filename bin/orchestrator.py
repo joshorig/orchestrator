@@ -50,11 +50,17 @@ QUEUE_ROOT = STATE_ROOT / "queue"
 AGENT_STATE_DIR = STATE_ROOT / "state" / "agents"
 RUNTIME_DIR = STATE_ROOT / "state" / "runtime"
 PLANNER_DISABLED_DIR = RUNTIME_DIR / "planner-disabled"
+SLOT_PAUSE_DIR = RUNTIME_DIR / "slot-paused"
 CLAIMS_DIR = RUNTIME_DIR / "claims"
 LOCKS_DIR = RUNTIME_DIR / "locks"
 EVENTS_LOG = RUNTIME_DIR / "events.jsonl"
 METRICS_LOG = RUNTIME_DIR / "metrics.jsonl"
 PR_SWEEP_METRICS_PATH = RUNTIME_DIR / "pr-sweep-metrics.json"
+TELEGRAM_PUSH_STATE_PATH = RUNTIME_DIR / "telegram-pushes.json"
+WORKER_CRASH_HISTORY_PATH = RUNTIME_DIR / "worker-crashes.json"
+TASK_ACTION_NOTES_PATH = RUNTIME_DIR / "task-action-notes.json"
+TASK_FULL_MESSAGE_DIR = RUNTIME_DIR / "telegram-full"
+TASK_FULL_MESSAGE_LIMIT = 100
 ALLOWLIST_PATH = RUNTIME_DIR / "allowlist.json"
 FEATURES_DIR = STATE_ROOT / "state" / "features"
 TRANSITIONS_LOG = RUNTIME_DIR / "transitions.log"
@@ -67,6 +73,7 @@ BRAID_DIR = STATE_ROOT / "braid"
 BRAID_TEMPLATES = BRAID_DIR / "templates"
 BRAID_GENERATORS = BRAID_DIR / "generators"
 BRAID_INDEX = BRAID_DIR / "index.json"
+DASHBOARD_FEED_PATH = RUNTIME_DIR / "dashboard-feed.json"
 BRAID_NODE_DEF_RE = re.compile(r"(?P<node>[A-Za-z_][A-Za-z0-9_]*)\s*(?P<shape>\[[^\]\n]*\]|\{[^\}\n]*\})")
 BRAID_EDGE_START_RE = re.compile(r"^\s*(?P<node>[A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]\n]*\]|\{[^\}\n]*\})?")
 BRAID_EDGE_END_RE = re.compile(r"(?P<node>[A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]\n]*\]|\{[^\}\n]*\})?\s*;?\s*$")
@@ -121,6 +128,8 @@ BLOCKER_CODES = (
     "delivery_auth_expired",
     "runtime_unknown_project",
     "runtime_precondition_failed",
+    "review_gate_protocol_error",
+    "slot_paused",
     "llm_timeout",
     "llm_exit_error",
     "model_output_invalid",
@@ -380,6 +389,20 @@ WORKFLOW_REPAIR_POLICY = (
         "diagnosis": "runtime preconditions are missing; repair task inputs before retrying",
     },
     {
+        "name": "review_gate_protocol_retry",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "review_gate_protocol_error",
+        "action": "enqueue_reviewer",
+        "diagnosis": "review-gate protocol failed; retry the reviewer lane once with typed blocker context",
+    },
+    {
+        "name": "slot_paused_wait",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "slot_paused",
+        "action": None,
+        "diagnosis": "slot is paused awaiting explicit operator resume",
+    },
+    {
         "name": "unknown_project_report",
         "kind": "frontier_task_blocked",
         "blocker_code": "runtime_unknown_project",
@@ -495,6 +518,20 @@ CONFIG_DEFAULTS = {
             "telegram-bot",
             "canary-workflows",
         ),
+    },
+    "telegram": {
+        "card_limit": 600,
+        "full_message_limit": 6000,
+    },
+    "reviews": {
+        "self_review": True,
+    },
+    "worker_crash_guard": {
+        "window_seconds": 900,
+        "max_crashes": 3,
+    },
+    "template_regen": {
+        "max_attempts": 3,
     },
     "self_repair": {
         "enabled": True,
@@ -852,6 +889,178 @@ def latest_metric_values(*, names=None):
             continue
         latest[name] = row
     return latest
+
+
+def _latest_metric_values_by_tags(*, limit=200):
+    latest = {}
+    for row in read_metrics(limit=limit):
+        tags = tuple(sorted((row.get("tags") or {}).items()))
+        latest[(row.get("name"), tags)] = row
+    return latest
+
+
+def load_telegram_push_state():
+    data = read_json(TELEGRAM_PUSH_STATE_PATH, {}) or {}
+    data.setdefault("events", {})
+    data.setdefault("full_messages", {})
+    return data
+
+
+def save_telegram_push_state(state):
+    write_json_atomic(TELEGRAM_PUSH_STATE_PATH, state)
+
+
+def should_push_alert(event_key, dedupe_seconds):
+    state = load_telegram_push_state()
+    events = dict(state.get("events") or {})
+    now = time.time()
+    row = events.get(event_key) or {}
+    last = float(row.get("ts", 0.0) or 0.0)
+    if last and (now - last) < max(0, int(dedupe_seconds or 0)):
+        return False
+    events[event_key] = {"ts": now, "at": now_iso(), "dedupe_seconds": int(dedupe_seconds or 0)}
+    state["events"] = events
+    save_telegram_push_state(state)
+    return True
+
+
+def remember_full_message(body):
+    TASK_FULL_MESSAGE_DIR.mkdir(parents=True, exist_ok=True)
+    state = load_telegram_push_state()
+    full = dict(state.get("full_messages") or {})
+    token = uuid.uuid4().hex[:12]
+    path = TASK_FULL_MESSAGE_DIR / f"{token}.txt"
+    path.write_text(body or "")
+    full[token] = {"path": str(path), "created_at": now_iso()}
+    while len(full) > TASK_FULL_MESSAGE_LIMIT:
+        oldest_key = sorted(full, key=lambda key: (full[key].get("created_at") or "", key))[0]
+        old_path = pathlib.Path(full[oldest_key].get("path") or "")
+        if old_path.exists():
+            old_path.unlink(missing_ok=True)
+        full.pop(oldest_key, None)
+    state["full_messages"] = full
+    save_telegram_push_state(state)
+    return token
+
+
+def load_full_message(token):
+    row = (load_telegram_push_state().get("full_messages") or {}).get(token)
+    if not row:
+        return None
+    path = pathlib.Path(row.get("path") or "")
+    if not path.exists():
+        return None
+    return path.read_text(errors="replace")
+
+
+def _card_limit():
+    cfg = load_config().get("telegram") or {}
+    return int(cfg.get("card_limit", CONFIG_DEFAULTS["telegram"]["card_limit"]) or 600)
+
+
+def _trim_card(text, *, limit=None):
+    text = (text or "").strip()
+    limit = int(limit or _card_limit())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _queue_count_map():
+    return {row["state"]: row["count"] for row in ({"state": s, "count": c} for s, c in queue_counts().items())}
+
+
+def _health_payload():
+    latest = _latest_metric_values_by_tags()
+    queue = _queue_count_map()
+    def metric(name, default=0, tags=None):
+        row = latest.get((name, tuple(sorted((tags or {}).items()))))
+        if row is None:
+            return default
+        return row.get("value", default)
+    return {
+        "environment_ok": int(metric("environment.ok", 1)),
+        "environment_error_count": int(metric("environment.error_count", 0)),
+        "workflow_check_issue_count": int(metric("workflow_check.issue_count", 0)),
+        "feature_open_count": int(metric("feature.open_count", len(open_feature_workflow_summaries()))),
+        "feature_frontier_blocked_count": int(metric("feature.frontier_blocked_count", 0)),
+        "queue": queue,
+        "generated_at": now_iso(),
+    }
+
+
+def health_snapshot():
+    payload = _health_payload()
+    queue = payload["queue"]
+    env_state = "ok" if payload["environment_ok"] and payload["environment_error_count"] == 0 else f"{payload['environment_error_count']} errors"
+    blocked = payload["feature_frontier_blocked_count"]
+    lines = [
+        f"HEALTH {payload['generated_at'][:16].replace('T', ' ')}",
+        (
+            "queue:   "
+            f"{queue.get('queued', 0)}q · {queue.get('claimed', 0)}c · {queue.get('running', 0)}r · "
+            f"{queue.get('blocked', 0)}b · {queue.get('awaiting-review', 0)}ar · {queue.get('awaiting-qa', 0)}aq"
+        ),
+        f"env:     {env_state}",
+        f"features:{payload['feature_open_count']} open · {blocked} frontier-blocked",
+        f"issues:  {payload['workflow_check_issue_count']} workflow-check",
+    ]
+    return _trim_card("\n".join(lines))
+
+
+def features_brief(project=None):
+    workflows = open_feature_workflow_summaries(project_name=project)
+    if not workflows:
+        return _trim_card(f"FEATURES\n{project or 'all projects'}: none open")
+    lines = ["FEATURES"]
+    for wf in workflows[:5]:
+        frontier = wf.get("frontier") or {}
+        blocker = frontier.get("blocker") or {}
+        lines.append(
+            f"{wf.get('feature_id')} · {wf.get('project')}\n"
+            f"{frontier.get('state') or wf.get('feature_status') or '-'} {frontier.get('task_id') or '-'} · {frontier.get('age_text') or 'fresh'}"
+            + (f"\nblocker: {blocker.get('code')}" if blocker.get("code") else "")
+        )
+    return _trim_card("\n".join(lines))
+
+
+def queue_brief(state=None):
+    counts = queue_counts()
+    if state:
+        sample = queue_sample(state, limit=4)
+        body = [f"QUEUE {state}", f"count: {counts.get(state, 0)}"]
+        body.extend(sample or ["(empty)"])
+        return _trim_card("\n".join(body))
+    return _trim_card(
+        "\n".join(
+            [
+                "QUEUE",
+                f"queued:           {counts.get('queued', 0)}",
+                f"claimed:          {counts.get('claimed', 0)}",
+                f"running:          {counts.get('running', 0)}",
+                f"blocked:          {counts.get('blocked', 0)}",
+                f"awaiting-review:  {counts.get('awaiting-review', 0)}",
+                f"awaiting-qa:      {counts.get('awaiting-qa', 0)}",
+            ]
+        )
+    )
+
+
+def issue_card(issue):
+    blocker = (issue or {}).get("blocker") or {}
+    details = (issue or {}).get("details") or {}
+    lines = [
+        "ISSUE",
+        f"project: {issue.get('project') or details.get('project') or 'global'}",
+        f"code:    {blocker.get('code') or issue.get('code') or issue.get('event') or 'unknown'}",
+    ]
+    age = issue.get("age_text") or details.get("age_text")
+    if age:
+        lines.append(f"age:     {age}")
+    detail = blocker.get("detail") or details.get("detail") or issue.get("summary") or ""
+    if detail:
+        lines.append(f"detail:  {detail[:180]}")
+    return _trim_card("\n".join(lines))
 
 
 def emit_runtime_metrics_snapshot(*, source="runtime"):
@@ -2392,6 +2601,22 @@ def atomic_claim(slot_engine):
     >>> _atomic_claim_doctest_case("running")
     'task-ready'
     """
+    if slot_paused(slot_engine):
+        return None
+    crash_guard = crash_loop_guard_status(slot_engine)
+    if crash_guard.get("suppressed"):
+        append_event(
+            "worker",
+            "claim_suppressed",
+            details={
+                "slot": slot_engine,
+                "reason": "crash_loop",
+                "crash_count": len(crash_guard.get("crashes") or []),
+                "window_seconds": crash_guard.get("window_seconds"),
+            },
+        )
+        return None
+
     queued = queue_dir("queued")
     candidates = sorted(queued.glob("*.json"), key=lambda p: p.stat().st_mtime)
     busy_features = in_flight_feature_ids() if slot_engine == "codex" else set()
@@ -4838,6 +5063,21 @@ def _feature_branch_on_origin(project_path, branch):
     return bool((proc.stdout or "").strip())
 
 
+def _feature_finalize_blocking_issue(project_name):
+    for issue in environment_health(refresh=True).get("issues", []):
+        if issue.get("severity") != "error":
+            continue
+        code = issue.get("code")
+        scope = issue.get("project")
+        if code == "delivery_auth_expired":
+            return issue
+        if scope and scope != project_name:
+            continue
+        if code in ("project_main_dirty", "runtime_env_dirty"):
+            return issue
+    return None
+
+
 def _feature_all_children_failed_without_retry(feature):
     """Return True when every child landed failed/abandoned and no retry is active.
 
@@ -4926,6 +5166,12 @@ def feature_finalize(dry_run=False):
                         f["abandoned_reason"] = "all children failed with no retry"
                     update_feature(feature_id, mut_feature)
                     append_transition(feature_id, "open", "abandoned", "all children failed")
+                    append_event(
+                        "feature-finalize",
+                        "feature_abandoned",
+                        feature_id=feature_id,
+                        details={"project": project["name"], "reason": "all children failed with no retry"},
+                    )
                     _write_pr_alert(
                         project["name"], feature_id, "feature", "all children failed with no retry", None,
                     )
@@ -4943,7 +5189,14 @@ def feature_finalize(dry_run=False):
             if dry_run:
                 print(f"DRY-RUN feature-finalize {feature_id}: would mark abandoned (no children)")
             else:
-                update_feature(feature_id, lambda f: f.update({"status": "abandoned"}))
+                update_feature(feature_id, lambda f: f.update({"status": "abandoned", "abandoned_at": now_iso(), "abandoned_reason": "feature has no child tasks"}))
+                append_transition(feature_id, "open", "abandoned", "feature has no child tasks")
+                append_event(
+                    "feature-finalize",
+                    "feature_abandoned",
+                    feature_id=feature_id,
+                    details={"project": feature.get("project"), "reason": "feature has no child tasks"},
+                )
             abandoned += 1
             continue
 
@@ -4951,6 +5204,30 @@ def feature_finalize(dry_run=False):
             project = get_project(config, feature["project"])
         except KeyError:
             print(f"feature-finalize {feature_id}: unknown project {feature.get('project')}, skip")
+            skipped += 1
+            continue
+
+        env_issue = _feature_finalize_blocking_issue(project["name"])
+        if env_issue is not None:
+            reason = f"{env_issue.get('code')}: {env_issue.get('summary')}"
+            if not dry_run:
+                update_feature(
+                    feature_id,
+                    lambda f: f.update(
+                        {
+                            "finalize_error": reason,
+                            "finalize_blocker": env_issue,
+                            "finalize_blocked_at": now_iso(),
+                        }
+                    ),
+                )
+                append_event(
+                    "feature-finalize",
+                    "blocked_by_environment",
+                    feature_id=feature_id,
+                    details={"project": project["name"], "issue": env_issue},
+                )
+            print(f"feature-finalize {feature_id}: blocked by environment health: {reason}")
             skipped += 1
             continue
 
@@ -5496,6 +5773,10 @@ def braid_template_write(task_type, body, generator_model):
         entry.pop("dispatch_paused_at", None)
         entry.pop("dispatch_pause_reason", None)
         entry["auto_regen_resolved_at"] = now_iso()
+    if old_hash != new_hash:
+        entry["regen_attempts"] = 0
+        entry.pop("regen_exhausted_at", None)
+        entry.pop("regen_exhausted_reason", None)
     idx[task_type] = entry
     save_braid_index(idx)
 
@@ -5512,6 +5793,51 @@ def braid_template_record_use(task_type, topology_error=False):
     entry["recent_outcomes"] = recent[-BRAID_RECENT_OUTCOMES_MAX:]
     idx[task_type] = entry
     save_braid_index(idx)
+
+
+def request_template_regen(task_type, *, project_name, source_task_id=None, reason=""):
+    cfg = load_config()
+    idx = load_braid_index()
+    entry = idx.get(task_type, {})
+    max_attempts = int((cfg.get("template_regen") or {}).get("max_attempts", CONFIG_DEFAULTS["template_regen"]["max_attempts"]) or 3)
+    attempts = int(entry.get("regen_attempts", 0) or 0)
+    if entry.get("auto_regen_task_id") and _template_regen_in_flight(task_type):
+        return {"enqueued": False, "reason": "already_in_flight", "attempts": attempts, "max_attempts": max_attempts}
+    if attempts >= max_attempts:
+        entry["regen_exhausted_at"] = now_iso()
+        entry["regen_exhausted_reason"] = reason[:240]
+        idx[task_type] = entry
+        save_braid_index(idx)
+        append_event(
+            "template-auto-regen",
+            "exhausted",
+            task_id=source_task_id,
+            details={"braid_template": task_type, "attempts": attempts, "max_attempts": max_attempts, "reason": reason[:240]},
+        )
+        return {"enqueued": False, "reason": "attempts_exhausted", "attempts": attempts, "max_attempts": max_attempts}
+    task = new_task(
+        role="planner",
+        engine="claude",
+        project=project_name,
+        summary=f"Generate BRAID template for {task_type}",
+        source=f"regen-for:{source_task_id or task_type}",
+        braid_template=task_type,
+        engine_args={"mode": "template-gen", "regen_reason": reason[:240], "origin_task_id": source_task_id},
+    )
+    enqueue_task(task)
+    entry["regen_attempts"] = attempts + 1
+    entry["auto_regen_task_id"] = task["task_id"]
+    entry["auto_regen_requested_at"] = now_iso()
+    entry["last_regen_reason"] = reason[:240]
+    idx[task_type] = entry
+    save_braid_index(idx)
+    append_event(
+        "template-auto-regen",
+        "requested",
+        task_id=source_task_id,
+        details={"braid_template": task_type, "regen_task_id": task["task_id"], "attempts": attempts + 1, "max_attempts": max_attempts},
+    )
+    return {"enqueued": True, "task_id": task["task_id"], "attempts": attempts + 1, "max_attempts": max_attempts}
 
 
 def lint_templates_command(*, template=None, lint_all=False):
@@ -6506,6 +6832,97 @@ def set_planner_disabled(project_name, disabled, *, reason=""):
         return False
     path.unlink()
     return True
+
+
+def slot_paused(slot):
+    path = SLOT_PAUSE_DIR / f"{slot}.json"
+    if not path.exists():
+        return None
+    return read_json(path, {})
+
+
+def set_slot_paused(slot, paused, *, reason="", source="runtime"):
+    SLOT_PAUSE_DIR.mkdir(parents=True, exist_ok=True)
+    path = SLOT_PAUSE_DIR / f"{slot}.json"
+    if paused:
+        payload = {
+            "slot": slot,
+            "paused_at": now_iso(),
+            "reason": reason,
+            "source": source,
+        }
+        write_json_atomic(path, payload)
+        append_event("slot-control", "slot_paused", details=payload)
+        return payload
+    prior = read_json(path, {}) if path.exists() else None
+    path.unlink(missing_ok=True)
+    append_event(
+        "slot-control",
+        "slot_resumed",
+        details={"slot": slot, "reason": reason, "source": source, "previous": prior or {}},
+    )
+    return None
+
+
+def slot_pause_status():
+    rows = {}
+    for slot in VALID_ENGINES:
+        paused = slot_paused(slot)
+        rows[slot] = paused
+    return rows
+
+
+def slot_pause_status_text():
+    lines = []
+    for slot, paused in slot_pause_status().items():
+        if paused:
+            lines.append(f"{slot}: paused at {paused.get('paused_at')} ({paused.get('reason') or 'no reason recorded'})")
+        else:
+            lines.append(f"{slot}: active")
+    return "\n".join(lines)
+
+
+def record_worker_crash(slot, *, task_id=None, detail=""):
+    history = read_json(WORKER_CRASH_HISTORY_PATH, {}) or {}
+    rows = list(history.get(slot) or [])
+    rows.append({"ts": now_iso(), "task_id": task_id, "detail": detail[:240]})
+    history[slot] = rows[-20:]
+    write_json_atomic(WORKER_CRASH_HISTORY_PATH, history)
+    append_event(
+        "worker",
+        "crash_recorded",
+        task_id=task_id,
+        details={"slot": slot, "detail": detail[:240]},
+    )
+    return history[slot]
+
+
+def crash_loop_guard_status(slot):
+    cfg = load_config().get("worker_crash_guard") or {}
+    window_seconds = int(cfg.get("window_seconds", CONFIG_DEFAULTS["worker_crash_guard"]["window_seconds"]) or 900)
+    max_crashes = int(cfg.get("max_crashes", CONFIG_DEFAULTS["worker_crash_guard"]["max_crashes"]) or 3)
+    rows = list((read_json(WORKER_CRASH_HISTORY_PATH, {}) or {}).get(slot) or [])
+    now = dt.datetime.now()
+    fresh = []
+    for row in rows:
+        ts = row.get("ts")
+        try:
+            then = dt.datetime.fromisoformat(ts) if ts else None
+        except ValueError:
+            then = None
+        if then is None:
+            continue
+        if then.tzinfo is not None:
+            then = then.astimezone().replace(tzinfo=None)
+        if (now - then).total_seconds() <= window_seconds:
+            fresh.append(row)
+    return {
+        "slot": slot,
+        "window_seconds": window_seconds,
+        "max_crashes": max_crashes,
+        "crashes": fresh,
+        "suppressed": len(fresh) >= max_crashes,
+    }
 
 
 # --- Queue inspection --------------------------------------------------------
@@ -8571,6 +8988,24 @@ def _workflow_issue_from_summary(feature, workflow, config):
             }
     if feature_status == "open":
         if frontier.get("task_id") and frontier.get("state") not in (None, "done"):
+            if frontier.get("state") == "awaiting-review" and (frontier.get("blocker") or {}).get("code"):
+                found = find_task(frontier.get("task_id"))
+                task = found[1] if found else None
+                issue = {
+                    "feature_id": feature_id,
+                    "project": project["name"],
+                    "summary": feature.get("summary") or feature_id,
+                    "issue_key": f"task:{frontier.get('task_id')}:{frontier.get('state')}:{(frontier.get('blocker') or {}).get('code')}",
+                    "kind": "frontier_task_blocked",
+                    "task_id": frontier.get("task_id"),
+                    "task_state": frontier.get("state"),
+                    "blocker": frontier.get("blocker"),
+                    "workflow": workflow,
+                    "task": task,
+                }
+                issue["action"], issue["diagnosis"], issue["policy"] = _workflow_policy_decision(issue, task, project)
+                if issue.get("action") or (frontier.get("blocker") or {}).get("code") == "review_gate_protocol_error":
+                    return issue
             if frontier.get("state") == "awaiting-review" and (frontier.get("age_seconds") or 0) >= 6 * 3600:
                 return {
                     "feature_id": feature_id,
@@ -9284,6 +9719,14 @@ def process_telegram():
 
 def dispatch_telegram_command(text):
     """Shared dispatcher used by both the file stub and the real bot."""
+    if text in ("/health", "health"):
+        return health_snapshot()
+    if text.startswith("/features") or text.startswith("features"):
+        parts = text.split(maxsplit=1)
+        return features_brief(parts[1].strip() if len(parts) > 1 else None)
+    if text.startswith("/queue ") or text.startswith("queue "):
+        parts = text.split(maxsplit=1)
+        return queue_brief(parts[1].strip())
     if text in ("/status", "status"):
         return status_text()
     if text in ("/tasks", "tasks"):
@@ -9303,9 +9746,37 @@ def dispatch_telegram_command(text):
                 lines.append(f"[{st}]")
                 lines.extend(items)
         return "\n".join(lines) if len(lines) > 1 else "queue empty"
+    if text.startswith("/planner ") or text.startswith("planner "):
+        parts = text.split()
+        project = parts[1] if len(parts) > 1 else None
+        action = parts[2].lower() if len(parts) > 2 else "status"
+        if action == "status":
+            return planner_status_text(project_filter=project)
+        if action == "on":
+            set_planner_disabled(project, False)
+            return f"planner enabled for {project}"
+        if action == "off":
+            set_planner_disabled(project, True, reason="telegram operator request")
+            return f"planner disabled for {project}"
+        if action == "run":
+            tick_planner()
+            return f"planner tick complete for {project}"
+        return "usage: /planner <project> [on|off|status|run]"
     if text in ("/planner", "planner"):
-        tick_planner()
-        return "planner tick complete"
+        return planner_status_text()
+    if text.startswith("/tick ") or text.startswith("tick "):
+        target = text.split(" ", 1)[1].strip().lower()
+        if target == "worker":
+            return json.dumps(_nudge_idle_queued_workers(), sort_keys=True)
+        if target == "reviewer":
+            tick_reviewer()
+            return "reviewer tick complete"
+        if target == "qa":
+            tick_qa()
+            return "qa tick complete"
+        if target == "canary":
+            return json.dumps(tick_canary_workflows(force=True), sort_keys=True)
+        return "usage: /tick [worker|reviewer|qa|canary]"
     if text in ("/reviewer", "reviewer"):
         tick_reviewer()
         return "reviewer tick complete"
@@ -9331,6 +9802,26 @@ def dispatch_telegram_command(text):
     if text.startswith("/report "):
         kind = text.split(" ", 1)[1].strip()
         return f"report written: {report(kind)}"
+    if text.startswith("/action ") or text.startswith("action "):
+        parts = text.split()
+        if len(parts) < 3:
+            return "usage: /action <id> <retry|abandon|unblock|approve>"
+        target_id = parts[1]
+        verb = parts[2].lower()
+        found = find_task(target_id)
+        if verb == "approve" and target_id.startswith("feature-"):
+            tick_self_repair_queue()
+            return f"{target_id}: self-repair queue ticked"
+        if not found:
+            return f"target not found: {target_id}"
+        state, task = found
+        if verb in ("retry", "unblock"):
+            reset_task_for_retry(target_id, state, reason=f"telegram {verb}", source="telegram")
+            return f"{target_id}: {state} -> queued"
+        if verb == "abandon":
+            move_task(target_id, state, "abandoned", reason="telegram abandon", mutator=lambda t: t.update({"finished_at": now_iso(), "abandoned_reason": "telegram abandon"}))
+            return f"{target_id}: {state} -> abandoned"
+        return f"unsupported action: {verb}"
     if text.startswith("/enqueue "):
         summary = text.split(" ", 1)[1].strip()
         task = new_task(
@@ -9368,7 +9859,9 @@ def dispatch_telegram_command(text):
             if out.get("feature_id") else json.dumps(out, sort_keys=True)
         )
     return (
-        "unknown command. allowed: /status /tasks /task <task_id> /queue /planner /reviewer /qa "
+        "unknown command. allowed: /health /features [project] /queue [state] /planner <project> [on|off|status|run] "
+        "/tick [worker|reviewer|qa|canary] /action <id> <retry|abandon|unblock|approve> "
+        "/status /tasks /task <task_id> /queue /planner /reviewer /qa "
         "/cleanup /env /env-repair /ask <question> /regression <project> /report morning|evening /enqueue <summary> "
         "/operators /telegram-register <chat_id> [name] /telegram-approve <chat_id> <approved_by> [name] "
         "/self_repair <summary> | <evidence>"
@@ -9454,6 +9947,11 @@ def main(argv=None):
 
     p_clean = sub.add_parser("cleanup-worktrees")
     p_clean.add_argument("--dry-run", action="store_true")
+
+    p_slots = sub.add_parser("slots")
+    p_slots.add_argument("action", choices=("status", "pause", "resume"))
+    p_slots.add_argument("--slot", choices=VALID_ENGINES)
+    p_slots.add_argument("--reason", default="")
 
     p_sweep = sub.add_parser("pr-sweep")
     p_sweep.add_argument("--dry-run", action="store_true")
@@ -9602,6 +10100,18 @@ def main(argv=None):
     elif args.cmd == "cleanup-worktrees":
         checked, cleaned, skipped = cleanup_worktrees(dry_run=args.dry_run)
         print(f"cleanup: {checked} checked, {cleaned} cleaned, {skipped} skipped")
+    elif args.cmd == "slots":
+        if args.action == "status":
+            print(slot_pause_status_text())
+        elif args.action == "pause":
+            if not args.slot:
+                raise SystemExit("--slot is required for slots pause")
+            print(json.dumps(set_slot_paused(args.slot, True, reason=args.reason or "manual pause", source="cli"), sort_keys=True))
+        elif args.action == "resume":
+            if not args.slot:
+                raise SystemExit("--slot is required for slots resume")
+            set_slot_paused(args.slot, False, reason=args.reason or "manual resume", source="cli")
+            print(f"{args.slot}: resumed")
     elif args.cmd == "pr-sweep":
         checked, merged, fb, alerted, skipped = pr_sweep(dry_run=args.dry_run)
         print(

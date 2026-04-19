@@ -122,6 +122,27 @@ def fail_task(task_id, from_state, reason, *, blocker_code=None, summary=None, d
     o.move_task(task_id, from_state, "failed", reason=reason[:200], mutator=mut)
 
 
+def _claude_budget_exhausted(text):
+    lower = (text or "").lower()
+    return "budget" in lower and any(token in lower for token in ("exhaust", "limit", "max_budget", "max budget"))
+
+
+def _pause_claude_slot_if_needed(reason, *, task=None):
+    if not _claude_budget_exhausted(reason):
+        return False
+    detail = f"Claude budget exhausted while handling {task.get('task_id') if task else '-'}: {reason[:180]}"
+    o.set_slot_paused("claude", True, reason=detail, source="worker")
+    if task:
+        o.append_event(
+            "worker",
+            "slot_paused_budget_exhausted",
+            task_id=task.get("task_id"),
+            feature_id=task.get("feature_id"),
+            details={"slot": "claude", "reason": detail},
+        )
+    return True
+
+
 def block_task(task_id, from_state, reason, *, blocker_code, summary=None, detail=None, retryable=True, mutator=None):
     def mut(task):
         task["finished_at"] = o.now_iso()
@@ -138,7 +159,7 @@ def block_task(task_id, from_state, reason, *, blocker_code, summary=None, detai
     o.move_task(task_id, from_state, "blocked", reason=reason[:200], mutator=mut)
 
 
-def _mark_review_target_for_retry(target_id, reason):
+def _mark_review_target_for_retry(target_id, reason, *, blocker_code="runtime_precondition_failed", metadata=None):
     found = o.find_task(target_id, states=("awaiting-review",))
     if not found:
         return False
@@ -149,11 +170,12 @@ def _mark_review_target_for_retry(target_id, reason):
         task["review_failure_at"] = o.now_iso()
         o.set_task_blocker(
             task,
-            "runtime_precondition_failed",
+            blocker_code,
             summary="reviewer task failed",
             detail=reason,
             source="worker",
             retryable=True,
+            metadata=metadata,
         )
     o.update_task_in_place(target_path, mut)
     return True
@@ -1513,6 +1535,7 @@ def run_claude_memory_synthesis(task, cfg, timeout, log_path):
         logf.write(f"\n# exit: {proc.returncode}\n# stdout:\n{proc.stdout or ''}\n")
 
     if proc.returncode != 0:
+        _pause_claude_slot_if_needed(proc.stdout or f"claude exit {proc.returncode}", task=task)
         fail_task(task_id, "running", f"claude exit {proc.returncode}",
                   blocker_code="llm_exit_error", summary="claude exit error", retryable=True)
         return
@@ -1858,6 +1881,8 @@ def _run_review_agent(kind, *, prompt, worktree, timeout, logf, last_msg_path):
     else:
         raw = last_msg_path.read_text(errors="replace") if last_msg_path.exists() else ""
     if proc.returncode != 0:
+        if kind == "claude":
+            _pause_claude_slot_if_needed((proc.stderr or raw or f"claude exit {proc.returncode}"), task={"task_id": last_msg_path.stem.split(".")[0]})
         return {"error": f"{kind} exit {proc.returncode}", "raw": raw}
 
     verdict = None
@@ -2123,6 +2148,7 @@ def run_claude_template_gen(task, cfg, task_type, timeout, log_path):
         logf.write(proc.stdout or "")
 
     if proc.returncode != 0:
+        _pause_claude_slot_if_needed(proc.stdout or f"claude exit {proc.returncode}", task=task)
         fail_task(task_id, "running", f"claude exit {proc.returncode}",
                   blocker_code="llm_exit_error", summary="claude exit error", retryable=True)
         return
@@ -2232,6 +2258,7 @@ def run_claude_template_refine(task, cfg, task_type, timeout, log_path):
         logf.write(f"\n# exit: {proc.returncode}\n# stdout:\n{proc.stdout or ''}\n")
 
     if proc.returncode != 0:
+        _pause_claude_slot_if_needed(proc.stdout or f"claude exit {proc.returncode}", task=task)
         fail_task(task_id, "running", f"claude exit {proc.returncode}",
                   blocker_code="llm_exit_error", summary="claude exit error", retryable=True)
         return
@@ -3017,29 +3044,37 @@ def enqueue_braid_refine(task, project_name, trailer, *, from_state):
     rounds = int(task.get("refine_round", 0))
     if rounds >= 1:
         o.braid_template_record_use(bt, topology_error=True)
-        regen = o.new_task(
-            role="planner",
-            engine="claude",
-            project=project_name,
-            summary=f"Generate BRAID template for {bt}",
-            source=f"regen-for:{task['task_id']}",
-            braid_template=bt,
-            engine_args={"mode": "template-gen"},
+        regen = o.request_template_regen(
+            bt,
+            project_name=project_name,
+            source_task_id=task["task_id"],
+            reason=trailer,
         )
-        o.enqueue_task(regen)
 
         def mut_block(t):
             t["finished_at"] = o.now_iso()
             t["topology_error"] = f"BRAID_TOPOLOGY_ERROR: refine_rounds_exhausted after {trailer}"
+            detail = trailer
+            if not regen.get("enqueued"):
+                detail = (
+                    f"{trailer}\nregen_attempts={regen.get('attempts')}/{regen.get('max_attempts')} "
+                    f"({regen.get('reason')})"
+                )
             o.set_task_blocker(
                 t,
                 "template_refine_exhausted",
                 summary="template refinement exhausted",
-                detail=trailer,
+                detail=detail,
                 source="worker",
                 retryable=False,
             )
-        o.move_task(task["task_id"], from_state, "blocked", reason="refine exhausted -> regen", mutator=mut_block)
+        o.move_task(
+            task["task_id"],
+            from_state,
+            "blocked",
+            reason="refine exhausted -> regen" if regen.get("enqueued") else "refine exhausted -> regen capped",
+            mutator=mut_block,
+        )
         return
 
     refine_task = o.new_task(
@@ -3133,6 +3168,7 @@ def run_claude_planner(task, cfg, timeout, log_path):
         logf.write(f"\n# exit: {proc.returncode}\n# stdout:\n{proc.stdout or ''}\n")
 
     if proc.returncode != 0:
+        _pause_claude_slot_if_needed(proc.stdout or f"claude exit {proc.returncode}", task=task)
         fail_task(task_id, "running", f"claude exit {proc.returncode}",
                   blocker_code="llm_exit_error", summary="claude exit error", retryable=True)
         return
@@ -3338,6 +3374,16 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
     except KeyError:
         fail_task(task_id, "claimed", f"unknown project {project_name}",
                   blocker_code="runtime_unknown_project", summary="unknown project", retryable=False)
+        return
+    if not (cfg.get("reviews") or {}).get("self_review", True):
+        fail_task(
+            task_id,
+            "claimed",
+            "review runtime invariant violated: reviews.self_review must remain enabled",
+            blocker_code="runtime_precondition_failed",
+            summary="self-review invariant disabled",
+            retryable=False,
+        )
         return
 
     # Pick oldest awaiting-review task for this project (FIFO by finished_at).
@@ -3614,8 +3660,20 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
                     logf=logf,
                 )
                 if gate_result.get("error"):
-                    blocker = gate_result.get("blocker_code") or ("llm_timeout" if "timeout" in gate_result["error"] else "llm_exit_error")
-                    _mark_review_target_for_retry(target_id, gate_result["error"])
+                    blocker = gate_result.get("blocker_code") or "review_gate_protocol_error"
+                    _mark_review_target_for_retry(
+                        target_id,
+                        gate_result["error"],
+                        blocker_code="review_gate_protocol_error",
+                        metadata={"gate_name": gate_name},
+                    )
+                    o.append_event(
+                        "review-gate",
+                        "protocol_error",
+                        task_id=task_id,
+                        feature_id=target.get("feature_id"),
+                        details={"target_task_id": target_id, "gate_name": gate_name, "error": gate_result["error"][:240]},
+                    )
                     fail_task(task_id, "running", gate_result["error"],
                               blocker_code=blocker, summary=f"{gate_name} failed", retryable=True)
                     return
@@ -3669,9 +3727,14 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
                 review_timeout,
             )
             if self_repair_adjudication.get("error"):
-                _mark_review_target_for_retry(target_id, self_repair_adjudication["error"])
+                _mark_review_target_for_retry(
+                    target_id,
+                    self_repair_adjudication["error"],
+                    blocker_code="review_gate_protocol_error",
+                    metadata={"gate_name": "self-repair-adjudication"},
+                )
                 fail_task(task_id, "running", self_repair_adjudication["error"],
-                          blocker_code="llm_exit_error", summary="self-repair final adjudication failed", retryable=True)
+                          blocker_code="review_gate_protocol_error", summary="self-repair final adjudication failed", retryable=True)
                 return
             combined_findings = (combined_findings + "\n\n" + self_repair_adjudication.get("raw", "")).strip()
             final_verdict = "approve" if self_repair_adjudication.get("verdict") == "approve" else (
@@ -5726,6 +5789,7 @@ def main():
         log_path = o.LOGS_DIR / f"{task['task_id']}.log"
         with log_path.open("a") as f:
             f.write(f"\n# worker crashed:\n{traceback.format_exc()}\n")
+        o.record_worker_crash(slot, task_id=task["task_id"], detail=str(exc))
         # Best-effort: try to move the task to failed wherever it is now.
         for st in ("running", "claimed"):
             if o.task_path(task["task_id"], st).exists():

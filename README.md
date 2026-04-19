@@ -243,6 +243,7 @@ The orchestrator is launchd-driven. All plists live in `~/Library/LaunchAgents/c
 | `pr-sweep` | StartInterval=600 | Auto-merge task PRs into feature branches + address PR feedback |
 | `feature-finalize` | StartInterval=600 | Opens feature->main PRs |
 | `workflow-check` | StartInterval=1800 | Diagnoses blocked feature workflows, reports to Telegram, attempts bounded self-heal |
+| `dashboard-feed` | StartInterval=5 | Writes `state/runtime/dashboard-feed.json` for the live dashboard |
 | `canary-workflows` | StartInterval=21600 | Enqueues one synthetic end-to-end canary feature when due |
 | `cleanup-worktrees` | StartInterval=3600s | Removes worktrees + local branches for merged/closed PRs |
 | `regression` | Weekly (lvc-standard) | Full JMH sweep under exclusive project lock |
@@ -312,9 +313,9 @@ launchctl setenv GH_TOKEN "$GH_TOKEN"
 
 ## Mobile control (Telegram)
 
-Long-polling bot at `bin/telegram_bot.py`. No public ports, no webhook. The bot token can come from the file-backed `telegram-bot-token` secret or `config/telegram.json`. Approved chats are read from `state/runtime/allowlist.json`, with optional bootstrap IDs still supported from `config/telegram.json`. Unknown chats are logged to `logs/telegram-reject.log`, but `/register [name]` is allowed so a new operator can request access. Reports written to `reports/` are auto-pushed every 60s.
+Long-polling bot at `bin/telegram_bot.py`. No public ports, no webhook. The bot token comes from the file-backed `telegram-bot-token` secret or `config/telegram.json`. Approved chats are read from `state/runtime/allowlist.json`. The runtime now pushes terse event-driven alert cards instead of minute-by-minute report spam, and `/ask` is capped with an explicit `[Read full]` affordance when the answer exceeds the mobile card budget.
 
-Commands: `/status`, `/queue`, `/planner`, `/reviewer`, `/qa`, `/cleanup`, `/ask <question>`, `/ask codex: <question>`, `/ask both: <question>`, `/regression <project>`, `/report morning|evening`, `/enqueue <summary>`, `/register [name]`, `/approve_operator <chat_id> [name]`, `/operators`. Unknown commands return the help string — no arbitrary shell.
+Commands: `/health`, `/features [project]`, `/queue [state]`, `/planner <project> [on|off|status|run]`, `/tick [worker|reviewer|qa|canary]`, `/action <id> <retry|abandon|unblock|approve>`, `/ask <question>`, `/report [morning|evening]`. Unknown commands return contextual help that starts with `/health`.
 
 `/ask` is read-only. It gathers live orchestrator state, selected logs, roadmap context, explicit current-date / regression-schedule facts, and PR metadata when a PR number is mentioned. `/ask` defaults to Claude, `/ask codex:` targets Codex, and `/ask both:` queries both then synthesizes one answer. It does not execute arbitrary shell or mutate runtime state.
 
@@ -350,6 +351,12 @@ This writes to `config/orchestrator.local.json`, validates the repo shape, reloa
 ## Metrics
 
 The runtime now emits structured metric rows to `state/runtime/metrics.jsonl`. `workflow-check` writes snapshots before each sweep, and reports/status surface the latest environment, queue, and blocked-frontier metrics from that stream.
+
+## Dashboard
+
+`bin/dashboard_feed.py` writes `state/runtime/dashboard-feed.json` for the live dashboard. Open [orchestrator-dashboard.html](orchestrator-dashboard.html) through any static file server rooted at the repo and it will poll that feed every 5 seconds.
+
+For launchd installs, use [launchd/com.devmini.orchestrator.dashboard-feed.plist](launchd/com.devmini.orchestrator.dashboard-feed.plist) as the tracked template for the 5-second feed writer job.
 
 ## Review gates
 

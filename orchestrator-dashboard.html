@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>devmini orchestrator dashboard</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #020617;
+      --surface: rgba(15, 23, 42, 0.72);
+      --border: #1e293b;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --cyan: #22d3ee;
+      --emerald: #34d399;
+      --amber: #fbbf24;
+      --rose: #fb7185;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 20px;
+      background: radial-gradient(circle at top, rgba(34,211,238,0.12), transparent 30%), var(--bg);
+      color: var(--text);
+      font: 12px/1.5 "JetBrains Mono", monospace;
+    }
+    h1, h2, p { margin: 0; }
+    .header, .grid { display: grid; gap: 16px; }
+    .header { grid-template-columns: 1.4fr 1fr 1fr 1fr; margin-bottom: 16px; }
+    .grid { grid-template-columns: 1.4fr 1fr; }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 16px;
+      backdrop-filter: blur(10px);
+    }
+    .title { display: flex; flex-direction: column; gap: 6px; }
+    .subtitle, .muted { color: var(--muted); }
+    .metric { font-size: 28px; font-weight: 700; margin-top: 8px; }
+    .metric.ok { color: var(--emerald); }
+    .metric.warn { color: var(--amber); }
+    .metric.crit { color: var(--rose); }
+    .list { display: grid; gap: 10px; }
+    .row {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 12px;
+      background: rgba(15, 23, 42, 0.45);
+    }
+    .row strong, .accent { color: var(--cyan); }
+    .chip {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      margin-right: 6px;
+      margin-top: 6px;
+    }
+    .chip.blocked, .chip.failed { color: var(--rose); border-color: rgba(251,113,133,0.45); }
+    .chip.awaiting-review { color: var(--amber); border-color: rgba(251,191,36,0.45); }
+    .chip.running { color: var(--emerald); border-color: rgba(52,211,153,0.45); }
+    .section-title { margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+    @media (max-width: 960px) {
+      .header, .grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <section class="header">
+    <div class="card title">
+      <h1>devmini orchestrator</h1>
+      <p class="subtitle">workflow state, queue, blockers, recent transitions</p>
+      <p class="muted" id="timestamp">loading…</p>
+    </div>
+    <div class="card">
+      <p class="section-title">Environment</p>
+      <div class="metric" id="envMetric">-</div>
+      <p class="muted" id="envSub">-</p>
+    </div>
+    <div class="card">
+      <p class="section-title">Workflow Issues</p>
+      <div class="metric" id="issueMetric">-</div>
+      <p class="muted" id="issueSub">-</p>
+    </div>
+    <div class="card">
+      <p class="section-title">Frontier Blocked</p>
+      <div class="metric" id="blockedMetric">-</div>
+      <p class="muted" id="blockedSub">-</p>
+    </div>
+  </section>
+
+  <section class="grid">
+    <div class="card">
+      <p class="section-title">Features</p>
+      <div class="list" id="features"></div>
+    </div>
+    <div class="list">
+      <div class="card">
+        <p class="section-title">Queue</p>
+        <div class="list" id="queue"></div>
+      </div>
+      <div class="card">
+        <p class="section-title">Blockers</p>
+        <div class="list" id="blockers"></div>
+      </div>
+      <div class="card">
+        <p class="section-title">Recent Transitions</p>
+        <div class="list" id="transitions"></div>
+      </div>
+    </div>
+  </section>
+
+  <script>
+    const feedUrl = "state/runtime/dashboard-feed.json";
+
+    function esc(value) {
+      return String(value ?? "").replace(/[&<>]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[ch]));
+    }
+
+    function metricClass(ok, warn) {
+      if (ok) return "metric ok";
+      if (warn) return "metric warn";
+      return "metric crit";
+    }
+
+    function render(data) {
+      document.getElementById("timestamp").textContent = `updated ${data.timestamp}`;
+
+      const envOk = Number(data.health.environment_ok) === 1 && Number(data.health.environment_error_count) === 0;
+      const envMetric = document.getElementById("envMetric");
+      envMetric.className = metricClass(envOk, !envOk && Number(data.health.environment_error_count) < 2);
+      envMetric.textContent = envOk ? "OK" : `${data.health.environment_error_count} errors`;
+      document.getElementById("envSub").textContent = `${data.agents.length} agents visible`;
+
+      const issues = Number(data.health.workflow_check_issue_count || 0);
+      const issueMetric = document.getElementById("issueMetric");
+      issueMetric.className = metricClass(issues === 0, issues > 0 && issues < 3);
+      issueMetric.textContent = issues;
+      document.getElementById("issueSub").textContent = "workflow-check";
+
+      const blocked = Number(data.health.feature_frontier_blocked_count || 0);
+      const blockedMetric = document.getElementById("blockedMetric");
+      blockedMetric.className = metricClass(blocked === 0, blocked > 0 && blocked < 3);
+      blockedMetric.textContent = `${blocked}/${data.health.feature_open_count}`;
+      document.getElementById("blockedSub").textContent = "open features";
+
+      document.getElementById("features").innerHTML = data.features.length ? data.features.map(feature => `
+        <div class="row">
+          <div><strong>${esc(feature.feature_id)}</strong> · ${esc(feature.project)}</div>
+          <div>${esc(feature.summary || "")}</div>
+          <div class="muted">frontier: ${esc(feature.frontier.state || "-")} · ${esc(feature.frontier.task_id || "-")} · ${esc(feature.frontier.age_text || "fresh")}</div>
+          ${feature.frontier.blocker && feature.frontier.blocker.code ? `<span class="chip blocked">${esc(feature.frontier.blocker.code)}</span>` : ""}
+          ${feature.self_repair && feature.self_repair.issue_count ? `<span class="chip">${feature.self_repair.issue_count} self-repair</span>` : ""}
+        </div>
+      `).join("") : `<div class="muted">No open features.</div>`;
+
+      document.getElementById("queue").innerHTML = data.queue.map(row => `
+        <div class="row"><strong>${esc(row.state)}</strong> <span class="accent">${esc(row.count)}</span></div>
+      `).join("");
+
+      document.getElementById("blockers").innerHTML = data.blocker_codes.length ? data.blocker_codes.map(row => `
+        <div class="row"><strong>${esc(row.code)}</strong> <span class="accent">${esc(row.count)}</span> <span class="muted">${esc(row.pct_of_blocked)}%</span></div>
+      `).join("") : `<div class="muted">No blocked tasks.</div>`;
+
+      document.getElementById("transitions").innerHTML = data.recent_transitions.length ? data.recent_transitions.slice(-8).reverse().map(row => `
+        <div class="row">
+          <div><strong>${esc(row.task_id)}</strong></div>
+          <div class="muted">${esc(row.from_state)} → ${esc(row.to_state)}</div>
+          <div class="muted">${esc(row.ts)}</div>
+        </div>
+      `).join("") : `<div class="muted">No recent transitions.</div>`;
+    }
+
+    async function refresh() {
+      const response = await fetch(feedUrl, { cache: "no-store" });
+      render(await response.json());
+    }
+
+    refresh();
+    setInterval(refresh, 5000);
+  </script>
+</body>
+</html>
