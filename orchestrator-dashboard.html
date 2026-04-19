@@ -539,6 +539,13 @@
         </div>
         <div class="mini-list" id="budget"></div>
       </div>
+      <div class="card">
+        <div class="section-head">
+          <span class="section-title">Codeburn</span>
+          <span class="section-sub">24h task costs</span>
+        </div>
+        <div class="mini-list" id="costs"></div>
+      </div>
     </aside>
 
     <main class="stack">
@@ -573,6 +580,13 @@
           <span class="section-sub">tail</span>
         </div>
         <div class="mini-list" id="transitions"></div>
+      </div>
+      <div class="card">
+        <div class="section-head">
+          <span class="section-title">Runtime Audit</span>
+          <span class="section-sub">env, bypass, orphan</span>
+        </div>
+        <div class="mini-list" id="runtimeAudit"></div>
       </div>
     </aside>
   </section>
@@ -788,6 +802,7 @@
 
     function renderServer(data) {
       const server = data.dashboard_server || {};
+      const engine = server.state_engine || {};
       document.getElementById("server").innerHTML = `
         <div class="mini-row">
           <div class="mini-top"><strong>URL</strong><span class="tiny">dashboard</span></div>
@@ -800,6 +815,11 @@
         <div class="mini-row">
           <div class="mini-top"><strong>Allowed CIDRs</strong><span class="tiny">${esc((server.allowed_cidrs || []).length)} entries</span></div>
           <div class="mini-detail">${esc((server.allowed_cidrs || []).join(", "))}</div>
+        </div>
+        <div class="mini-row">
+          <div class="mini-top"><strong>State Engine</strong><span class="tiny">${esc(engine.mode || "off")}</span></div>
+          <div class="mini-detail">${esc(engine.integrity_check || "-")}</div>
+          <div class="tiny">${esc(engine.db_path || "")}</div>
         </div>
       `;
     }
@@ -822,6 +842,35 @@
         </div>
       `).join("") : `<div class="empty">No cap hits in the last 24h.</div>`;
       document.getElementById("budget").innerHTML = laneRows + recentRows;
+    }
+
+    function renderCosts(data) {
+      const costs = data.task_costs || {};
+      const summary = costs.summary || {};
+      const engines = costs.by_engine || [];
+      const recent = costs.recent || [];
+      const top = `
+        <div class="mini-row">
+          <div class="mini-top"><strong>24h spend</strong><span class="tiny">${esc(summary.task_count || 0)} tasks</span></div>
+          <div class="mini-detail">$${esc(Number(summary.cost_usd || 0).toFixed(4))}</div>
+          <div class="tiny">in ${esc(summary.input_tokens || 0)} / out ${esc(summary.output_tokens || 0)} / cache ${esc(summary.cache_tokens || 0)} / search ${esc(summary.search_tokens || 0)}</div>
+        </div>
+      `;
+      const engineRows = engines.slice(0, 4).map(row => `
+        <div class="mini-row">
+          <div class="mini-top"><strong>${esc(row.engine || "unknown")}</strong><span class="tiny">${esc(row.task_count || 0)} tasks</span></div>
+          <div class="mini-detail">$${esc(Number(row.cost_usd || 0).toFixed(4))}</div>
+          <div class="tiny">in ${esc(row.input_tokens || 0)} / out ${esc(row.output_tokens || 0)}</div>
+        </div>
+      `).join("");
+      const recentRows = recent.slice(0, 4).map(row => `
+        <div class="mini-row">
+          <div class="mini-top"><strong>${esc(row.task_id || "-")}</strong><span class="tiny">${esc(row.engine || "-")}</span></div>
+          <div class="mini-detail">$${esc(Number(row.cost_usd || 0).toFixed(4))} ${esc(row.model || "")}</div>
+          <div class="tiny">${esc(formatTs(row.ts))}</div>
+        </div>
+      `).join("");
+      document.getElementById("costs").innerHTML = top + engineRows + recentRows;
     }
 
     function renderQueue(data) {
@@ -862,6 +911,32 @@
           <div class="tiny">${esc(row.reason || "")}</div>
         </div>
       `).join("") : `<div class="empty">No recent transitions.</div>`;
+    }
+
+    function renderRuntimeAudit(data) {
+      const audit = data.runtime_audit || {};
+      const envRows = (audit.environment_checks || []).slice(-4).reverse().map(row => `
+        <div class="mini-row">
+          <div class="mini-top"><strong>${esc(row.project || "global")}</strong><span class="status-badge status-${esc(row.result === "ok" ? "approve" : "failed")}">${esc(row.result)}</span></div>
+          <div class="mini-detail">${esc(row.blocker_summary || "no blockers")}</div>
+          <div class="tiny">${esc(formatTs(row.ts))}</div>
+        </div>
+      `).join("");
+      const bypassRows = (audit.task_bypasses || []).slice(-4).reverse().map(row => `
+        <div class="mini-row">
+          <div class="mini-top"><strong>${esc(row.task_id || "-")}</strong><span class="tiny">${esc(row.gate || "-")}</span></div>
+          <div class="mini-detail">${esc(row.reason || "-")}</div>
+          <div class="tiny">${esc(formatTs(row.ts))}</div>
+        </div>
+      `).join("");
+      const orphanRows = (audit.orphan_recoveries || []).slice(-4).reverse().map(row => `
+        <div class="mini-row">
+          <div class="mini-top"><strong>${esc(row.task_id || "-")}</strong><span class="tiny">${esc(row.from_state || "-")}</span></div>
+          <div class="mini-detail">reaped after ${esc(row.age_seconds || 0)}s</div>
+          <div class="tiny">${esc(formatTs(row.ts))}</div>
+        </div>
+      `).join("");
+      document.getElementById("runtimeAudit").innerHTML = envRows + bypassRows + orphanRows || `<div class="empty">No runtime audit rows yet.</div>`;
     }
 
     function indexTasks(data) {
@@ -1177,9 +1252,11 @@
       renderAgentTasks();
       renderServer(data);
       renderBudget(data);
+      renderCosts(data);
       renderQueue(data);
       renderBlockers(data);
       renderTransitions(data);
+      renderRuntimeAudit(data);
       renderFeatures(data);
     }
 

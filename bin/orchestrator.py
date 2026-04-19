@@ -1453,6 +1453,50 @@ def _record_orphan_recovery(task_id, from_state, age_seconds, *, cfg=None):
     return True
 
 
+def _record_task_bypass(task_id, gate, reason, *, cfg=None):
+    if not _state_engine_write_enabled(cfg=cfg):
+        return False
+    engine = get_state_engine(cfg=cfg)
+    engine.initialize()
+    engine.record_task_bypass(
+        ts=now_iso(),
+        task_id=task_id,
+        gate=gate,
+        reason=reason,
+    )
+    return True
+
+
+def record_task_cost(
+    *,
+    task_id,
+    engine,
+    model=None,
+    input_tokens=0,
+    output_tokens=0,
+    cache_tokens=0,
+    search_tokens=0,
+    cost_usd=0.0,
+    cfg=None,
+):
+    if not _state_engine_write_enabled(cfg=cfg):
+        return False
+    db = get_state_engine(cfg=cfg)
+    db.initialize()
+    db.record_task_cost(
+        ts=now_iso(),
+        task_id=task_id,
+        engine=engine,
+        model=model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_tokens=cache_tokens,
+        search_tokens=search_tokens,
+        cost_usd=cost_usd,
+    )
+    return True
+
+
 def _fs_queue_state_counts():
     counts = {}
     for state in STATES:
@@ -3371,9 +3415,14 @@ def atomic_claim(slot_engine):
         if (
             project_name
             and not project_environment_ok(project_name)
-            and not _task_allows_environment_bypass(task)
         ):
-            continue
+            if not _task_allows_environment_bypass(task):
+                continue
+            _record_task_bypass(
+                task["task_id"],
+                "project_environment_ok",
+                f"self-repair bypass for degraded project {project_name}",
+            )
         if slot_engine == "codex":
             fid = task.get("feature_id")
             if fid and fid in busy_features:

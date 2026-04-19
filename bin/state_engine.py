@@ -820,6 +820,54 @@ class StateEngine:
                 (ts, _iso_to_epoch(ts), task_id, from_state, int(age_seconds)),
             )
 
+    def record_task_bypass(self, *, ts: str, task_id: str, gate: str, reason: str, conn: sqlite3.Connection | None = None) -> None:
+        conn = conn or self.connect()
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO task_bypass_log (ts, ts_epoch, task_id, gate, reason)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (ts, _iso_to_epoch(ts), task_id, gate, reason),
+            )
+
+    def record_task_cost(
+        self,
+        *,
+        ts: str,
+        task_id: str,
+        engine: str,
+        model: str | None,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cache_tokens: int = 0,
+        search_tokens: int = 0,
+        cost_usd: float = 0.0,
+        conn: sqlite3.Connection | None = None,
+    ) -> None:
+        conn = conn or self.connect()
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO task_costs (
+                    ts, ts_epoch, task_id, engine, model,
+                    input_tokens, output_tokens, cache_tokens, search_tokens, cost_usd
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    ts,
+                    _iso_to_epoch(ts),
+                    task_id,
+                    engine,
+                    model,
+                    int(input_tokens or 0),
+                    int(output_tokens or 0),
+                    int(cache_tokens or 0),
+                    int(search_tokens or 0),
+                    float(cost_usd or 0.0),
+                ),
+            )
+
     def count_table(self, table: str, *, conn: sqlite3.Connection | None = None) -> int:
         conn = conn or self.connect()
         row = conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()
@@ -854,6 +902,120 @@ class StateEngine:
             }
             for row in rows
         ]
+
+    def read_task_bypasses(self, *, conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
+        conn = conn or self.connect()
+        rows = conn.execute(
+            "SELECT ts, task_id, gate, reason FROM task_bypass_log ORDER BY ts_epoch ASC"
+        ).fetchall()
+        return [
+            {
+                "ts": row["ts"],
+                "task_id": row["task_id"],
+                "gate": row["gate"],
+                "reason": row["reason"],
+            }
+            for row in rows
+        ]
+
+    def read_task_costs(
+        self,
+        *,
+        task_id: str | None = None,
+        limit: int | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        conn = conn or self.connect()
+        sql = """
+            SELECT ts, task_id, engine, model, input_tokens, output_tokens, cache_tokens, search_tokens, cost_usd
+              FROM task_costs
+        """
+        params: list[Any] = []
+        if task_id is not None:
+            sql += " WHERE task_id = ?"
+            params.append(task_id)
+        sql += " ORDER BY ts_epoch DESC"
+        if limit is not None and limit >= 0:
+            sql += f" LIMIT {int(limit)}"
+        rows = conn.execute(sql, params).fetchall()
+        return [
+            {
+                "ts": row["ts"],
+                "task_id": row["task_id"],
+                "engine": row["engine"],
+                "model": row["model"],
+                "input_tokens": int(row["input_tokens"] or 0),
+                "output_tokens": int(row["output_tokens"] or 0),
+                "cache_tokens": int(row["cache_tokens"] or 0),
+                "search_tokens": int(row["search_tokens"] or 0),
+                "cost_usd": float(row["cost_usd"] or 0.0),
+            }
+            for row in rows
+        ]
+
+    def aggregate_task_costs(self, *, hours: int = 24, conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+        conn = conn or self.connect()
+        since_epoch = int(time.time()) - max(int(hours), 1) * 3600
+        summary_row = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS rows_count,
+                COUNT(DISTINCT task_id) AS task_count,
+                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(cache_tokens), 0) AS cache_tokens,
+                COALESCE(SUM(search_tokens), 0) AS search_tokens,
+                COALESCE(SUM(cost_usd), 0.0) AS cost_usd
+              FROM task_costs
+             WHERE ts_epoch >= ?
+            """,
+            (since_epoch,),
+        ).fetchone()
+        by_engine_rows = conn.execute(
+            """
+            SELECT
+                engine,
+                COUNT(*) AS rows_count,
+                COUNT(DISTINCT task_id) AS task_count,
+                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(cache_tokens), 0) AS cache_tokens,
+                COALESCE(SUM(search_tokens), 0) AS search_tokens,
+                COALESCE(SUM(cost_usd), 0.0) AS cost_usd
+              FROM task_costs
+             WHERE ts_epoch >= ?
+             GROUP BY engine
+             ORDER BY cost_usd DESC, engine ASC
+            """,
+            (since_epoch,),
+        ).fetchall()
+        recent = self.read_task_costs(limit=12, conn=conn)
+        return {
+            "window_hours": max(int(hours), 1),
+            "summary": {
+                "rows_count": int(summary_row["rows_count"] or 0) if summary_row else 0,
+                "task_count": int(summary_row["task_count"] or 0) if summary_row else 0,
+                "input_tokens": int(summary_row["input_tokens"] or 0) if summary_row else 0,
+                "output_tokens": int(summary_row["output_tokens"] or 0) if summary_row else 0,
+                "cache_tokens": int(summary_row["cache_tokens"] or 0) if summary_row else 0,
+                "search_tokens": int(summary_row["search_tokens"] or 0) if summary_row else 0,
+                "cost_usd": float(summary_row["cost_usd"] or 0.0) if summary_row else 0.0,
+            },
+            "by_engine": [
+                {
+                    "engine": row["engine"],
+                    "rows_count": int(row["rows_count"] or 0),
+                    "task_count": int(row["task_count"] or 0),
+                    "input_tokens": int(row["input_tokens"] or 0),
+                    "output_tokens": int(row["output_tokens"] or 0),
+                    "cache_tokens": int(row["cache_tokens"] or 0),
+                    "search_tokens": int(row["search_tokens"] or 0),
+                    "cost_usd": float(row["cost_usd"] or 0.0),
+                }
+                for row in by_engine_rows
+            ],
+            "recent": recent,
+        }
 
     def claim_task(self, task_id: str, *, slot_engine: str, claimed_at: str, conn: sqlite3.Connection | None = None) -> dict[str, Any] | None:
         conn = conn or self.connect()

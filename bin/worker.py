@@ -42,6 +42,7 @@ SELF_REPAIR_COUNCIL_DEFAULT = ("socrates", "feynman", "ada", "torvalds")
 # Default per-slot timeouts in seconds. Overridable via
 # config["slots"][<slot>]["timeout_sec"] or task["engine_args"]["timeout_sec"].
 DEFAULT_TIMEOUTS = {"claude": 1800, "codex": 3600, "qa": 900}
+USAGE_JSON_RE = re.compile(r'^\s*\{.*"(input_tokens|output_tokens|cost_usd)".*\}\s*$')
 
 
 def log(msg):
@@ -77,6 +78,35 @@ def _run_bounded(cmd, *, timeout, cwd=None, env=None, stdout=None, stderr=None, 
                 pass
             out, err = proc.communicate()
         raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout, output=out, stderr=err) from exc
+
+
+def _record_task_costs_from_text(task_id, engine, model, text):
+    if not task_id or not text:
+        return 0
+    recorded = 0
+    for raw_line in str(text).splitlines():
+        line = raw_line.strip()
+        if not line or not USAGE_JSON_RE.match(line):
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        try:
+            o.record_task_cost(
+                task_id=task_id,
+                engine=str(payload.get("slot") or engine or ""),
+                model=payload.get("model") or model,
+                input_tokens=int(payload.get("input_tokens") or 0),
+                output_tokens=int(payload.get("output_tokens") or 0),
+                cache_tokens=int(payload.get("cache_tokens") or payload.get("cached_tokens") or 0),
+                search_tokens=int(payload.get("search_tokens") or 0),
+                cost_usd=float(payload.get("cost_usd") or 0.0),
+            )
+            recorded += 1
+        except Exception:
+            continue
+    return recorded
 
 
 def _claude_subprocess_env(extra_env=None):
@@ -2165,8 +2195,10 @@ def _run_review_agent(kind, *, prompt, worktree, timeout, logf, last_msg_path):
         raw = proc.stdout or ""
         last_msg_path.write_text(raw)
         logf.write(raw)
+        _record_task_costs_from_text(last_msg_path.stem.split(".")[0], "claude", "sonnet", raw)
     else:
         raw = last_msg_path.read_text(errors="replace") if last_msg_path.exists() else ""
+        _record_task_costs_from_text(last_msg_path.stem.split(".")[0], "codex", None, raw)
     if proc.returncode != 0:
         if kind == "claude":
             _pause_claude_slot_if_needed((proc.stderr or raw or f"claude exit {proc.returncode}"), task={"task_id": last_msg_path.stem.split(".")[0]})
@@ -2864,6 +2896,7 @@ def _run_self_repair_council(
     raw = proc.stdout or ""
     if last_msg_path:
         last_msg_path.write_text(raw)
+    _record_task_costs_from_text(task.get("task_id"), "claude", model, raw)
     if proc.returncode != 0:
         if _claude_budget_exhausted(proc.stderr or raw or ""):
             _pause_claude_slot_if_needed((proc.stderr or raw or f"claude exit {proc.returncode}"))
@@ -5403,6 +5436,8 @@ def run_codex_slot(task, cfg):
             lines = [l.strip() for l in last_msg_path.read_text().splitlines() if l.strip()]
             # Paper's guidance: scan the last few non-empty lines.
             trailer = _find_braid_trailer(lines)
+        if log_path.exists():
+            _record_task_costs_from_text(task_id, "codex", None, log_path.read_text(errors="replace"))
 
         if proc.returncode != 0 and not trailer:
             def mut_fail(t):

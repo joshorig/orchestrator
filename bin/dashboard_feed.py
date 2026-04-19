@@ -20,6 +20,15 @@ def _safe_int(value, default=0):
         return default
 
 
+def _state_engine():
+    cfg = o.load_config()
+    if o.state_engine_config(cfg=cfg).get("mode") == "off":
+        return None
+    engine = o.get_state_engine(cfg=cfg)
+    engine.initialize()
+    return engine
+
+
 def _read_task_log(task_id, *, tail_lines=80, max_chars=12000):
     log_path = o.LOGS_DIR / f"{task_id}.log"
     if not log_path.exists():
@@ -151,7 +160,9 @@ def _agents():
 
 
 def _queue():
-    return [{"state": state, "count": count} for state, count in o.queue_counts().items()]
+    engine = _state_engine()
+    counts = engine.queue_state_counts() if engine else o.queue_counts()
+    return [{"state": state, "count": count} for state, count in counts.items()]
 
 
 def _features():
@@ -219,11 +230,16 @@ def _features():
 
 
 def _blocker_codes():
+    engine = _state_engine()
     counts = {}
     total = 0
-    for path in o.queue_dir("blocked").glob("*.json"):
-        task = o.read_json(path, {}) or {}
-        blocker = o.task_blocker(task) or {}
+    rows = engine.read_tasks(states=("blocked",)) if engine else None
+    if rows is None:
+        rows = []
+        for path in o.queue_dir("blocked").glob("*.json"):
+            rows.append(o.read_json(path, {}) or {})
+    for task in rows:
+        blocker = o.task_blocker(task or {}) or {}
         code = blocker.get("code") or "unknown"
         counts[code] = counts.get(code, 0) + 1
         total += 1
@@ -240,18 +256,16 @@ def _blocker_codes():
 
 
 def _recent_transitions():
-    rows = []
-    for row in o.read_transitions(limit=50):
-        rows.append(
-            {
-                "ts": row.get("ts"),
-                "task_id": row.get("task_id"),
-                "from_state": row.get("from_state"),
-                "to_state": row.get("to_state"),
-                "reason": row.get("reason"),
-            }
-        )
-    return rows
+    return [
+        {
+            "ts": row.get("ts"),
+            "task_id": row.get("task_id"),
+            "from_state": row.get("from_state"),
+            "to_state": row.get("to_state"),
+            "reason": row.get("reason"),
+        }
+        for row in o.read_transitions(limit=50)
+    ]
 
 
 def _claude_budget():
@@ -298,11 +312,35 @@ def _claude_budget():
 
 def _dashboard_server():
     cfg = o.dashboard_server_config()
+    engine = _state_engine()
     return {
         "host": cfg["host"],
         "port": cfg["port"],
         "allowed_cidrs": list(cfg["allowed_cidrs"]),
         "dashboard_url": f"http://{cfg['host']}:{cfg['port']}/",
+        "state_engine": (engine.status() if engine else {"enabled": False, "mode": "off"}),
+    }
+
+
+def _task_costs():
+    engine = _state_engine()
+    if not engine:
+        return {"window_hours": 24, "summary": {}, "by_engine": [], "recent": []}
+    return engine.aggregate_task_costs(hours=24)
+
+
+def _runtime_audit():
+    engine = _state_engine()
+    if not engine:
+        return {
+            "environment_checks": [],
+            "orphan_recoveries": [],
+            "task_bypasses": [],
+        }
+    return {
+        "environment_checks": engine.read_environment_checks()[-12:],
+        "orphan_recoveries": engine.read_orphan_recoveries()[-12:],
+        "task_bypasses": engine.read_task_bypasses()[-12:],
     }
 
 
@@ -318,6 +356,8 @@ def build_feed(*, emit_runtime_metrics=False):
         "blocker_codes": _blocker_codes(),
         "recent_transitions": _recent_transitions(),
         "claude_budget": _claude_budget(),
+        "task_costs": _task_costs(),
+        "runtime_audit": _runtime_audit(),
         "dashboard_server": _dashboard_server(),
     }
 
