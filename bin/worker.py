@@ -1819,8 +1819,64 @@ def _compile_gate_findings(project, worktree, changed_files_text):
     return findings
 
 
-def _test_ratio_findings(changed_files_text):
+def _test_ratio_policy(task=None, *, cfg=None):
+    cfg = cfg or o.load_config()
+    policy = dict((((cfg.get("review_policy") or {}).get("test_to_code_ratio")) or {}))
+    override = {}
+    template = (task or {}).get("braid_template")
+    if template:
+        override = dict((policy.get("template_overrides") or {}).get(template) or {})
+    merged = {
+        "min_ratio": float(policy.get("min_ratio", 0.5) or 0.0),
+        "accept_doctest": bool(policy.get("accept_doctest", False)),
+    }
+    if override:
+        if "min_ratio" in override:
+            merged["min_ratio"] = float(override.get("min_ratio") or 0.0)
+        if "accept_doctest" in override:
+            merged["accept_doctest"] = bool(override.get("accept_doctest"))
+    return merged
+
+
+def _doctest_backed_files(worktree, files):
+    out = []
+    if not worktree:
+        return out
+    root = pathlib.Path(worktree)
+    for rel in files:
+        if not rel.endswith(".py"):
+            continue
+        path = root / rel
+        if not path.exists():
+            continue
+        try:
+            text = path.read_text()
+        except Exception:
+            continue
+        if ">>>" in text:
+            out.append(rel)
+    return out
+
+
+def _test_ratio_findings(changed_files_text, *, task=None, worktree=None, cfg=None):
+    """Review gate for code/test delta balance, with template-level overrides.
+
+    >>> _test_ratio_findings("bin/a.py\\nbin/b.py\\n")
+    ['test-to-code delta ratio too low: code_files=2 test_files=0']
+    >>> cfg = {"review_policy": {"test_to_code_ratio": {"min_ratio": 0.5, "accept_doctest": False, "template_overrides": {"orchestrator-self-repair": {"min_ratio": 0.0, "accept_doctest": True}}}}}
+    >>> _test_ratio_findings("bin/a.py\\nbin/b.py\\n", task={"braid_template": "orchestrator-self-repair"}, cfg=cfg)
+    []
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     (root / "bin").mkdir()
+    ...     _ = (root / "bin" / "a.py").write_text('def demo():\\n    \"\"\"\\n    >>> demo()\\n    1\\n    \"\"\"\\n    return 1\\n')
+    ...     cfg = {"review_policy": {"test_to_code_ratio": {"min_ratio": 0.5, "accept_doctest": True, "template_overrides": {}}}}
+    ...     _test_ratio_findings("bin/a.py\\nbin/b.py\\n", worktree=root, cfg=cfg)
+    []
+    """
     files = _changed_file_list(changed_files_text)
+    policy = _test_ratio_policy(task, cfg=cfg)
     code_files = [
         f for f in files
         if f.endswith((".py", ".java", ".ts", ".tsx", ".js", ".jsx"))
@@ -1835,11 +1891,16 @@ def _test_ratio_findings(changed_files_text):
         or pathlib.Path(f).name.startswith("test_")
         or f.endswith((".spec.ts", ".spec.tsx", ".spec.js", ".spec.jsx", ".test.ts", ".test.tsx", ".test.js", ".test.jsx"))
     ]
+    if policy["accept_doctest"]:
+        doctest_files = _doctest_backed_files(worktree, code_files)
+        test_files = list(dict.fromkeys(test_files + doctest_files))
     if not code_files:
+        return []
+    if policy["min_ratio"] <= 0:
         return []
     if test_files:
         ratio = len(test_files) / max(len(code_files), 1)
-        if ratio >= 0.5:
+        if ratio >= policy["min_ratio"]:
             return []
     return [f"test-to-code delta ratio too low: code_files={len(code_files)} test_files={len(test_files)}"]
 
@@ -3621,7 +3682,7 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
     memory_ctx = read_memory_context(project["name"], project["path"], role="reviewer", query=review_query)
     policy_findings = _policy_findings_for_diff(project_name, target_wt, target_base)
     compile_findings = _compile_gate_findings(project, target_wt, changed_files)
-    ratio_findings = _test_ratio_findings(changed_files)
+    ratio_findings = _test_ratio_findings(changed_files, task=target, worktree=target_wt, cfg=cfg)
     feature = o.read_feature(target.get("feature_id")) if target.get("feature_id") else None
     roadmap_ctx = ""
     if feature:

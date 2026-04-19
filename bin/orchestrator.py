@@ -149,6 +149,7 @@ BLOCKER_CODES = (
     "qa_scope_inadequate",
     "auto_commit_failed",
     "delivery_push_failed",
+    "attempt_exhausted",
 )
 WORKFLOW_REPAIR_POLICY = (
     {
@@ -461,6 +462,13 @@ WORKFLOW_REPAIR_POLICY = (
         "diagnosis": "task references an unknown project; page an operator to repair configuration",
     },
     {
+        "name": "attempt_exhausted_alert",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "attempt_exhausted",
+        "action": "push_alert",
+        "diagnosis": "task exceeded the cumulative retry limit and requires operator review before any further execution",
+    },
+    {
         "name": "missing_child_self_repair",
         "kind": "missing_child",
         "blocker_code": "missing_child",
@@ -546,6 +554,14 @@ CONFIG_DEFAULTS = {
     "topology_error_regen_window": 20,
     "topology_error_regen_min_samples": 5,
     "workflow_check_max_attempts": 6,
+    "max_task_attempts": 5,
+    "review_policy": {
+        "test_to_code_ratio": {
+            "min_ratio": 0.5,
+            "accept_doctest": False,
+            "template_overrides": {},
+        },
+    },
     "synthetic_canary": {
         "enabled": False,
         "project": "lvc-standard",
@@ -1201,6 +1217,11 @@ def claude_budget_usd(kind="claude_default", *, cfg=None, task=None, mode=None):
             return float(engine_args.get("max_budget_usd"))
     key = f"{kind}_usd"
     return float(budgets.get(key, fallback) or fallback)
+
+
+def max_task_attempts(*, cfg=None):
+    cfg = cfg or load_config()
+    return max(1, int(cfg.get("max_task_attempts") or CONFIG_DEFAULTS["max_task_attempts"]))
 
 
 def dashboard_server_config(*, cfg=None):
@@ -2659,7 +2680,81 @@ def reset_task_for_retry(task_id, from_state, *, reason, source=None, mutator=No
     ...     reset_task_for_retry.__globals__["subprocess"] = old_subprocess
     >>> (out["attempt"], out["failure"] is None, out["attempt_history"][0]["snapshot"]["failure"], out["attempt_history"][0]["retry_source"])
     (2, True, 'boom', 'doctest')
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     old_root = reset_task_for_retry.__globals__["QUEUE_ROOT"]
+    ...     old_subprocess = reset_task_for_retry.__globals__["subprocess"]
+    ...     old_report = reset_task_for_retry.__globals__["REPORT_DIR"]
+    ...     old_should = reset_task_for_retry.__globals__["should_push_alert"]
+    ...     old_max = reset_task_for_retry.__globals__["max_task_attempts"]
+    ...     reset_task_for_retry.__globals__["QUEUE_ROOT"] = root / "queue"
+    ...     reset_task_for_retry.__globals__["subprocess"] = subprocess
+    ...     reset_task_for_retry.__globals__["REPORT_DIR"] = root / "reports"
+    ...     reset_task_for_retry.__globals__["should_push_alert"] = lambda key, seconds: True
+    ...     reset_task_for_retry.__globals__["max_task_attempts"] = lambda cfg=None: 5
+    ...     task = new_task(role="implementer", engine="codex", project="demo", summary="x", source="test")
+    ...     task["task_id"] = "task-2"
+    ...     task["state"] = "failed"
+    ...     task["attempt"] = 5
+    ...     task["failure"] = "still failing"
+    ...     write_json_atomic(task_path("task-2", "failed"), task)
+    ...     exhausted = reset_task_for_retry("task-2", "failed", reason="retry", source="doctest")
+    ...     queued_exists = task_path("task-2", "queued").exists()
+    ...     alert_exists = any((root / "reports").glob("workflow-alert_*.md"))
+    ...     reset_task_for_retry.__globals__["QUEUE_ROOT"] = old_root
+    ...     reset_task_for_retry.__globals__["subprocess"] = old_subprocess
+    ...     reset_task_for_retry.__globals__["REPORT_DIR"] = old_report
+    ...     reset_task_for_retry.__globals__["should_push_alert"] = old_should
+    ...     reset_task_for_retry.__globals__["max_task_attempts"] = old_max
+    >>> (exhausted["blocker"]["code"], exhausted["state"], queued_exists, alert_exists)
+    ('attempt_exhausted', 'abandoned', False, True)
     """
+    current_task = read_json(task_path(task_id, from_state), {})
+    if not current_task:
+        raise FileNotFoundError(f"no task {task_id} in {from_state}")
+    current_attempt = int(current_task.get("attempt", 1) or 1)
+    attempt_limit = max_task_attempts()
+    if current_attempt >= attempt_limit:
+        detail = f"{reason} (attempt {current_attempt} >= max {attempt_limit})"
+        def mut_abandon(task):
+            task["finished_at"] = now_iso()
+            task["abandoned_reason"] = detail
+            task["last_retry_at"] = now_iso()
+            task["last_retry_reason"] = reason
+            task["last_retry_source"] = source or "runtime"
+            set_task_blocker(
+                task,
+                "attempt_exhausted",
+                summary="task attempt limit exhausted",
+                detail=detail,
+                source=source or "runtime",
+                retryable=False,
+                metadata={"attempt": current_attempt, "max_attempts": attempt_limit},
+            )
+        _, out = move_task(task_id, from_state, "abandoned", reason=detail, mutator=mut_abandon)
+        append_event(
+            source or "runtime",
+            "retry_exhausted",
+            task_id=task_id,
+            feature_id=current_task.get("feature_id"),
+            details={"from_state": from_state, "reason": reason, "attempt": current_attempt, "max_attempts": attempt_limit},
+        )
+        _write_workflow_alert(
+            {
+                "feature_id": current_task.get("feature_id"),
+                "project": current_task.get("project"),
+                "summary": current_task.get("summary") or task_id,
+                "issue_key": f"task:{task_id}:attempt_exhausted",
+                "kind": "frontier_task_blocked",
+                "task_id": task_id,
+                "task_state": from_state,
+                "blocker": out.get("blocker"),
+                "task": out,
+            },
+            detail,
+        )
+        return out
+
     feature_id_holder = {"value": None}
     new_attempt_holder = {"value": None}
 

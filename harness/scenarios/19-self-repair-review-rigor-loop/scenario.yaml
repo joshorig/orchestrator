@@ -1,0 +1,13 @@
+{
+  "name": "self-repair-review-rigor-loop",
+  "task_id": "task-scenario-19",
+  "feature_id": "feature-scenario-19",
+  "project": "devmini-orchestrator",
+  "summary": "Synthetic self-repair review rigor loop",
+  "braid_template": "orchestrator-self-repair",
+  "initial_state": "failed",
+  "initial_attempt": 5,
+  "review_feedback_rounds": 3,
+  "max_task_attempts": 5,
+  "retry_reason": "workflow-check: review-rigor thrash"
+}
