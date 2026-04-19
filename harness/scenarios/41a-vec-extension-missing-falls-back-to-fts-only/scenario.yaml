@@ -1,0 +1,30 @@
+{
+  "kind": "memory_vec_missing_fallback",
+  "project": "demo",
+  "limit": 3,
+  "query": "guardian retry cap",
+  "observations": [
+    {
+      "project": "demo",
+      "source_doc": "DECISIONS.md",
+      "section_key": "guardian-retry-cap",
+      "type": "decision",
+      "title": "guardian retry cap",
+      "content": "Retry caps should fire before a self-repair loop burns more rounds than its safety budget allows.",
+      "created_at": "2026-04-19T00:00:00+00:00",
+      "importance": 9,
+      "tags": ["decision", "retry"]
+    },
+    {
+      "project": "demo",
+      "source_doc": "RECENT_WORK.md",
+      "section_key": "dashboard",
+      "type": "recent_work",
+      "title": "dashboard polish",
+      "content": "Unrelated dashboard layout updates.",
+      "created_at": "2026-04-18T00:00:00+00:00",
+      "importance": 4,
+      "tags": ["recent_work"]
+    }
+  ]
+}

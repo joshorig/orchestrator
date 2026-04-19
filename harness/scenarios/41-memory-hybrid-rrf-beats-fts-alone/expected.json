@@ -1,0 +1,15 @@
+{
+  "vec_enabled": false,
+  "fts_titles": [
+    "workflow-check stale planner ids",
+    "Self-repair planner loops on stale issue state",
+    "Workflow queue resolution misses planner ownership",
+    "Fresh planner task replaces abandoned predecessor"
+  ],
+  "hybrid_titles": [
+    "workflow-check stale planner ids",
+    "Self-repair planner loops on stale issue state",
+    "Workflow queue resolution misses planner ownership",
+    "Fresh planner task replaces abandoned predecessor"
+  ]
+}

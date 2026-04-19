@@ -590,6 +590,16 @@ CONFIG_DEFAULTS = {
         "path": str(STATE_ENGINE_DB_PATH),
         "checkpoint_interval_sec": 300,
     },
+    "memory": {
+        "index_limit": 4,
+        "search_limit": 6,
+        "get_limit": 3,
+        "get_char_limit": 1800,
+        "label_primed_query": {
+            "enabled": True,
+            "review_gates": ("security-review-pass",),
+        },
+    },
     "review_policy": {
         "test_to_code_ratio": {
             "min_ratio": 0.5,

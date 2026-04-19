@@ -17,15 +17,22 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
+import importlib
 import json
+import math
 import pathlib
+import re
 import sqlite3
+import struct
 import threading
 import time
 from typing import Any, Iterable
 
 
 DEFAULT_DB_BASENAME = "orchestrator.db"
+DEFAULT_MEMORY_VEC_DIMENSIONS = 24
+DEFAULT_MEMORY_RRF_K = 60
+REPO_MEMORY_SECTION_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -68,6 +75,8 @@ class StateEngine:
     def __init__(self, config: StateEngineConfig):
         self.config = config
         self._local = threading.local()
+        self._vec_enabled = False
+        self._vec_error: str | None = None
 
     def initialize(self) -> dict[str, Any]:
         if not self.config.enabled:
@@ -92,6 +101,7 @@ class StateEngine:
             conn.execute("PRAGMA journal_mode = WAL")
             conn.execute("PRAGMA synchronous = NORMAL")
             conn.execute("PRAGMA temp_store = MEMORY")
+            self._try_enable_sqlite_vec(conn)
             self._local.conn = conn
         return conn
 
@@ -119,6 +129,8 @@ class StateEngine:
             "applied_migrations": sorted(applied),
             "pending_migrations": pending,
             "integrity_check": self.integrity_check(conn=conn),
+            "vec_enabled": self._vec_enabled,
+            "vec_error": self._vec_error,
         }
 
     def integrity_check(self, *, conn: sqlite3.Connection | None = None) -> str:
@@ -601,6 +613,191 @@ class StateEngine:
         rows = conn.execute(sql, params).fetchall()
         return [json.loads(row["metadata_json"]) for row in rows]
 
+    def upsert_memory_observation(self, row: dict[str, Any], *, conn: sqlite3.Connection | None = None) -> int:
+        conn = conn or self.connect()
+        tags = list(row.get("tags") or [])
+        metadata = dict(row.get("metadata") or {})
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO memory_observations (
+                    project, source_doc, section_key, type, title, content,
+                    created_at, created_at_epoch, importance, tags_json, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(project, source_doc, section_key) DO UPDATE SET
+                    type=excluded.type,
+                    title=excluded.title,
+                    content=excluded.content,
+                    created_at=excluded.created_at,
+                    created_at_epoch=excluded.created_at_epoch,
+                    importance=excluded.importance,
+                    tags_json=excluded.tags_json,
+                    metadata_json=excluded.metadata_json
+                """,
+                (
+                    row["project"],
+                    row["source_doc"],
+                    row["section_key"],
+                    row["type"],
+                    row["title"],
+                    row["content"],
+                    row["created_at"],
+                    _iso_to_epoch(row["created_at"]),
+                    int(row.get("importance") or 5),
+                    json.dumps(tags, sort_keys=True),
+                    json.dumps(metadata, sort_keys=True),
+                ),
+            )
+            obs_row = conn.execute(
+                """
+                SELECT id
+                  FROM memory_observations
+                 WHERE project = ? AND source_doc = ? AND section_key = ?
+                 LIMIT 1
+                """,
+                (row["project"], row["source_doc"], row["section_key"]),
+            ).fetchone()
+            obs_id = int(obs_row["id"])
+            self._upsert_memory_vector(conn, obs_id, f"{row['title']}\n{row['content']}")
+            return obs_id
+
+    def rebuild_memory_fts(self, *, conn: sqlite3.Connection | None = None) -> None:
+        conn = conn or self.connect()
+        with conn:
+            conn.execute("DELETE FROM memory_obs_fts")
+            conn.execute(
+                """
+                INSERT INTO memory_obs_fts(rowid, title, content, tags)
+                SELECT id, title, content, tags_json
+                  FROM memory_observations
+                """
+            )
+
+    def memory_index(
+        self,
+        *,
+        project: str,
+        obs_type: str | None = None,
+        limit: int = 5,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        conn = conn or self.connect()
+        sql = """
+            SELECT *
+              FROM memory_observations
+             WHERE project = ?
+        """
+        params: list[Any] = [project]
+        if obs_type:
+            sql += " AND type = ?"
+            params.append(obs_type)
+        sql += """
+             ORDER BY importance DESC, access_count DESC, created_at_epoch DESC
+             LIMIT ?
+        """
+        params.append(int(limit))
+        return [self._memory_row_to_dict(row, full=False) for row in conn.execute(sql, params).fetchall()]
+
+    def memory_search(
+        self,
+        query: str,
+        *,
+        project: str,
+        limit: int = 10,
+        semantic_candidates: Iterable[int] | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        conn = conn or self.connect()
+        terms = (query or "").strip()
+        if not terms:
+            return []
+        scores: dict[int, float] = {}
+        rrf_k = DEFAULT_MEMORY_RRF_K
+        fts_query = _fts_query_for(terms)
+        fts_rows = conn.execute(
+            """
+            SELECT rowid
+              FROM memory_obs_fts
+             WHERE memory_obs_fts MATCH ?
+               AND rowid IN (SELECT id FROM memory_observations WHERE project = ?)
+             LIMIT ?
+            """,
+            (fts_query, project, int(limit) * 4),
+        ).fetchall()
+        for rank, row in enumerate(fts_rows, start=1):
+            scores[int(row["rowid"])] = scores.get(int(row["rowid"]), 0.0) + (1.0 / (rrf_k + rank))
+
+        if semantic_candidates is not None:
+            for rank, obs_id in enumerate(list(semantic_candidates)[: int(limit) * 4], start=1):
+                scores[int(obs_id)] = scores.get(int(obs_id), 0.0) + (1.0 / (rrf_k + rank))
+        elif self._vec_enabled:
+            query_vector = json.dumps(_semantic_embedding(terms))
+            try:
+                vec_rows = conn.execute(
+                    """
+                    SELECT obs_id
+                      FROM memory_vectors
+                     WHERE project = ?
+                       AND embedding MATCH ?
+                     ORDER BY distance
+                     LIMIT ?
+                    """,
+                    (project, query_vector, int(limit) * 4),
+                ).fetchall()
+                for rank, row in enumerate(vec_rows, start=1):
+                    scores[int(row["obs_id"])] = scores.get(int(row["obs_id"]), 0.0) + (1.0 / (rrf_k + rank))
+            except sqlite3.Error as exc:
+                self._vec_error = str(exc)
+
+        normalized_query = _slugify(terms)
+        exact_rows = conn.execute(
+            "SELECT id, title FROM memory_observations WHERE project = ?",
+            (project,),
+        ).fetchall()
+        for row in exact_rows:
+            if _slugify(str(row["title"])) == normalized_query:
+                scores[int(row["id"])] = scores.get(int(row["id"]), 0.0) + 1.0
+
+        if not scores:
+            return []
+        obs_ids = sorted(scores, key=scores.get, reverse=True)[: int(limit)]
+        placeholders = ",".join("?" for _ in obs_ids)
+        rows = conn.execute(
+            f"SELECT * FROM memory_observations WHERE id IN ({placeholders})",
+            obs_ids,
+        ).fetchall()
+        by_id = {int(row["id"]): self._memory_row_to_dict(row, full=False) for row in rows}
+        return [by_id[obs_id] for obs_id in obs_ids if obs_id in by_id]
+
+    def memory_get(self, obs_id: int, *, conn: sqlite3.Connection | None = None) -> dict[str, Any] | None:
+        conn = conn or self.connect()
+        now_epoch = int(time.time())
+        with conn:
+            row = conn.execute(
+                "SELECT * FROM memory_observations WHERE id = ? LIMIT 1",
+                (int(obs_id),),
+            ).fetchone()
+            if not row:
+                return None
+            conn.execute(
+                """
+                UPDATE memory_observations
+                   SET access_count = access_count + 1,
+                       last_accessed_epoch = ?
+                 WHERE id = ?
+                """,
+                (now_epoch, int(obs_id)),
+            )
+        return self._memory_row_to_dict(row, full=True)
+
+    def memory_count(self, *, project: str | None = None, conn: sqlite3.Connection | None = None) -> int:
+        conn = conn or self.connect()
+        if project is None:
+            row = conn.execute("SELECT COUNT(*) AS n FROM memory_observations").fetchone()
+        else:
+            row = conn.execute("SELECT COUNT(*) AS n FROM memory_observations WHERE project = ?", (project,)).fetchone()
+        return int(row["n"] if row else 0)
+
     def record_environment_check(self, *, ts: str, project: str | None, result: str, blocker_summary: str | None, conn: sqlite3.Connection | None = None) -> None:
         conn = conn or self.connect()
         with conn:
@@ -701,6 +898,68 @@ class StateEngine:
             conn.rollback()
             raise
 
+    def _try_enable_sqlite_vec(self, conn: sqlite3.Connection) -> None:
+        if getattr(self._local, "vec_checked", False):
+            return
+        try:
+            conn.enable_load_extension(True)
+            sqlite_vec = importlib.import_module("sqlite_vec")
+            sqlite_vec.load(conn)  # type: ignore[attr-defined]
+            conn.enable_load_extension(False)
+            conn.execute(
+                f"""
+                CREATE VIRTUAL TABLE IF NOT EXISTS memory_vectors USING vec0(
+                    obs_id INTEGER PRIMARY KEY,
+                    project TEXT,
+                    embedding FLOAT[{DEFAULT_MEMORY_VEC_DIMENSIONS}]
+                )
+                """
+            )
+            self._vec_enabled = True
+            self._vec_error = None
+        except Exception as exc:
+            self._vec_enabled = False
+            self._vec_error = str(exc)
+        finally:
+            self._local.vec_checked = True
+
+    def _upsert_memory_vector(self, conn: sqlite3.Connection, obs_id: int, text: str) -> None:
+        if not self._vec_enabled:
+            return
+        try:
+            project_row = conn.execute(
+                "SELECT project FROM memory_observations WHERE id = ? LIMIT 1",
+                (int(obs_id),),
+            ).fetchone()
+            conn.execute("DELETE FROM memory_vectors WHERE obs_id = ?", (int(obs_id),))
+            conn.execute(
+                "INSERT INTO memory_vectors(obs_id, project, embedding) VALUES (?, ?, ?)",
+                (int(obs_id), project_row["project"] if project_row else None, json.dumps(_semantic_embedding(text))),
+            )
+        except sqlite3.Error as exc:
+            self._vec_error = str(exc)
+            self._vec_enabled = False
+
+    def _memory_row_to_dict(self, row: sqlite3.Row, *, full: bool) -> dict[str, Any]:
+        data = {
+            "id": int(row["id"]),
+            "project": row["project"],
+            "source_doc": row["source_doc"],
+            "section_key": row["section_key"],
+            "type": row["type"],
+            "title": row["title"],
+            "importance": int(row["importance"]),
+            "access_count": int(row["access_count"]),
+            "created_at": row["created_at"],
+            "tags": json.loads(row["tags_json"] or "[]"),
+            "metadata": json.loads(row["metadata_json"] or "{}"),
+        }
+        content = str(row["content"] or "")
+        data["excerpt"] = content[:280] + ("..." if len(content) > 280 else "")
+        if full:
+            data["content"] = content
+        return data
+
     def _ensure_bootstrap_tables(self, conn: sqlite3.Connection) -> None:
         with conn:
             conn.execute(
@@ -777,3 +1036,108 @@ def _bool_to_int_or_none(value: Any) -> int | None:
     if value is None:
         return None
     return 1 if bool(value) else 0
+
+
+def parse_repo_memory_markdown(project: str, source_doc: str, text: str) -> list[dict[str, Any]]:
+    """Split repo-memory markdown into one observation per level-2 section.
+
+    >>> rows = parse_repo_memory_markdown(
+    ...     "demo",
+    ...     "DECISIONS.md",
+    ...     "# Demo\\n\\n## 2026-04-19 — Title: With Colon\\n**Context:** A\\n\\n## 2026-04-20 - Another Title\\nBody\\n",
+    ... )
+    >>> [row["title"] for row in rows]
+    ['Title: With Colon', 'Another Title']
+    >>> [row["section_key"] for row in rows]
+    ['2026-04-19-title-with-colon', '2026-04-20-another-title']
+    """
+    matches = list(REPO_MEMORY_SECTION_RE.finditer(text or ""))
+    if not matches:
+        return []
+    rows: list[dict[str, Any]] = []
+    seen: dict[str, int] = {}
+    source_type = _memory_type_for_doc(source_doc)
+    for idx, match in enumerate(matches):
+        start = match.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        header = match.group(1).strip()
+        body = (text[start:end] or "").strip()
+        if not body:
+            continue
+        created_at, title = _parse_repo_memory_header(header)
+        base_key = _slugify(header)
+        seen[base_key] = seen.get(base_key, 0) + 1
+        rows.append(
+            {
+                "project": project,
+                "source_doc": source_doc,
+                "section_key": _unique_section_key(base_key, seen[base_key]),
+                "type": source_type,
+                "title": title,
+                "content": body,
+                "created_at": created_at,
+                "importance": _memory_importance_for_doc(source_doc),
+                "tags": [source_type, pathlib.Path(source_doc).stem.lower()],
+                "metadata": {"header": header},
+            }
+        )
+    return rows
+
+
+def _parse_repo_memory_header(header: str) -> tuple[str, str]:
+    match = re.match(r"(?P<date>\d{4}-\d{2}-\d{2})\s+[—-]\s+(?P<title>.+)$", header)
+    if not match:
+        return "1970-01-01T00:00:00+00:00", header.strip()
+    return f"{match.group('date')}T00:00:00+00:00", match.group("title").strip()
+
+
+def _memory_type_for_doc(source_doc: str) -> str:
+    name = pathlib.Path(source_doc).name.upper()
+    if name == "DECISIONS.md".upper():
+        return "decision"
+    if name == "RECENT_WORK.md".upper():
+        return "recent_work"
+    if name == "FAILURES.md".upper():
+        return "failure"
+    if name == "RESEARCH.md".upper():
+        return "research"
+    return "reference"
+
+
+def _memory_importance_for_doc(source_doc: str) -> int:
+    return {
+        "DECISIONS.md": 9,
+        "FAILURES.md": 8,
+        "RECENT_WORK.md": 7,
+        "RESEARCH.md": 6,
+    }.get(pathlib.Path(source_doc).name, 5)
+
+
+def _unique_section_key(base: str, count: int) -> str:
+    return base if count <= 1 else f"{base}-{count}"
+
+
+def _slugify(text: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return slug or "section"
+
+
+def _fts_query_for(query: str) -> str:
+    terms = [part for part in re.split(r"\s+", (query or "").strip()) if part]
+    if not terms:
+        return ""
+    return " OR ".join(f'"{term}"' for term in terms[:12])
+
+
+def _semantic_embedding(text: str, *, dims: int = DEFAULT_MEMORY_VEC_DIMENSIONS) -> list[float]:
+    vec = [0.0] * dims
+    for token in re.findall(r"[a-z0-9_]+", (text or "").lower()):
+        bucket = int(hashlib.sha256(token.encode("utf-8")).hexdigest(), 16) % dims
+        vec[bucket] += 1.0
+    norm = math.sqrt(sum(v * v for v in vec)) or 1.0
+    return [round(v / norm, 6) for v in vec]
+
+
+def _float32_blob(values: Iterable[float]) -> bytes:
+    items = list(values)
+    return struct.pack(f"{len(items)}f", *items)

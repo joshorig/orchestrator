@@ -1401,7 +1401,91 @@ def _token_savior_context(project_name, project_path, *, role=None, query=None):
     return "\n\n".join(parts)
 
 
-def read_memory_context(project_name, project_path, *, role=None, query=None):
+def _memory_cfg():
+    cfg = o.load_config()
+    return (cfg.get("memory") or {}), cfg
+
+
+def _memory_layer_query(query, *, gate_name=None):
+    memory_cfg, _ = _memory_cfg()
+    labels_cfg = (memory_cfg.get("label_primed_query") or {})
+    if not labels_cfg.get("enabled", True):
+        return (query or "").strip()
+    labels = []
+    review_gates = set(labels_cfg.get("review_gates") or [])
+    if gate_name and gate_name in review_gates:
+        labels.append(f"review_gate:{gate_name}")
+    query = (query or "").strip()
+    return " ".join(part for part in [*labels, query] if part).strip()
+
+
+def _format_memory_rows(rows, *, include_content=False, char_limit=1800):
+    out = []
+    for row in rows:
+        title = row.get("title") or row.get("section_key") or "untitled"
+        tag_str = ",".join(row.get("tags") or [])
+        prefix = f"- [{row.get('type')}] {title}"
+        if tag_str:
+            prefix += f" ({tag_str})"
+        if include_content:
+            content = (row.get("content") or "").strip()
+            if len(content) > char_limit:
+                content = content[:char_limit] + "..."
+            out.append(f"{prefix}\n{content}".rstrip())
+        else:
+            excerpt = (row.get("excerpt") or "").strip()
+            out.append(f"{prefix} — {excerpt}".rstrip(" — "))
+    return "\n".join(out)
+
+
+def _db_memory_context(project_name, *, query=None, gate_name=None):
+    memory_cfg, cfg = _memory_cfg()
+    if o.state_engine_config(cfg=cfg).get("mode") == "off":
+        return ""
+    try:
+        engine = o.get_state_engine(cfg=cfg)
+        engine.initialize()
+        index_rows = engine.memory_index(
+            project=project_name,
+            limit=int(memory_cfg.get("index_limit") or 4),
+        )
+        search_rows = engine.memory_search(
+            _memory_layer_query(query, gate_name=gate_name),
+            project=project_name,
+            limit=int(memory_cfg.get("search_limit") or 6),
+        )
+        selected_ids = []
+        for row in search_rows or index_rows:
+            obs_id = row.get("id")
+            if obs_id not in selected_ids:
+                selected_ids.append(obs_id)
+            if len(selected_ids) >= int(memory_cfg.get("get_limit") or 3):
+                break
+        full_rows = []
+        for obs_id in selected_ids:
+            row = engine.memory_get(int(obs_id))
+            if row:
+                full_rows.append(row)
+        parts = []
+        if index_rows:
+            parts.append("### memory_index\n" + _format_memory_rows(index_rows))
+        if search_rows:
+            parts.append("### memory_search\n" + _format_memory_rows(search_rows))
+        if full_rows:
+            parts.append(
+                "### memory_get\n"
+                + _format_memory_rows(
+                    full_rows,
+                    include_content=True,
+                    char_limit=int(memory_cfg.get("get_char_limit") or 1800),
+                )
+            )
+        return "\n\n".join(parts)
+    except Exception as exc:
+        return f"### memory_surface\n(memory observations unavailable: {exc})"
+
+
+def _legacy_markdown_memory_context(project_path):
     memdir = pathlib.Path(project_path) / "repo-memory"
     parts = []
     for name in ("CURRENT_STATE.md", "RECENT_WORK.md", "DECISIONS.md", "FAILURES.md", "RESEARCH.md"):
@@ -1413,13 +1497,25 @@ def read_memory_context(project_name, project_path, *, role=None, query=None):
         body = _read_text_if_exists(f, tail_lines=tail_lines, max_chars=max_chars)
         if body:
             parts.append(f"### {name}\n{body}")
+    return "\n\n".join(parts)
+
+
+def read_memory_context(project_name, project_path, *, role=None, query=None, gate_name=None):
+    memory_ctx = _db_memory_context(project_name, query=query, gate_name=gate_name)
+    parts = []
+    if memory_ctx:
+        parts.append(memory_ctx)
+    elif o.state_engine_config(cfg=o.load_config()).get("mode") == "off":
+        legacy = _legacy_markdown_memory_context(project_path)
+        if legacy:
+            parts.append(legacy)
     policy = _project_policy_context(project_name, project_path)
     if policy:
         parts.append(f"### POLICY\n{policy}")
     token_ctx = _token_savior_context(project_name, project_path, role=role, query=query)
     if token_ctx:
         parts.append(token_ctx)
-    return "\n\n".join(parts) if parts else "(no repo-memory or policy context available)"
+    return "\n\n".join(parts) if parts else "(no memory observations or policy context available)"
 
 
 def recent_work_entries(text, limit=50):
@@ -3934,6 +4030,13 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
 
         if final_verdict == "approve":
             for gate_name in gate_names:
+                gate_memory_ctx = read_memory_context(
+                    project["name"],
+                    project["path"],
+                    role="reviewer",
+                    query=review_query,
+                    gate_name=gate_name,
+                )
                 try:
                     gate_result = _run_specialized_review_gate(
                         gate_name,
@@ -3944,7 +4047,7 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
                         changed_files=changed_files,
                         diff_text=diff_text,
                         roadmap_ctx=roadmap_ctx,
-                        memory_ctx=memory_ctx,
+                        memory_ctx=gate_memory_ctx,
                         panel=gate_panels.get(gate_name) or review_panel,
                         timeout=review_timeout,
                         logf=logf,

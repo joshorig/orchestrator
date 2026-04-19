@@ -1174,7 +1174,29 @@ def _run_fs_to_engine_migration(repo_root, scenario):
         shutil_copy(repo_root / "state" / "migrations" / "0001_initial.sql", root / "state" / "migrations" / "0001_initial.sql")
         if (repo_root / "state" / "migrations" / "0002_aux_runtime_logs.sql").exists():
             shutil_copy(repo_root / "state" / "migrations" / "0002_aux_runtime_logs.sql", root / "state" / "migrations" / "0002_aux_runtime_logs.sql")
+        if (repo_root / "state" / "migrations" / "0003_memory_surface.sql").exists():
+            shutil_copy(repo_root / "state" / "migrations" / "0003_memory_surface.sql", root / "state" / "migrations" / "0003_memory_surface.sql")
         shutil_copy(repo_root / "config" / "orchestrator.example.json", root / "config" / "orchestrator.example.json")
+        (root / "config" / "orchestrator.local.json").write_text(
+            json.dumps(
+                {
+                    "projects": [
+                        {
+                            "name": "demo",
+                            "path": str(root),
+                            "qa": {"smoke": "qa/smoke.sh", "regression": "qa/regression.sh"},
+                        }
+                    ]
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        (root / "repo-memory").mkdir(parents=True, exist_ok=True)
+        (root / "repo-memory" / "DECISIONS.md").write_text(
+            "# demo\n\n## 2026-04-19 — Migration decision\n**Decision:** move memory into sqlite.\n",
+            encoding="utf-8",
+        )
         task = {
             "task_id": "task-36",
             "engine": "codex",
@@ -1218,6 +1240,7 @@ def _run_fs_to_engine_migration(repo_root, scenario):
             "transitions": out["transitions"],
             "events": out["events"],
             "metrics": out["metrics"],
+            "memory_observations": out["memory_observations"],
             "integrity_check": out["integrity_check"],
         }
 
@@ -1605,6 +1628,71 @@ def _run_backup_roundtrip(repo_root, scenario):
         }
 
 
+def _run_memory_hybrid(repo_root, scenario):
+    state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        engine = state_engine.StateEngine(
+            state_engine.StateEngineConfig(
+                root=root,
+                db_path=root / "runtime" / "orchestrator.db",
+                migrations_dir=repo_root / "state" / "migrations",
+                mode="primary",
+            )
+        )
+        status = engine.initialize()
+        title_to_id = {}
+        for row in scenario["observations"]:
+            obs_id = engine.upsert_memory_observation(dict(row))
+            title_to_id[row["title"]] = obs_id
+        engine.rebuild_memory_fts()
+        fts_only = engine.memory_search(
+            scenario["query"],
+            project=scenario["project"],
+            limit=int(scenario.get("limit") or 5),
+            semantic_candidates=[],
+        )
+        hybrid = engine.memory_search(
+            scenario["query"],
+            project=scenario["project"],
+            limit=int(scenario.get("limit") or 5),
+            semantic_candidates=[title_to_id[title] for title in scenario.get("semantic_titles") or []],
+        )
+        return {
+            "vec_enabled": status.get("vec_enabled"),
+            "fts_titles": [row["title"] for row in fts_only],
+            "hybrid_titles": [row["title"] for row in hybrid],
+        }
+
+
+def _run_memory_vec_missing(repo_root, scenario):
+    state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        engine = state_engine.StateEngine(
+            state_engine.StateEngineConfig(
+                root=root,
+                db_path=root / "runtime" / "orchestrator.db",
+                migrations_dir=repo_root / "state" / "migrations",
+                mode="primary",
+            )
+        )
+        status = engine.initialize()
+        for row in scenario["observations"]:
+            engine.upsert_memory_observation(dict(row))
+        engine.rebuild_memory_fts()
+        rows = engine.memory_search(
+            scenario["query"],
+            project=scenario["project"],
+            limit=int(scenario.get("limit") or 5),
+        )
+        return {
+            "vec_enabled": status.get("vec_enabled"),
+            "result_titles": [row["title"] for row in rows],
+            "vec_error_present": bool(status.get("vec_error")),
+        }
+
+
 def main(argv):
     if len(argv) != 2:
         raise SystemExit("usage: harness/run_scenario.py <scenario-dir>")
@@ -1657,6 +1745,10 @@ def main(argv):
         actual = _run_environment_check_log(repo_root, scenario)
     elif kind == "backup_roundtrip":
         actual = _run_backup_roundtrip(repo_root, scenario)
+    elif kind == "memory_hybrid_rrf":
+        actual = _run_memory_hybrid(repo_root, scenario)
+    elif kind == "memory_vec_missing_fallback":
+        actual = _run_memory_vec_missing(repo_root, scenario)
     else:
         raise SystemExit(f"unknown scenario kind: {kind}")
 

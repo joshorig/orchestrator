@@ -51,6 +51,7 @@ def migrate_from_fs(repo_root: pathlib.Path, db_path: pathlib.Path, *, backup_pa
             "transitions": 0,
             "events": 0,
             "metrics": 0,
+            "memory_observations": 0,
         }
         for state in orchestrator.STATES:
             for path in (repo_root / "queue" / state).glob("*.json"):
@@ -70,6 +71,20 @@ def migrate_from_fs(repo_root: pathlib.Path, db_path: pathlib.Path, *, backup_pa
         for row in orchestrator.read_metrics():
             engine.record_metric(row, conn=conn)
             counts["metrics"] += 1
+        config = orchestrator.load_config()
+        for project in config.get("projects", []):
+            memdir = pathlib.Path(project["path"]) / "repo-memory"
+            if not memdir.exists():
+                continue
+            for path in sorted(memdir.glob("*.md")):
+                for observation in state_engine.parse_repo_memory_markdown(
+                    project["name"],
+                    path.name,
+                    path.read_text(encoding="utf-8"),
+                ):
+                    engine.upsert_memory_observation(observation, conn=conn)
+                    counts["memory_observations"] += 1
+        engine.rebuild_memory_fts(conn=conn)
         integrity = engine.integrity_check(conn=conn)
         if integrity != "ok":
             raise RuntimeError(f"integrity_check failed: {integrity}")
@@ -92,10 +107,15 @@ def _clear_engine_tables(conn: sqlite3.Connection) -> None:
             "self_repair_issues",
             "tasks",
             "features",
+            "memory_observations",
             "metrics",
             "events",
         ):
             conn.execute(f"DELETE FROM {table}")
+        try:
+            conn.execute("DELETE FROM memory_vectors")
+        except sqlite3.Error:
+            pass
 
 
 def main(argv: list[str] | None = None) -> int:

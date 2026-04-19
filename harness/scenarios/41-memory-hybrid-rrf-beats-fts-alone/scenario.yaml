@@ -1,0 +1,57 @@
+{
+  "kind": "memory_hybrid_rrf",
+  "project": "demo",
+  "limit": 4,
+  "query": "workflow-check stale planner ids",
+  "semantic_titles": [
+    "Self-repair planner loops on stale issue state",
+    "Workflow queue resolution misses planner ownership",
+    "Fresh planner task replaces abandoned predecessor"
+  ],
+  "observations": [
+    {
+      "project": "demo",
+      "source_doc": "DECISIONS.md",
+      "section_key": "workflow-check-stale-planner-ids",
+      "type": "decision",
+      "title": "workflow-check stale planner ids",
+      "content": "Workflow-check must prefer live planner ownership over stale issue pointers when deciding whether self-repair can replan safely.",
+      "created_at": "2026-04-19T00:00:00+00:00",
+      "importance": 9,
+      "tags": ["decision", "self_repair"]
+    },
+    {
+      "project": "demo",
+      "source_doc": "FAILURES.md",
+      "section_key": "planner-loops",
+      "type": "failure",
+      "title": "Self-repair planner loops on stale issue state",
+      "content": "The issue kept pointing at an abandoned planner so the queue never reopened.",
+      "created_at": "2026-04-18T00:00:00+00:00",
+      "importance": 8,
+      "tags": ["failure", "planner"]
+    },
+    {
+      "project": "demo",
+      "source_doc": "RECENT_WORK.md",
+      "section_key": "planner-ownership",
+      "type": "recent_work",
+      "title": "Workflow queue resolution misses planner ownership",
+      "content": "Queue-resolution logic must ignore stale planner ids once no live planner remains.",
+      "created_at": "2026-04-18T00:00:00+00:00",
+      "importance": 7,
+      "tags": ["recent_work", "workflow"]
+    },
+    {
+      "project": "demo",
+      "source_doc": "RECENT_WORK.md",
+      "section_key": "fresh-planner",
+      "type": "recent_work",
+      "title": "Fresh planner task replaces abandoned predecessor",
+      "content": "A new planner should supersede older abandoned tasks and carry forward issue context.",
+      "created_at": "2026-04-18T00:00:00+00:00",
+      "importance": 7,
+      "tags": ["recent_work", "planner"]
+    }
+  ]
+}

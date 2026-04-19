@@ -4,5 +4,6 @@
   "transitions": 1,
   "events": 1,
   "metrics": 1,
+  "memory_observations": 1,
   "integrity_check": "ok"
 }

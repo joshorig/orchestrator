@@ -38,6 +38,16 @@
     "path": "state/runtime/orchestrator.db",
     "checkpoint_interval_sec": 300
   },
+  "memory": {
+    "index_limit": 4,
+    "search_limit": 6,
+    "get_limit": 3,
+    "get_char_limit": 1800,
+    "label_primed_query": {
+      "enabled": true,
+      "review_gates": ["security-review-pass"]
+    }
+  },
   "workflow_repair_policy": "default",
   "review_policy": {
     "test_to_code_ratio": {
