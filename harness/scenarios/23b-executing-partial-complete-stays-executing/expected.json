@@ -1,0 +1,19 @@
+{
+  "tick": {
+    "resolved": 0,
+    "stalled": 0,
+    "features": []
+  },
+  "status": "executing",
+  "has_resolved_at": false,
+  "has_stalled_at": false,
+  "resolution": null,
+  "completed_execution_task_ids": [],
+  "execution_task_ids": [
+    "task-a",
+    "task-b"
+  ],
+  "stalled_reason": null,
+  "transition_labels": [],
+  "event_names": []
+}

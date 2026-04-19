@@ -6420,12 +6420,12 @@ def _self_repair_issue_live(issue):
 
 def _self_repair_pending_issues(feature):
     issues = list(((feature or {}).get("self_repair") or {}).get("issues") or [])
-    return [issue for issue in issues if issue.get("status") in (None, "pending", "scheduled")]
+    return [issue for issue in issues if issue.get("status") in (None, "pending", "scheduled", "stalled")]
 
 
 def _self_repair_has_active_work(feature):
     for issue in (((feature or {}).get("self_repair") or {}).get("issues") or []):
-        if issue.get("status") not in (None, "pending", "scheduled", "resolved", "rejected"):
+        if issue.get("status") not in (None, "pending", "scheduled", "stalled", "resolved", "rejected"):
             return True
         if _self_repair_issue_live(issue):
             return True
@@ -6441,6 +6441,122 @@ def _self_repair_mark_issue(feature_id, issue_key, **updates):
                 issue.update(updates)
                 break
     return update_feature(feature_id, mut)
+
+
+def _self_repair_execution_terminal(task_id):
+    """Return the resolution state for one execution slice.
+
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     old = _self_repair_execution_terminal.__globals__["QUEUE_ROOT"]
+    ...     _self_repair_execution_terminal.__globals__["QUEUE_ROOT"] = root / "queue"
+    ...     for state in STATES:
+    ...         (root / "queue" / state).mkdir(parents=True, exist_ok=True)
+    ...     write_json_atomic(root / "queue" / "done" / "task-a.json", {"task_id": "task-a", "review_verdict": "approve"})
+    ...     write_json_atomic(root / "queue" / "done" / "task-b.json", {"task_id": "task-b", "review_verdict": "request_change"})
+    ...     write_json_atomic(root / "queue" / "failed" / "task-c.json", {"task_id": "task-c"})
+    ...     write_json_atomic(root / "queue" / "running" / "task-d.json", {"task_id": "task-d"})
+    ...     out = (
+    ...         _self_repair_execution_terminal("task-a"),
+    ...         _self_repair_execution_terminal("task-b"),
+    ...         _self_repair_execution_terminal("task-c"),
+    ...         _self_repair_execution_terminal("task-d"),
+    ...         _self_repair_execution_terminal("missing"),
+    ...     )
+    ...     _self_repair_execution_terminal.__globals__["QUEUE_ROOT"] = old
+    >>> out
+    ('done_approved', 'done_other', 'failed', 'in_flight', 'failed')
+    """
+    found = find_task(task_id)
+    if not found:
+        return "failed"
+    state, task = found
+    if state in ("failed", "abandoned"):
+        return "failed"
+    if state == "done":
+        return "done_approved" if (task or {}).get("review_verdict") == "approve" else "done_other"
+    return "in_flight"
+
+
+def tick_self_repair_resolution():
+    """Advance executing self-repair issues once their slices terminate.
+
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     feats = root / "features"; feats.mkdir()
+    ...     queue_root = root / "queue"
+    ...     for state in STATES:
+    ...         (queue_root / state).mkdir(parents=True, exist_ok=True)
+    ...     old = {k: tick_self_repair_resolution.__globals__[k] for k in ("FEATURES_DIR", "QUEUE_ROOT", "append_event", "append_transition")}
+    ...     events = []
+    ...     transitions = []
+    ...     tick_self_repair_resolution.__globals__["FEATURES_DIR"] = feats
+    ...     tick_self_repair_resolution.__globals__["QUEUE_ROOT"] = queue_root
+    ...     tick_self_repair_resolution.__globals__["append_event"] = lambda *args, **kwargs: events.append((args, kwargs))
+    ...     tick_self_repair_resolution.__globals__["append_transition"] = lambda *args: transitions.append(args)
+    ...     write_json_atomic(feats / "feature-sr.json", {"feature_id": "feature-sr", "status": "open", "self_repair": {"enabled": True, "issues": [{"issue_key": "i1", "status": "executing", "execution_task_ids": ["task-a"]}]}})
+    ...     write_json_atomic(queue_root / "done" / "task-a.json", {"task_id": "task-a", "review_verdict": "approve"})
+    ...     out = tick_self_repair_resolution()
+    ...     saved = read_json(feats / "feature-sr.json", {})
+    ...     for key, value in old.items():
+    ...         tick_self_repair_resolution.__globals__[key] = value
+    >>> issue = saved["self_repair"]["issues"][0]
+    >>> out["resolved"], issue["status"], issue["execution_task_ids"], issue["completed_execution_task_ids"]
+    (1, 'resolved', [], ['task-a'])
+    >>> transitions[0][1:4]
+    ('issue:executing', 'issue:resolved', 'i1')
+    """
+    resolved = 0
+    stalled = 0
+    changed_features = []
+    for feature in list_features():
+        if feature.get("status") not in ("open", "finalizing"):
+            continue
+        issues = ((feature.get("self_repair") or {}).get("issues") or [])
+        mutated = False
+        for issue in issues:
+            if issue.get("status") != "executing":
+                continue
+            exec_ids = list(issue.get("execution_task_ids") or [])
+            if not exec_ids:
+                continue
+            states = [_self_repair_execution_terminal(task_id) for task_id in exec_ids]
+            if any(state in ("failed", "done_other") for state in states):
+                issue["status"] = "stalled"
+                issue["stalled_at"] = now_iso()
+                issue["stalled_reason"] = "execution slice failed or completed without approval"
+                issue["last_seen_at"] = now_iso()
+                stalled += 1
+                mutated = True
+                append_transition(feature["feature_id"], "issue:executing", "issue:stalled", issue.get("issue_key") or "")
+                append_event(
+                    "self-repair-resolution",
+                    "issue_stalled",
+                    feature_id=feature["feature_id"],
+                    details={"issue_key": issue.get("issue_key"), "execution_task_ids": exec_ids, "states": states},
+                )
+            elif all(state == "done_approved" for state in states):
+                issue["status"] = "resolved"
+                issue["resolved_at"] = now_iso()
+                issue["resolution"] = "execution_approved"
+                issue["completed_execution_task_ids"] = exec_ids
+                issue["execution_task_ids"] = []
+                issue["last_seen_at"] = now_iso()
+                resolved += 1
+                mutated = True
+                append_transition(feature["feature_id"], "issue:executing", "issue:resolved", issue.get("issue_key") or "")
+                append_event(
+                    "self-repair-resolution",
+                    "issue_resolved",
+                    feature_id=feature["feature_id"],
+                    details={"issue_key": issue.get("issue_key"), "execution_task_ids": exec_ids},
+                )
+        if mutated:
+            write_json_atomic(feature_path(feature["feature_id"]), feature)
+            changed_features.append(feature["feature_id"])
+    return {"resolved": resolved, "stalled": stalled, "features": changed_features}
 
 
 def _self_repair_append_deliberation(feature_id, issue_key, deliberation):
@@ -10076,6 +10192,14 @@ def tick_workflow_check():
 
         issue["outcome"] = outcome
         issues.append(issue)
+
+    self_repair_resolution = tick_self_repair_resolution()
+    if self_repair_resolution.get("resolved") or self_repair_resolution.get("stalled"):
+        append_event(
+            "self-repair-resolution",
+            "tick_complete",
+            details=self_repair_resolution,
+        )
 
     self_repair_drain = tick_self_repair_queue()
     if self_repair_drain.get("scheduled"):

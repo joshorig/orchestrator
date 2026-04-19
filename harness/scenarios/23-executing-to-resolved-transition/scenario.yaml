@@ -1,0 +1,19 @@
+{
+  "kind": "self_repair_resolution",
+  "name": "executing-to-resolved-transition",
+  "feature_id": "feature-scenario-23",
+  "project": "devmini-orchestrator",
+  "issue": {
+    "issue_key": "issue-23",
+    "status": "executing",
+    "execution_task_ids": ["task-a"]
+  },
+  "queue_tasks": {
+    "done": [
+      {
+        "task_id": "task-a",
+        "review_verdict": "approve"
+      }
+    ]
+  }
+}

@@ -193,6 +193,66 @@ def _run_r16_override(repo_root, scenario):
     }
 
 
+def _run_self_repair_resolution(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        feats = root / "features"
+        feats.mkdir()
+        queue_root = root / "queue"
+        for state in orchestrator.STATES:
+            (queue_root / state).mkdir(parents=True, exist_ok=True)
+        old = {
+            "FEATURES_DIR": orchestrator.FEATURES_DIR,
+            "QUEUE_ROOT": orchestrator.QUEUE_ROOT,
+            "append_event": orchestrator.append_event,
+            "append_transition": orchestrator.append_transition,
+        }
+        events = []
+        transitions = []
+        orchestrator.FEATURES_DIR = feats
+        orchestrator.QUEUE_ROOT = queue_root
+        orchestrator.append_event = lambda *args, **kwargs: events.append({"args": args, "kwargs": kwargs})
+        orchestrator.append_transition = lambda *args: transitions.append(args)
+        try:
+            for task_state, task in scenario.get("queue_tasks", {}).items():
+                for task_obj in task:
+                    orchestrator.write_json_atomic(
+                        queue_root / task_state / f"{task_obj['task_id']}.json",
+                        dict(task_obj),
+                    )
+            feature = {
+                "feature_id": scenario["feature_id"],
+                "project": scenario["project"],
+                "status": "open",
+                "self_repair": {
+                    "enabled": True,
+                    "issues": [dict(scenario["issue"])],
+                },
+            }
+            orchestrator.write_json_atomic(feats / f"{scenario['feature_id']}.json", feature)
+            out = orchestrator.tick_self_repair_resolution()
+            saved = orchestrator.read_json(feats / f"{scenario['feature_id']}.json", {})
+        finally:
+            orchestrator.FEATURES_DIR = old["FEATURES_DIR"]
+            orchestrator.QUEUE_ROOT = old["QUEUE_ROOT"]
+            orchestrator.append_event = old["append_event"]
+            orchestrator.append_transition = old["append_transition"]
+        issue = saved["self_repair"]["issues"][0]
+        return {
+            "tick": out,
+            "status": issue.get("status"),
+            "has_resolved_at": bool(issue.get("resolved_at")),
+            "has_stalled_at": bool(issue.get("stalled_at")),
+            "resolution": issue.get("resolution"),
+            "completed_execution_task_ids": issue.get("completed_execution_task_ids") or [],
+            "execution_task_ids": issue.get("execution_task_ids") or [],
+            "stalled_reason": issue.get("stalled_reason"),
+            "transition_labels": [list(row[1:4]) for row in transitions],
+            "event_names": [row["args"][1] for row in events],
+        }
+
+
 def main(argv):
     if len(argv) != 2:
         raise SystemExit("usage: harness/run_scenario.py <scenario-dir>")
@@ -207,6 +267,8 @@ def main(argv):
         actual = _run_fix2_reopen(repo_root, scenario)
     elif kind == "r16_override":
         actual = _run_r16_override(repo_root, scenario)
+    elif kind == "self_repair_resolution":
+        actual = _run_self_repair_resolution(repo_root, scenario)
     else:
         raise SystemExit(f"unknown scenario kind: {kind}")
 

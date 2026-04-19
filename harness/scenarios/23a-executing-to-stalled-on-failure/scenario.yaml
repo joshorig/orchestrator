@@ -1,0 +1,18 @@
+{
+  "kind": "self_repair_resolution",
+  "name": "executing-to-stalled-on-failure",
+  "feature_id": "feature-scenario-23a",
+  "project": "devmini-orchestrator",
+  "issue": {
+    "issue_key": "issue-23a",
+    "status": "executing",
+    "execution_task_ids": ["task-a"]
+  },
+  "queue_tasks": {
+    "failed": [
+      {
+        "task_id": "task-a"
+      }
+    ]
+  }
+}

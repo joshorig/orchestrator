@@ -1,0 +1,28 @@
+{
+  "tick": {
+    "resolved": 0,
+    "stalled": 1,
+    "features": [
+      "feature-scenario-23a"
+    ]
+  },
+  "status": "stalled",
+  "has_resolved_at": false,
+  "has_stalled_at": true,
+  "resolution": null,
+  "completed_execution_task_ids": [],
+  "execution_task_ids": [
+    "task-a"
+  ],
+  "stalled_reason": "execution slice failed or completed without approval",
+  "transition_labels": [
+    [
+      "issue:executing",
+      "issue:stalled",
+      "issue-23a"
+    ]
+  ],
+  "event_names": [
+    "issue_stalled"
+  ]
+}

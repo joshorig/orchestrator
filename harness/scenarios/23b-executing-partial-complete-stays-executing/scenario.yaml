@@ -1,0 +1,24 @@
+{
+  "kind": "self_repair_resolution",
+  "name": "executing-partial-complete-stays-executing",
+  "feature_id": "feature-scenario-23b",
+  "project": "devmini-orchestrator",
+  "issue": {
+    "issue_key": "issue-23b",
+    "status": "executing",
+    "execution_task_ids": ["task-a", "task-b"]
+  },
+  "queue_tasks": {
+    "done": [
+      {
+        "task_id": "task-a",
+        "review_verdict": "approve"
+      }
+    ],
+    "running": [
+      {
+        "task_id": "task-b"
+      }
+    ]
+  }
+}

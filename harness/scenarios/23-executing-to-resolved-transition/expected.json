@@ -1,0 +1,28 @@
+{
+  "tick": {
+    "resolved": 1,
+    "stalled": 0,
+    "features": [
+      "feature-scenario-23"
+    ]
+  },
+  "status": "resolved",
+  "has_resolved_at": true,
+  "has_stalled_at": false,
+  "resolution": "execution_approved",
+  "completed_execution_task_ids": [
+    "task-a"
+  ],
+  "execution_task_ids": [],
+  "stalled_reason": null,
+  "transition_labels": [
+    [
+      "issue:executing",
+      "issue:resolved",
+      "issue-23"
+    ]
+  ],
+  "event_names": [
+    "issue_resolved"
+  ]
+}
