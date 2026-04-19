@@ -312,6 +312,65 @@ def _run_review_feedback_exhaustion(repo_root, scenario):
         }
 
 
+def _run_issue_replan_cap(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        feats = root / "features"
+        feats.mkdir()
+        queue_root = root / "queue"
+        for state in orchestrator.STATES:
+            (queue_root / state).mkdir(parents=True, exist_ok=True)
+        old = {
+            "FEATURES_DIR": orchestrator.FEATURES_DIR,
+            "QUEUE_ROOT": orchestrator.QUEUE_ROOT,
+            "new_task": orchestrator.new_task,
+            "enqueue_task": orchestrator.enqueue_task,
+            "append_feature_child": orchestrator.append_feature_child,
+            "_write_workflow_alert": orchestrator._write_workflow_alert,
+        }
+        alerts = []
+        enqueued = []
+        orchestrator.FEATURES_DIR = feats
+        orchestrator.QUEUE_ROOT = queue_root
+        orchestrator.new_task = lambda **kwargs: {"task_id": "unexpected-task", **kwargs}
+        orchestrator.enqueue_task = lambda task: enqueued.append(task["task_id"])
+        orchestrator.append_feature_child = lambda fid, tid: None
+        orchestrator._write_workflow_alert = lambda issue, reason: alerts.append({"issue_key": issue["issue_key"], "reason": reason}) or "alert.md"
+        try:
+            feature = {
+                "feature_id": scenario["feature_id"],
+                "project": scenario["project"],
+                "status": "open",
+                "summary": scenario["summary"],
+                "source": "self-repair:test",
+                "child_task_ids": [],
+                "self_repair": {
+                    "enabled": True,
+                    "issues": [dict(scenario["issue"])],
+                },
+            }
+            orchestrator.write_json_atomic(feats / f"{scenario['feature_id']}.json", feature)
+            out = orchestrator.tick_self_repair_queue()
+            saved = orchestrator.read_json(feats / f"{scenario['feature_id']}.json", {})
+        finally:
+            orchestrator.FEATURES_DIR = old["FEATURES_DIR"]
+            orchestrator.QUEUE_ROOT = old["QUEUE_ROOT"]
+            orchestrator.new_task = old["new_task"]
+            orchestrator.enqueue_task = old["enqueue_task"]
+            orchestrator.append_feature_child = old["append_feature_child"]
+            orchestrator._write_workflow_alert = old["_write_workflow_alert"]
+        issue = saved["self_repair"]["issues"][0]
+        return {
+            "tick": out,
+            "status": issue.get("status"),
+            "has_escalated_at": bool(issue.get("escalated_at")),
+            "escalated_reason": issue.get("escalated_reason"),
+            "alerts": len(alerts),
+            "enqueued": enqueued,
+        }
+
+
 def main(argv):
     if len(argv) != 2:
         raise SystemExit("usage: harness/run_scenario.py <scenario-dir>")
@@ -330,6 +389,8 @@ def main(argv):
         actual = _run_self_repair_resolution(repo_root, scenario)
     elif kind == "review_feedback_exhaustion":
         actual = _run_review_feedback_exhaustion(repo_root, scenario)
+    elif kind == "issue_replan_cap":
+        actual = _run_issue_replan_cap(repo_root, scenario)
     else:
         raise SystemExit(f"unknown scenario kind: {kind}")
 

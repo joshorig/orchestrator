@@ -1,0 +1,15 @@
+{
+  "kind": "issue_replan_cap",
+  "name": "issue-replan-cap-escalates",
+  "feature_id": "feature-scenario-25",
+  "project": "devmini-orchestrator",
+  "summary": "Synthetic self-repair issue cap",
+  "issue": {
+    "issue_key": "issue-25",
+    "summary": "Synthetic stalled self-repair issue",
+    "status": "stalled",
+    "attempts": 3,
+    "max_attempts": 3,
+    "planner_task_id": null
+  }
+}

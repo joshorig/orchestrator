@@ -1,0 +1,13 @@
+{
+  "tick": {
+    "scheduled": 0,
+    "feature_id": "feature-scenario-25",
+    "reason": "issue_escalated",
+    "escalated": 1
+  },
+  "status": "escalated",
+  "has_escalated_at": true,
+  "escalated_reason": "self-repair replan budget exhausted",
+  "alerts": 1,
+  "enqueued": []
+}

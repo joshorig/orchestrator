@@ -562,6 +562,7 @@ CONFIG_DEFAULTS = {
     "topology_error_regen_window": 20,
     "topology_error_regen_min_samples": 5,
     "workflow_check_max_attempts": 6,
+    "self_repair_issue_max_attempts": 3,
     "max_task_attempts": 5,
     "review_policy": {
         "test_to_code_ratio": {
@@ -1230,6 +1231,11 @@ def claude_budget_usd(kind="claude_default", *, cfg=None, task=None, mode=None):
 def max_task_attempts(*, cfg=None):
     cfg = cfg or load_config()
     return max(1, int(cfg.get("max_task_attempts") or CONFIG_DEFAULTS["max_task_attempts"]))
+
+
+def self_repair_issue_max_attempts(*, cfg=None):
+    cfg = cfg or load_config()
+    return max(1, int(cfg.get("self_repair_issue_max_attempts") or CONFIG_DEFAULTS["self_repair_issue_max_attempts"]))
 
 
 def dashboard_server_config(*, cfg=None):
@@ -6536,6 +6542,8 @@ def tick_self_repair_resolution():
                 issue["stalled_at"] = now_iso()
                 issue["stalled_reason"] = "execution slice failed or completed without approval"
                 issue["last_seen_at"] = now_iso()
+                issue["attempts"] = int(issue.get("attempts") or 0) + 1
+                issue["max_attempts"] = int(issue.get("max_attempts") or self_repair_issue_max_attempts())
                 stalled += 1
                 mutated = True
                 append_transition(feature["feature_id"], "issue:executing", "issue:stalled", issue.get("issue_key") or "")
@@ -6796,6 +6804,8 @@ def _attach_issue_to_self_repair_feature(feature, *, summary, evidence, issue_ki
         "attached_at": attached_at,
         "last_seen_at": attached_at,
         "seen_count": 1,
+        "attempts": 0,
+        "max_attempts": self_repair_issue_max_attempts(),
         "planner_task_id": None,
     }
 
@@ -6813,6 +6823,8 @@ def _attach_issue_to_self_repair_feature(feature, *, summary, evidence, issue_ki
                     issue["summary"] = record["summary"]
                 issue["source"] = source
                 issue["issue_kind"] = issue_kind
+                issue["attempts"] = int(issue.get("attempts") or 0)
+                issue["max_attempts"] = int(issue.get("max_attempts") or self_repair_issue_max_attempts())
                 attached_new = False
                 break
         else:
@@ -6873,6 +6885,36 @@ def tick_self_repair_queue():
     (1, 'task-sr', 'task-sr')
     >>> saved["self_repair"]["issues"][0]["superseded_task_ids"]
     ['task-old']
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     feats = root / "features"; feats.mkdir()
+    ...     queue_root = root / "queue"
+    ...     for state in STATES:
+    ...         (queue_root / state).mkdir(parents=True, exist_ok=True)
+    ...     feature = {
+    ...         "feature_id": "feature-sr",
+    ...         "project": "devmini-orchestrator",
+    ...         "status": "open",
+    ...         "summary": "repair",
+    ...         "source": "self-repair:test",
+    ...         "child_task_ids": [],
+    ...         "self_repair": {"enabled": True, "issues": [{"issue_key": "i1", "summary": "fix queue", "evidence": "e", "source": "workflow-check", "issue_kind": "runtime_bug", "status": "stalled", "attempts": 3, "max_attempts": 3, "planner_task_id": None}]},
+    ...     }
+    ...     old = {k: tick_self_repair_queue.__globals__[k] for k in ("FEATURES_DIR", "QUEUE_ROOT", "new_task", "enqueue_task", "append_feature_child", "_write_workflow_alert")}
+    ...     alerts = []
+    ...     tick_self_repair_queue.__globals__["FEATURES_DIR"] = feats
+    ...     tick_self_repair_queue.__globals__["QUEUE_ROOT"] = queue_root
+    ...     tick_self_repair_queue.__globals__["new_task"] = lambda **kwargs: {"task_id": "task-sr", **kwargs}
+    ...     tick_self_repair_queue.__globals__["enqueue_task"] = lambda task: alerts.append({"unexpected_task": task["task_id"]})
+    ...     tick_self_repair_queue.__globals__["append_feature_child"] = lambda fid, tid: None
+    ...     tick_self_repair_queue.__globals__["_write_workflow_alert"] = lambda issue, reason: alerts.append({"issue_key": issue["issue_key"], "reason": reason}) or "alert.md"
+    ...     write_json_atomic(feats / "feature-sr.json", feature)
+    ...     out = tick_self_repair_queue()
+    ...     saved = read_json(feats / "feature-sr.json", {})
+    ...     for key, value in old.items():
+    ...         tick_self_repair_queue.__globals__[key] = value
+    >>> out["scheduled"], out["reason"], saved["self_repair"]["issues"][0]["status"], alerts[0]["issue_key"]
+    (0, 'issue_escalated', 'escalated', 'i1')
     """
     scheduled = []
     lock_fh = acquire_lock("self-repair.lock", mode="exclusive", timeout_sec=10)
@@ -6886,9 +6928,47 @@ def tick_self_repair_queue():
         if not pending:
             return {"scheduled": 0, "feature_id": active["feature_id"], "reason": "no_pending_issues"}
         pending.sort(key=lambda issue: (issue.get("attached_at") or "", issue.get("issue_key") or ""))
-        task = _enqueue_self_repair_issue_task(active, pending[0])
-        scheduled.append(task["task_id"])
-        return {"scheduled": len(scheduled), "feature_id": active["feature_id"], "task_ids": scheduled}
+        escalated = 0
+        for issue in pending:
+            attempts = int(issue.get("attempts") or 0)
+            max_attempts = int(issue.get("max_attempts") or self_repair_issue_max_attempts())
+            if attempts >= max_attempts:
+                _self_repair_mark_issue(
+                    active["feature_id"],
+                    issue["issue_key"],
+                    status="escalated",
+                    escalated_at=now_iso(),
+                    escalated_reason="self-repair replan budget exhausted",
+                    last_seen_at=now_iso(),
+                    max_attempts=max_attempts,
+                )
+                _write_workflow_alert(
+                    {
+                        "feature_id": active["feature_id"],
+                        "project": active.get("project"),
+                        "summary": issue.get("summary") or active.get("summary") or issue.get("issue_key"),
+                        "issue_key": issue.get("issue_key"),
+                        "kind": "frontier_task_blocked",
+                        "task_id": issue.get("planner_task_id"),
+                        "task_state": issue.get("status"),
+                        "blocker": make_blocker(
+                            "attempt_exhausted",
+                            summary="self-repair issue replan budget exhausted",
+                            detail=f"issue attempts {attempts} >= max_attempts {max_attempts}",
+                            source="workflow-check",
+                            retryable=False,
+                        ),
+                    },
+                    f"self-repair issue replan budget exhausted ({attempts}/{max_attempts})",
+                )
+                escalated += 1
+                continue
+            task = _enqueue_self_repair_issue_task(active, issue)
+            scheduled.append(task["task_id"])
+            return {"scheduled": len(scheduled), "feature_id": active["feature_id"], "task_ids": scheduled, "escalated": escalated}
+        if escalated:
+            return {"scheduled": 0, "feature_id": active["feature_id"], "reason": "issue_escalated", "escalated": escalated}
+        return {"scheduled": 0, "feature_id": active["feature_id"], "reason": "no_schedulable_issues"}
     finally:
         lock_fh.close()
 
@@ -8348,6 +8428,8 @@ def enqueue_self_repair(*, summary, evidence, issue_kind="runtime_bug", source="
                     "attached_at": now_iso(),
                     "last_seen_at": now_iso(),
                     "seen_count": 1,
+                    "attempts": 0,
+                    "max_attempts": self_repair_issue_max_attempts(cfg=cfg),
                     "planner_task_id": None,
                 }],
             },
