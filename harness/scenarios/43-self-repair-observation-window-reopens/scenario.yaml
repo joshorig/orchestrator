@@ -1,0 +1,12 @@
+{
+  "kind": "self_repair_observation",
+  "feature_id": "feature-sr",
+  "project": "devmini-orchestrator",
+  "issue_key": "task:task-x:blocked:template_refine_exhausted",
+  "observation_target": {
+    "task_id": "task-x",
+    "blocker_code": "template_refine_exhausted"
+  },
+  "observation_due_at": "2000-01-01T00:00:00",
+  "task_state": "blocked"
+}

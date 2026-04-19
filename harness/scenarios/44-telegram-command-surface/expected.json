@@ -1,0 +1,8 @@
+{
+  "help": "commands\n/health\n/features [project]\n/queue [state]\n/task <task_id>\n/planner <project> [on|off|status|run]\n/action <id> <retry|abandon|unblock|approve>\n/ask <question>\n/report [morning|evening]",
+  "health": "env 2 errors\nworkflow 3 issues\nfeatures 4 open / 1 blocked\nqueue 5q 2r 1b 1ar 0aq\nupdated 2026-04-19 23:45",
+  "status": "env 2 errors\nworkflow 3 issues\nfeatures 4 open / 1 blocked\nqueue 5q 2r 1b 1ar 0aq\nupdated 2026-04-19 23:45",
+  "tasks": "QUEUE running",
+  "task": "TASK task-123",
+  "queue": "QUEUE blocked"
+}

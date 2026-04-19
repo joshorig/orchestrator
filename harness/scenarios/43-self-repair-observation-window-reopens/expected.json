@@ -1,0 +1,17 @@
+{
+  "reopened": 1,
+  "checked": 1,
+  "status": "pending",
+  "observation_status": "did_not_fix",
+  "planner_task_id": null,
+  "transition_labels": [
+    [
+      "issue:resolved",
+      "issue:pending",
+      "task:task-x:blocked:template_refine_exhausted"
+    ]
+  ],
+  "event_names": [
+    "issue_reopened"
+  ]
+}

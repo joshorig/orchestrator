@@ -1,0 +1,11 @@
+{
+  "kind": "telegram_surface",
+  "commands": [
+    "/help",
+    "/health",
+    "/status",
+    "/tasks",
+    "/task task-123",
+    "/queue blocked"
+  ]
+}

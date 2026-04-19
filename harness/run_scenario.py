@@ -1693,6 +1693,126 @@ def _run_memory_vec_missing(repo_root, scenario):
         }
 
 
+def _run_self_repair_observation(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        feats = root / "features"
+        feats.mkdir()
+        queue_root = root / "queue"
+        for state in orchestrator.STATES:
+            (queue_root / state).mkdir(parents=True, exist_ok=True)
+        old_env = {
+            "STATE_ENGINE_MODE": os.environ.get("STATE_ENGINE_MODE"),
+            "STATE_ENGINE_PATH": os.environ.get("STATE_ENGINE_PATH"),
+        }
+        old = {
+            "FEATURES_DIR": orchestrator.FEATURES_DIR,
+            "QUEUE_ROOT": orchestrator.QUEUE_ROOT,
+            "append_event": orchestrator.append_event,
+            "append_transition": orchestrator.append_transition,
+        }
+        events = []
+        transitions = []
+        os.environ["STATE_ENGINE_MODE"] = "off"
+        os.environ["STATE_ENGINE_PATH"] = str(root / "runtime" / "scenario.db")
+        orchestrator._STATE_ENGINE_CACHE = {"key": None, "engine": None}
+        orchestrator.FEATURES_DIR = feats
+        orchestrator.QUEUE_ROOT = queue_root
+        orchestrator.append_event = lambda *args, **kwargs: events.append({"args": args, "kwargs": kwargs})
+        orchestrator.append_transition = lambda *args: transitions.append(args)
+        try:
+            orchestrator.write_json_atomic(
+                feats / f"{scenario['feature_id']}.json",
+                {
+                    "feature_id": scenario["feature_id"],
+                    "project": scenario["project"],
+                    "status": "open",
+                    "source": "self-repair:test",
+                    "self_repair": {
+                        "enabled": True,
+                        "issues": [
+                            {
+                                "issue_key": scenario["issue_key"],
+                                "status": "resolved",
+                                "observation_target": dict(scenario["observation_target"]),
+                                "observation_due_at": scenario["observation_due_at"],
+                                "observation_status": "pending",
+                            }
+                        ],
+                    },
+                },
+            )
+            orchestrator.write_json_atomic(
+                queue_root / scenario["task_state"] / f"{scenario['observation_target']['task_id']}.json",
+                {
+                    "task_id": scenario["observation_target"]["task_id"],
+                    "blocker": {"code": scenario["observation_target"]["blocker_code"]},
+                },
+            )
+            out = orchestrator.tick_self_repair_observation_window()
+            saved = orchestrator.read_json(feats / f"{scenario['feature_id']}.json", {})
+        finally:
+            orchestrator.FEATURES_DIR = old["FEATURES_DIR"]
+            orchestrator.QUEUE_ROOT = old["QUEUE_ROOT"]
+            orchestrator.append_event = old["append_event"]
+            orchestrator.append_transition = old["append_transition"]
+            orchestrator._STATE_ENGINE_CACHE = {"key": None, "engine": None}
+            if old_env["STATE_ENGINE_MODE"] is None:
+                os.environ.pop("STATE_ENGINE_MODE", None)
+            else:
+                os.environ["STATE_ENGINE_MODE"] = old_env["STATE_ENGINE_MODE"]
+            if old_env["STATE_ENGINE_PATH"] is None:
+                os.environ.pop("STATE_ENGINE_PATH", None)
+            else:
+                os.environ["STATE_ENGINE_PATH"] = old_env["STATE_ENGINE_PATH"]
+        issue = saved["self_repair"]["issues"][0]
+        return {
+            "reopened": out["reopened"],
+            "checked": out["checked"],
+            "status": issue.get("status"),
+            "observation_status": issue.get("observation_status"),
+            "planner_task_id": issue.get("planner_task_id"),
+            "transition_labels": [list(row[1:4]) for row in transitions],
+            "event_names": [row["args"][1] for row in events],
+        }
+
+
+def _run_telegram_surface(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    old = {
+        "_health_payload": orchestrator._health_payload,
+        "features_brief": orchestrator.features_brief,
+        "queue_brief": orchestrator.queue_brief,
+        "task_text": orchestrator.task_text,
+    }
+    orchestrator._health_payload = lambda: {
+        "environment_ok": False,
+        "environment_error_count": 2,
+        "workflow_check_issue_count": 3,
+        "feature_open_count": 4,
+        "feature_frontier_blocked_count": 1,
+        "queue": {"queued": 5, "running": 2, "blocked": 1, "awaiting-review": 1, "awaiting-qa": 0},
+        "generated_at": "2026-04-19T23:45:00",
+    }
+    orchestrator.features_brief = lambda project=None: f"FEATURES {project or 'all'}"
+    orchestrator.queue_brief = lambda state=None: f"QUEUE {state or 'sample'}"
+    orchestrator.task_text = lambda task_id: f"TASK {task_id}"
+    try:
+        outputs = {cmd: orchestrator.dispatch_telegram_command(cmd) for cmd in scenario["commands"]}
+    finally:
+        for key, value in old.items():
+            setattr(orchestrator, key, value)
+    return {
+        "help": outputs["/help"],
+        "health": outputs["/health"],
+        "status": outputs["/status"],
+        "tasks": outputs["/tasks"],
+        "task": outputs["/task task-123"],
+        "queue": outputs["/queue blocked"],
+    }
+
+
 def main(argv):
     if len(argv) != 2:
         raise SystemExit("usage: harness/run_scenario.py <scenario-dir>")
@@ -1749,6 +1869,10 @@ def main(argv):
         actual = _run_memory_hybrid(repo_root, scenario)
     elif kind == "memory_vec_missing_fallback":
         actual = _run_memory_vec_missing(repo_root, scenario)
+    elif kind == "self_repair_observation":
+        actual = _run_self_repair_observation(repo_root, scenario)
+    elif kind == "telegram_surface":
+        actual = _run_telegram_surface(repo_root, scenario)
     else:
         raise SystemExit(f"unknown scenario kind: {kind}")
 

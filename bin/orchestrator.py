@@ -682,6 +682,7 @@ CONFIG_DEFAULTS = {
         "verifier_panel": ("socrates", "kahneman", "ada"),
         "approval_panel": ("feynman", "meadows", "torvalds"),
         "restart_launch_agents": True,
+        "observation_window_minutes": 10,
     },
     "council": {
         "enabled": True,
@@ -1159,6 +1160,29 @@ def health_snapshot():
         f"issues:  {payload['workflow_check_issue_count']} workflow-check",
     ]
     return _trim_card("\n".join(lines))
+
+
+def telegram_health_card():
+    payload = _health_payload()
+    queue = payload["queue"]
+    env_ok = payload["environment_ok"] and payload["environment_error_count"] == 0
+    blocked = payload["feature_frontier_blocked_count"]
+    return _trim_card(
+        "\n".join(
+            [
+                f"env {'OK' if env_ok else f'{payload['environment_error_count']} errors'}",
+                f"workflow {payload['workflow_check_issue_count']} issues",
+                f"features {payload['feature_open_count']} open / {blocked} blocked",
+                (
+                    "queue "
+                    f"{queue.get('queued',0)}q {queue.get('running',0)}r "
+                    f"{queue.get('blocked',0)}b {queue.get('awaiting-review',0)}ar {queue.get('awaiting-qa',0)}aq"
+                ),
+                f"updated {payload['generated_at'][:16].replace('T', ' ')}",
+            ]
+        ),
+        limit=280,
+    )
 
 
 def features_brief(project=None):
@@ -7005,6 +7029,23 @@ def _self_repair_mark_issue(feature_id, issue_key, **updates):
     return update_feature(feature_id, mut)
 
 
+def _self_repair_issue_observation_target(issue):
+    issue_key = str((issue or {}).get("issue_key") or "")
+    if not issue_key.startswith("task:"):
+        return None
+    parts = issue_key.split(":", 3)
+    if len(parts) < 4:
+        return None
+    _, task_id, state, blocker_code = parts
+    if not task_id or not blocker_code:
+        return None
+    return {
+        "task_id": task_id,
+        "state": state,
+        "blocker_code": blocker_code,
+    }
+
+
 def _self_repair_execution_terminal(task_id):
     """Return the resolution state for one execution slice.
 
@@ -7107,12 +7148,22 @@ def tick_self_repair_resolution():
                     details={"issue_key": issue.get("issue_key"), "execution_task_ids": exec_ids, "states": states},
                 )
             elif all(state == "done_approved" for state in states):
+                observation_target = _self_repair_issue_observation_target(issue)
+                observation_minutes = int((cfg.get("self_repair") or {}).get("observation_window_minutes", 10) or 10)
+                observation_due_at = (
+                    (dt.datetime.now() + dt.timedelta(minutes=max(observation_minutes, 1))).isoformat(timespec="seconds")
+                    if observation_target else None
+                )
                 issue["status"] = "resolved"
                 issue["resolved_at"] = now_iso()
                 issue["resolution"] = "execution_approved"
                 issue["completed_execution_task_ids"] = exec_ids
                 issue["execution_task_ids"] = []
                 issue["last_seen_at"] = now_iso()
+                issue["observation_target"] = observation_target
+                issue["observation_due_at"] = observation_due_at
+                issue["observation_checked_at"] = None
+                issue["observation_status"] = "pending" if observation_target else "not_applicable"
                 resolved += 1
                 mutated = True
                 append_transition(feature["feature_id"], "issue:executing", "issue:resolved", issue.get("issue_key") or "")
@@ -7120,12 +7171,106 @@ def tick_self_repair_resolution():
                     "self-repair-resolution",
                     "issue_resolved",
                     feature_id=feature["feature_id"],
-                    details={"issue_key": issue.get("issue_key"), "execution_task_ids": exec_ids},
+                    details={"issue_key": issue.get("issue_key"), "execution_task_ids": exec_ids, "observation_due_at": observation_due_at},
                 )
         if mutated:
             _write_feature_record(feature)
             changed_features.append(feature["feature_id"])
     return {"resolved": resolved, "stalled": stalled, "features": changed_features}
+
+
+def tick_self_repair_observation_window():
+    """Reopen resolved issues when the original blocker reappears after the watch window.
+
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     feats = root / "features"; feats.mkdir()
+    ...     queue_root = root / "queue"
+    ...     for state in STATES:
+    ...         (queue_root / state).mkdir(parents=True, exist_ok=True)
+    ...     old = {k: tick_self_repair_observation_window.__globals__[k] for k in ("FEATURES_DIR", "QUEUE_ROOT", "append_event", "append_transition")}
+    ...     events = []
+    ...     transitions = []
+    ...     tick_self_repair_observation_window.__globals__["FEATURES_DIR"] = feats
+    ...     tick_self_repair_observation_window.__globals__["QUEUE_ROOT"] = queue_root
+    ...     tick_self_repair_observation_window.__globals__["append_event"] = lambda *args, **kwargs: events.append((args, kwargs))
+    ...     tick_self_repair_observation_window.__globals__["append_transition"] = lambda *args: transitions.append(args)
+    ...     write_json_atomic(feats / "feature-sr.json", {"feature_id": "feature-sr", "status": "open", "self_repair": {"enabled": True, "issues": [{"issue_key": "task:task-x:blocked:template_refine_exhausted", "status": "resolved", "observation_target": {"task_id": "task-x", "blocker_code": "template_refine_exhausted"}, "observation_due_at": "2000-01-01T00:00:00"}]}})
+    ...     write_json_atomic(queue_root / "blocked" / "task-x.json", {"task_id": "task-x", "blocker": {"code": "template_refine_exhausted"}})
+    ...     out = tick_self_repair_observation_window()
+    ...     saved = read_json(feats / "feature-sr.json", {})
+    ...     for key, value in old.items():
+    ...         tick_self_repair_observation_window.__globals__[key] = value
+    >>> out["reopened"], saved["self_repair"]["issues"][0]["status"], transitions[0][1:4]
+    (1, 'pending', ('issue:resolved', 'issue:pending', 'task:task-x:blocked:template_refine_exhausted'))
+    """
+    reopened = 0
+    checked = 0
+    changed_features = []
+    now = dt.datetime.now()
+    for feature in list_features():
+        if feature.get("status") not in ("open", "finalizing"):
+            continue
+        if not is_self_repair_feature(feature):
+            continue
+        issues = ((feature.get("self_repair") or {}).get("issues") or [])
+        mutated = False
+        for issue in issues:
+            if issue.get("status") != "resolved":
+                continue
+            target = issue.get("observation_target") or {}
+            due_at_raw = issue.get("observation_due_at")
+            if not target or not due_at_raw or issue.get("observation_checked_at"):
+                continue
+            try:
+                due_at = dt.datetime.fromisoformat(str(due_at_raw))
+            except ValueError:
+                due_at = now
+            if due_at.tzinfo is not None:
+                due_at = due_at.astimezone().replace(tzinfo=None)
+            if due_at > now:
+                continue
+            checked += 1
+            issue["observation_checked_at"] = now_iso()
+            found = find_task(target.get("task_id"))
+            blocker = task_blocker(found[1]) if found else {}
+            same_blocker = found and (blocker or {}).get("code") == target.get("blocker_code")
+            if same_blocker:
+                issue["status"] = "pending"
+                issue["reopened_at"] = now_iso()
+                issue["last_seen_at"] = now_iso()
+                issue["observation_status"] = "did_not_fix"
+                issue["last_blocker_code"] = "resolution_did_not_fix"
+                issue["last_reopen_reason"] = (
+                    f"resolved self-repair did not fix {target.get('task_id')}:{target.get('blocker_code')}"
+                )
+                issue["planner_task_id"] = None
+                issue["resolution"] = "reopened_after_observation"
+                append_transition(feature["feature_id"], "issue:resolved", "issue:pending", issue.get("issue_key") or "")
+                append_event(
+                    "self-repair-observation",
+                    "issue_reopened",
+                    feature_id=feature["feature_id"],
+                    task_id=target.get("task_id"),
+                    details={"issue_key": issue.get("issue_key"), "blocker_code": target.get("blocker_code")},
+                )
+                reopened += 1
+                mutated = True
+            else:
+                issue["observation_status"] = "passed"
+                append_event(
+                    "self-repair-observation",
+                    "issue_verified",
+                    feature_id=feature["feature_id"],
+                    task_id=target.get("task_id"),
+                    details={"issue_key": issue.get("issue_key"), "blocker_code": target.get("blocker_code")},
+                )
+                mutated = True
+        if mutated:
+            _write_feature_record(feature)
+            changed_features.append(feature["feature_id"])
+    return {"checked": checked, "reopened": reopened, "features": changed_features}
 
 
 def _self_repair_append_deliberation(feature_id, issue_key, deliberation):
@@ -11010,6 +11155,14 @@ def tick_workflow_check():
             details=self_repair_resolution,
         )
 
+    self_repair_observation = tick_self_repair_observation_window()
+    if self_repair_observation.get("checked") or self_repair_observation.get("reopened"):
+        append_event(
+            "self-repair-observation",
+            "tick_complete",
+            details=self_repair_observation,
+        )
+
     self_repair_drain = tick_self_repair_queue()
     if self_repair_drain.get("scheduled"):
         append_event(
@@ -11272,8 +11425,20 @@ def process_telegram():
 
 def dispatch_telegram_command(text):
     """Shared dispatcher used by both the file stub and the real bot."""
+    if text in ("/start", "start", "/help", "help"):
+        return (
+            "commands\n"
+            "/health\n"
+            "/features [project]\n"
+            "/queue [state]\n"
+            "/task <task_id>\n"
+            "/planner <project> [on|off|status|run]\n"
+            "/action <id> <retry|abandon|unblock|approve>\n"
+            "/ask <question>\n"
+            "/report [morning|evening]"
+        )
     if text in ("/health", "health"):
-        return health_snapshot()
+        return telegram_health_card()
     if text.startswith("/features") or text.startswith("features"):
         parts = text.split(maxsplit=1)
         return features_brief(parts[1].strip() if len(parts) > 1 else None)
@@ -11281,9 +11446,9 @@ def dispatch_telegram_command(text):
         parts = text.split(maxsplit=1)
         return queue_brief(parts[1].strip())
     if text in ("/status", "status"):
-        return status_text()
+        return telegram_health_card()
     if text in ("/tasks", "tasks"):
-        return running_tasks_text()
+        return queue_brief("running")
     if text in ("/task", "task"):
         return "usage: /task <task_id>"
     if text.startswith("/task ") or text.startswith("task "):
@@ -11412,12 +11577,15 @@ def dispatch_telegram_command(text):
             if out.get("feature_id") else json.dumps(out, sort_keys=True)
         )
     return (
-        "unknown command. allowed: /health /features [project] /queue [state] /planner <project> [on|off|status|run] "
-        "/tick [worker|reviewer|qa|canary] /action <id> <retry|abandon|unblock|approve> "
-        "/status /tasks /task <task_id> /queue /planner /reviewer /qa "
-        "/cleanup /env /env-repair /ask <question> /regression <project> /report morning|evening /enqueue <summary> "
-        "/operators /telegram-register <chat_id> [name] /telegram-approve <chat_id> <approved_by> [name] "
-        "/self_repair <summary> | <evidence>"
+        "unknown command. start with /health\n\n"
+        "/health\n"
+        "/features [project]\n"
+        "/queue [state]\n"
+        "/task <task_id>\n"
+        "/planner <project> [on|off|status|run]\n"
+        "/action <id> <retry|abandon|unblock|approve>\n"
+        "/ask <question>\n"
+        "/report [morning|evening]"
     )
 
 

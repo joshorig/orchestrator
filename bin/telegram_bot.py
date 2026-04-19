@@ -168,7 +168,7 @@ def build_handlers(cfg):
         return rows
 
     async def cmd_health(update, ctx, text):
-        await send_card(update, "🟢", "health", o.health_snapshot(), buttons=[[("Features", "cmd:/features"), ("Queue", "cmd:/queue")]])
+        await send_card(update, "🟢", "health", o.telegram_health_card(), buttons=[[("Features", "cmd:/features"), ("Queue", "cmd:/queue")]])
 
     async def cmd_features(update, ctx, text):
         parts = text.split(maxsplit=1)
@@ -184,6 +184,13 @@ def build_handlers(cfg):
         parts = text.split(maxsplit=1)
         state = parts[1].strip() if len(parts) > 1 else None
         await send_card(update, "📋", "queue", o.queue_brief(state))
+
+    async def cmd_task(update, ctx, text):
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            await send_html(update, "❌ usage: <code>/task &lt;task_id&gt;</code>")
+            return
+        await send_card(update, "🧵", "task", o.task_text(parts[1].strip()))
 
     async def cmd_planner(update, ctx, text):
         parts = text.split()
@@ -208,30 +215,6 @@ def build_handlers(cfg):
             await send_html(update, f"✅ planner disabled for <code>{html_escape(project)}</code>")
             return
         await send_html(update, "❌ usage: <code>/planner &lt;project&gt; [on|off|status|run]</code>")
-
-    async def cmd_tick(update, ctx, text):
-        parts = text.split(maxsplit=1)
-        if len(parts) < 2:
-            await send_html(update, "❌ usage: <code>/tick [worker|reviewer|qa|canary]</code>")
-            return
-        target = parts[1].strip().lower()
-        if target == "worker":
-            out = o._nudge_idle_queued_workers()
-            await send_html(update, block("⚙️", "tick worker", json.dumps(out, sort_keys=True) if out else "no idle workers nudged"))
-            return
-        if target == "reviewer":
-            o.tick_reviewer()
-            await send_html(update, "✅ reviewer tick queued")
-            return
-        if target == "qa":
-            o.tick_qa()
-            await send_html(update, "✅ qa tick queued")
-            return
-        if target == "canary":
-            out = o.tick_canary_workflows(force=True)
-            await send_html(update, block("🧪", "tick canary", json.dumps(out, sort_keys=True)))
-            return
-        await send_html(update, "❌ usage: <code>/tick [worker|reviewer|qa|canary]</code>")
 
     def run_action(target_id, verb):
         found = o.find_task(target_id)
@@ -291,8 +274,8 @@ def build_handlers(cfg):
             "/health\n"
             "/features [project]\n"
             "/queue [state]\n"
+            "/task <task_id>\n"
             "/planner <project> [on|off|status|run]\n"
-            "/tick [worker|reviewer|qa|canary]\n"
             "/action <id> <retry|abandon|unblock|approve>\n"
             "/ask <question>\n"
             "/report [morning|evening]"
@@ -331,6 +314,20 @@ def build_handlers(cfg):
             await query.message.reply_text(body)
 
     async def push_alerts_job(ctx):
+        health = o._health_payload()
+        env_ok = bool(health.get("environment_ok")) and int(health.get("environment_error_count") or 0) == 0
+        if (not env_ok or int(health.get("workflow_check_issue_count") or 0) > 0):
+            key = (
+                f"health:{int(health.get('environment_error_count') or 0)}:"
+                f"{int(health.get('workflow_check_issue_count') or 0)}:"
+                f"{int(health.get('feature_frontier_blocked_count') or 0)}"
+            )
+            if o.should_push_alert(key, 900):
+                await send_or_reply(
+                    None,
+                    block("🩺", "health", o.telegram_health_card()),
+                    buttons=[[("Features", "cmd:/features"), ("Queue", "cmd:/queue")]],
+                )
         for slot, paused in o.slot_pause_status().items():
             if paused and o.should_push_alert(f"slot-paused:{slot}:{paused.get('paused_at')}", 3600):
                 await send_or_reply(
@@ -348,13 +345,24 @@ def build_handlers(cfg):
                         block("⚠️", "feature", o.features_brief(wf.get("project"))),
                         buttons=feature_buttons(wf),
                     )
+        for path in sorted(o.REPORT_DIR.glob("workflow-check_*.md"))[-3:]:
+            fingerprint = o.workflow_check_fingerprint(path.read_text(errors="replace"))
+            if not fingerprint:
+                continue
+            key = f"workflow-check:{fingerprint}"
+            if o.should_push_alert(key, 86400):
+                await send_or_reply(
+                    None,
+                    block("🛠️", "workflow check", path.read_text(errors="replace")[:3200]),
+                    buttons=[[("Read full", f"readfull:{o.remember_full_message(path.read_text(errors='replace'))}")]],
+                )
 
     app = Application.builder().token(cfg["bot_token"]).build()
     app.add_handler(CommandHandler("health", gate(cmd_health)))
     app.add_handler(CommandHandler("features", gate(cmd_features)))
     app.add_handler(CommandHandler("queue", gate(cmd_queue)))
+    app.add_handler(CommandHandler("task", gate(cmd_task)))
     app.add_handler(CommandHandler("planner", gate(cmd_planner)))
-    app.add_handler(CommandHandler("tick", gate(cmd_tick)))
     app.add_handler(CommandHandler("action", gate(cmd_action)))
     app.add_handler(CommandHandler("ask", gate(cmd_ask)))
     app.add_handler(CommandHandler("report", gate(cmd_report)))
