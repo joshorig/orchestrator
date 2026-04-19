@@ -2910,6 +2910,7 @@ def reap():
     """Return stale claimed/running tasks to the queue when their worker died."""
     CLAIMS_DIR.mkdir(parents=True, exist_ok=True)
     reaped = 0
+    orphan_claim_grace_sec = 120
     for pidfile in CLAIMS_DIR.glob("*.pid"):
         task_id = pidfile.stem
         try:
@@ -2933,6 +2934,27 @@ def reap():
                 reaped += 1
                 break
         pidfile.unlink(missing_ok=True)
+    # Also recover tasks that are stuck in claimed/running without any claim pid.
+    for state in ("claimed", "running"):
+        for src in queue_dir(state).glob("*.json"):
+            task = read_json(src, {})
+            task_id = task.get("task_id")
+            if not task_id:
+                continue
+            pidfile = CLAIMS_DIR / f"{task_id}.pid"
+            if pidfile.exists():
+                continue
+            entered_at = task.get("started_at") if state == "running" else task.get("claimed_at")
+            age = _seconds_since_iso(entered_at)
+            if age is None or age < orphan_claim_grace_sec:
+                continue
+            reset_task_for_retry(
+                task_id,
+                state,
+                reason=f"reaper: {state} task orphaned without claim pid",
+                source="reaper",
+            )
+            reaped += 1
     # Also: transition blocked tasks that have a regenerated template back to queued.
     for src in queue_dir("blocked").glob("*.json"):
         task = read_json(src, {})
