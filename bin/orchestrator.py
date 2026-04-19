@@ -1204,23 +1204,31 @@ def features_brief(project=None):
 def queue_brief(state=None):
     counts = queue_counts()
     if state:
-        sample = queue_sample(state, limit=4)
+        sample = queue_sample(state, limit=6)
         body = [f"QUEUE {state}", f"count: {counts.get(state, 0)}"]
         body.extend(sample or ["(empty)"])
         return _trim_card("\n".join(body))
-    return _trim_card(
-        "\n".join(
-            [
-                "QUEUE",
-                f"queued:           {counts.get('queued', 0)}",
-                f"claimed:          {counts.get('claimed', 0)}",
-                f"running:          {counts.get('running', 0)}",
-                f"blocked:          {counts.get('blocked', 0)}",
-                f"awaiting-review:  {counts.get('awaiting-review', 0)}",
-                f"awaiting-qa:      {counts.get('awaiting-qa', 0)}",
-            ]
+    lines = [
+        "QUEUE",
+        f"queued:           {counts.get('queued', 0)}",
+        f"claimed:          {counts.get('claimed', 0)}",
+        f"running:          {counts.get('running', 0)}",
+        f"blocked:          {counts.get('blocked', 0)}",
+        f"awaiting-review:  {counts.get('awaiting-review', 0)}",
+        f"awaiting-qa:      {counts.get('awaiting-qa', 0)}",
+        "",
+        "top tasks:",
+    ]
+    for state_name, task in queue_tasks(limit=6):
+        attempt = int(task.get("attempt", 1) or 1)
+        retry_note = f" a{attempt}" if attempt > 1 else ""
+        lines.append(
+            f"{state_name} {task.get('task_id')} [{task.get('engine')}/{task.get('role')}{retry_note}] "
+            f"{task.get('project')}: {task.get('summary','')[:48]}"
         )
-    )
+    if lines[-1] == "top tasks:":
+        lines.append("(empty)")
+    return _trim_card("\n".join(lines))
 
 
 def issue_card(issue):
@@ -8258,6 +8266,20 @@ def queue_sample(state, limit=10):
             f"  {t.get('task_id')} [{t.get('engine')}/{t.get('role')}{retry_note}] "
             f"{t.get('project')}: {t.get('summary','')[:60]}"
         )
+    return items
+
+
+def queue_tasks(state=None, limit=10):
+    items = []
+    if state:
+        states = (state,)
+    else:
+        states = ("running", "claimed", "blocked", "awaiting-review", "awaiting-qa", "queued")
+    for state_name in states:
+        for task in iter_tasks(states=(state_name,), limit=limit):
+            items.append((state_name, task))
+            if len(items) >= limit:
+                return items
     return items
 
 

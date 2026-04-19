@@ -167,6 +167,36 @@ def build_handlers(cfg):
         rows.append([("Open council", f"council:{fid}")])
         return rows
 
+    def task_action_rows(task_id):
+        found = o.find_task(task_id)
+        if not found:
+            return []
+        state, task = found
+        rows = [[("Open task", f"task:{task_id}")]]
+        if state in ("blocked", "failed", "abandoned", "awaiting-review", "awaiting-qa"):
+            rows.append([("Retry", f"action:{task_id}:retry")])
+        if state != "done":
+            rows[-1].append(("Abandon", f"action:{task_id}:abandon"))
+        return rows
+
+    def queue_buttons(state=None):
+        rows = []
+        for _, task in o.queue_tasks(state=state, limit=4):
+            task_id = task.get("task_id")
+            if not task_id:
+                continue
+            rows.append([(task_id[-6:], f"task:{task_id}")])
+            action_row = []
+            found = o.find_task(task_id)
+            current_state = found[0] if found else None
+            if current_state in ("blocked", "failed", "abandoned", "awaiting-review", "awaiting-qa"):
+                action_row.append(("Retry", f"action:{task_id}:retry"))
+            if current_state and current_state != "done":
+                action_row.append(("Abandon", f"action:{task_id}:abandon"))
+            if action_row:
+                rows.append(action_row)
+        return rows or None
+
     async def cmd_health(update, ctx, text):
         await send_card(update, "🟢", "health", o.telegram_health_card(), buttons=[[("Features", "cmd:/features"), ("Queue", "cmd:/queue")]])
 
@@ -183,7 +213,7 @@ def build_handlers(cfg):
     async def cmd_queue(update, ctx, text):
         parts = text.split(maxsplit=1)
         state = parts[1].strip() if len(parts) > 1 else None
-        await send_card(update, "📋", "queue", o.queue_brief(state))
+        await send_card(update, "📋", "queue", o.queue_brief(state), buttons=queue_buttons(state))
 
     async def cmd_task(update, ctx, text):
         parts = text.split(maxsplit=1)
@@ -298,6 +328,10 @@ def build_handlers(cfg):
                 return await cmd_features(pseudo, ctx, cmd)
             if cmd == "/queue":
                 return await cmd_queue(pseudo, ctx, cmd)
+        if data.startswith("task:"):
+            task_id = data.split(":", 1)[1]
+            await query.message.reply_text(o.task_text(task_id), reply_markup=keyboard(task_action_rows(task_id)) if task_action_rows(task_id) else None)
+            return
         if data.startswith("readfull:"):
             token = data.split(":", 1)[1]
             body = o.load_full_message(token) or "(full response expired)"
