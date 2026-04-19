@@ -1,0 +1,14 @@
+{
+  "fallback_ok": {
+    "reason": "queued",
+    "blocker_code": null,
+    "enqueued_project": "fallback",
+    "alert_count": 0
+  },
+  "fallback_stale": {
+    "reason": "fallback_stale",
+    "blocker_code": "canary_unrecoverable",
+    "enqueued_project": null,
+    "alert_count": 1
+  }
+}

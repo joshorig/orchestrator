@@ -1,0 +1,14 @@
+{
+  "reconstruct": {
+    "feature_status": "open",
+    "blocker_code": null,
+    "reconstructed_state": "done",
+    "alert_count": 0
+  },
+  "unrecoverable": {
+    "feature_status": "abandoned",
+    "blocker_code": "missing_child_unrecoverable",
+    "reconstructed_state": null,
+    "alert_count": 1
+  }
+}

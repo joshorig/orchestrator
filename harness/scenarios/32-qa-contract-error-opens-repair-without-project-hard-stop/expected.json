@@ -1,0 +1,6 @@
+{
+  "failed_state": "failed",
+  "repair_task_count": 1,
+  "claimed_ids": ["task-T2"],
+  "project_environment_ok": true
+}

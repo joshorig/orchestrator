@@ -1,0 +1,7 @@
+{
+  "kind": "qa_contract_scoped",
+  "project": "demo",
+  "feature_id": "feature-32",
+  "failed_task_id": "task-T1",
+  "queued_task_id": "task-T2"
+}

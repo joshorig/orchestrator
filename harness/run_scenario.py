@@ -434,6 +434,565 @@ def _run_qa_preflight(repo_root, scenario):
         }
 
 
+def _run_project_main_dirty_cap(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        feats = root / "features"
+        feats.mkdir()
+        queue_root = root / "queue"
+        for state in orchestrator.STATES:
+            (queue_root / state).mkdir(parents=True, exist_ok=True)
+        old = {
+            "FEATURES_DIR": orchestrator.FEATURES_DIR,
+            "QUEUE_ROOT": orchestrator.QUEUE_ROOT,
+            "REPORT_DIR": orchestrator.REPORT_DIR,
+            "EVENTS_LOG": orchestrator.EVENTS_LOG,
+            "PROJECT_HARD_STOPS_PATH": orchestrator.PROJECT_HARD_STOPS_PATH,
+            "load_config": orchestrator.load_config,
+            "emit_runtime_metrics_snapshot": orchestrator.emit_runtime_metrics_snapshot,
+            "write_agent_status": orchestrator.write_agent_status,
+            "reap": orchestrator.reap,
+            "_repair_project_main_checkout": orchestrator._repair_project_main_checkout,
+            "_workflow_check_retry_task": orchestrator._workflow_check_retry_task,
+            "_write_workflow_check_report": orchestrator._write_workflow_check_report,
+            "_write_workflow_alert": orchestrator._write_workflow_alert,
+            "tick_self_repair_resolution": orchestrator.tick_self_repair_resolution,
+            "tick_self_repair_queue": orchestrator.tick_self_repair_queue,
+        }
+        alerts = []
+        orchestrator.FEATURES_DIR = feats
+        orchestrator.QUEUE_ROOT = queue_root
+        orchestrator.REPORT_DIR = root / "reports"
+        orchestrator.EVENTS_LOG = root / "events.jsonl"
+        orchestrator.PROJECT_HARD_STOPS_PATH = root / "project-hard-stops.json"
+        orchestrator.load_config = lambda: {
+            "workflow_check_max_attempts": int(scenario["max_attempts"]),
+            "projects": [
+                {"name": scenario["project"], "path": str(root / "repo")},
+                {"name": "devmini-orchestrator", "path": str(root / "orchestrator")},
+            ],
+            "synthetic_canary": {"enabled": False},
+        }
+        orchestrator.emit_runtime_metrics_snapshot = lambda **kwargs: None
+        orchestrator.write_agent_status = lambda *args, **kwargs: None
+        orchestrator.reap = lambda: 0
+        orchestrator._repair_project_main_checkout = lambda project: {"fixed": False, "detail": "still dirty"}
+        orchestrator._workflow_check_retry_task = lambda *args, **kwargs: False
+        orchestrator._write_workflow_check_report = lambda issues, reaped=0: None
+        orchestrator._write_workflow_alert = lambda issue, reason: alerts.append(reason) or "alert.md"
+        orchestrator.tick_self_repair_resolution = lambda: {"resolved": 0, "stalled": 0}
+        orchestrator.tick_self_repair_queue = lambda: {"scheduled": 0}
+        try:
+            task = orchestrator.new_task(
+                role="implementer",
+                engine="codex",
+                project=scenario["project"],
+                summary="dirty main task",
+                source="scenario-28",
+                feature_id=scenario["feature_id"],
+            )
+            task["task_id"] = scenario["task_id"]
+            task["state"] = "blocked"
+            task["blocker"] = orchestrator.make_blocker(
+                "project_main_dirty",
+                summary="project main checkout dirty",
+                detail="dirty main",
+                source="scenario",
+                retryable=True,
+            )
+            orchestrator.write_json_atomic(orchestrator.task_path(task["task_id"], "blocked"), task)
+            feature = {
+                "feature_id": scenario["feature_id"],
+                "project": scenario["project"],
+                "status": "open",
+                "summary": "dirty main feature",
+                "child_task_ids": [scenario["task_id"]],
+            }
+            orchestrator.write_json_atomic(feats / f"{scenario['feature_id']}.json", feature)
+            snapshots = []
+            for _ in range(4):
+                orchestrator.tick_workflow_check()
+                saved = orchestrator.read_json(feats / f"{scenario['feature_id']}.json", {})
+                attempts = ((saved.get("workflow_check") or {}).get("attempts") or {}).get(
+                    f"task:{scenario['task_id']}:blocked:project_main_dirty",
+                    0,
+                )
+                snapshots.append(
+                    {
+                        "attempts": attempts,
+                        "hard_stopped": orchestrator.project_hard_stopped(scenario["project"]),
+                    }
+                )
+            events = orchestrator.read_events(role="workflow-check")
+        finally:
+            for key, value in old.items():
+                setattr(orchestrator, key, value)
+        return {
+            "ticks": snapshots,
+            "alert_count": len(alerts),
+            "hard_stop_event": any(row.get("event") == "project_hard_stopped" for row in events),
+        }
+
+
+def _run_regression_clear(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    results = {}
+    for mode in ("green_run", "human_push"):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            feats = root / "features"
+            feats.mkdir()
+            queue_root = root / "queue"
+            for state in orchestrator.STATES:
+                (queue_root / state).mkdir(parents=True, exist_ok=True)
+            old = {
+                "FEATURES_DIR": orchestrator.FEATURES_DIR,
+                "QUEUE_ROOT": orchestrator.QUEUE_ROOT,
+                "REPORT_DIR": orchestrator.REPORT_DIR,
+                "EVENTS_LOG": orchestrator.EVENTS_LOG,
+                "PROJECT_HARD_STOPS_PATH": orchestrator.PROJECT_HARD_STOPS_PATH,
+                "load_config": orchestrator.load_config,
+                "emit_runtime_metrics_snapshot": orchestrator.emit_runtime_metrics_snapshot,
+                "write_agent_status": orchestrator.write_agent_status,
+                "reap": orchestrator.reap,
+                "_write_workflow_check_report": orchestrator._write_workflow_check_report,
+                "tick_self_repair_resolution": orchestrator.tick_self_repair_resolution,
+                "tick_self_repair_queue": orchestrator.tick_self_repair_queue,
+                "_project_green_regression_after": orchestrator._project_green_regression_after,
+                "_project_human_push_after": orchestrator._project_human_push_after,
+            }
+            orchestrator.FEATURES_DIR = feats
+            orchestrator.QUEUE_ROOT = queue_root
+            orchestrator.REPORT_DIR = root / "reports"
+            orchestrator.EVENTS_LOG = root / "events.jsonl"
+            orchestrator.PROJECT_HARD_STOPS_PATH = root / "project-hard-stops.json"
+            orchestrator.load_config = lambda: {
+                "workflow_check_max_attempts": 3,
+                "projects": [
+                    {"name": scenario["project"], "path": str(root / "repo")},
+                    {"name": "devmini-orchestrator", "path": str(root / "orchestrator")},
+                ],
+                "synthetic_canary": {"enabled": False},
+            }
+            orchestrator.emit_runtime_metrics_snapshot = lambda **kwargs: None
+            orchestrator.write_agent_status = lambda *args, **kwargs: None
+            orchestrator.reap = lambda: 0
+            orchestrator._write_workflow_check_report = lambda issues, reaped=0: None
+            orchestrator.tick_self_repair_resolution = lambda: {"resolved": 0, "stalled": 0}
+            orchestrator.tick_self_repair_queue = lambda: {"scheduled": 0}
+            orchestrator._project_green_regression_after = lambda project_name, failed_at: mode == "green_run"
+            orchestrator._project_human_push_after = lambda project, failed_at: mode == "human_push"
+            try:
+                task = orchestrator.new_task(
+                    role="implementer",
+                    engine="codex",
+                    project=scenario["project"],
+                    summary="regression block",
+                    source="scenario-29",
+                    feature_id=scenario["feature_id"],
+                )
+                task["task_id"] = scenario["task_id"]
+                task["state"] = "blocked"
+                task["finished_at"] = scenario["failed_at"]
+                task["blocker"] = orchestrator.make_blocker(
+                    "project_regression_failed",
+                    summary="project regression failed",
+                    detail="regression failure",
+                    source="scenario",
+                    retryable=False,
+                )
+                task["topology_error"] = "regression-failure"
+                orchestrator.write_json_atomic(orchestrator.task_path(task["task_id"], "blocked"), task)
+                feature = {
+                    "feature_id": scenario["feature_id"],
+                    "project": scenario["project"],
+                    "status": "open",
+                    "summary": "regression feature",
+                    "child_task_ids": [scenario["task_id"]],
+                }
+                orchestrator.write_json_atomic(feats / f"{scenario['feature_id']}.json", feature)
+                orchestrator.tick_workflow_check()
+                found = orchestrator.find_task(task["task_id"])
+                events = orchestrator.read_events(role="workflow-check")
+                hard_stopped = orchestrator.project_hard_stopped(scenario["project"])
+            finally:
+                for key, value in old.items():
+                    setattr(orchestrator, key, value)
+            results[mode] = {
+                "state": found[0] if found else None,
+                "hard_stopped": hard_stopped,
+                "cleared_event": next(
+                    (row.get("details", {}).get("cleared_by") for row in events if row.get("event") == "project_regression_cleared"),
+                    None,
+                ),
+            }
+    return results
+
+
+def _run_missing_child(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    results = {}
+    for mode in ("reconstruct", "unrecoverable"):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            feats = root / "features"
+            feats.mkdir()
+            queue_root = root / "queue"
+            for state in orchestrator.STATES:
+                (queue_root / state).mkdir(parents=True, exist_ok=True)
+            old = {
+                "FEATURES_DIR": orchestrator.FEATURES_DIR,
+                "QUEUE_ROOT": orchestrator.QUEUE_ROOT,
+                "REPORT_DIR": orchestrator.REPORT_DIR,
+                "EVENTS_LOG": orchestrator.EVENTS_LOG,
+                "TRANSITIONS_LOG": orchestrator.TRANSITIONS_LOG,
+                "load_config": orchestrator.load_config,
+                "emit_runtime_metrics_snapshot": orchestrator.emit_runtime_metrics_snapshot,
+                "write_agent_status": orchestrator.write_agent_status,
+                "reap": orchestrator.reap,
+                "_write_workflow_check_report": orchestrator._write_workflow_check_report,
+                "_write_workflow_alert": orchestrator._write_workflow_alert,
+                "tick_self_repair_resolution": orchestrator.tick_self_repair_resolution,
+                "tick_self_repair_queue": orchestrator.tick_self_repair_queue,
+            }
+            alerts = []
+            orchestrator.FEATURES_DIR = feats
+            orchestrator.QUEUE_ROOT = queue_root
+            orchestrator.REPORT_DIR = root / "reports"
+            orchestrator.EVENTS_LOG = root / "events.jsonl"
+            orchestrator.TRANSITIONS_LOG = root / "transitions.log"
+            orchestrator.load_config = lambda: {
+                "workflow_check_max_attempts": 3,
+                "projects": [
+                    {"name": scenario["project"], "path": str(root / "repo")},
+                    {"name": "devmini-orchestrator", "path": str(root / "orchestrator")},
+                ],
+                "synthetic_canary": {"enabled": False},
+            }
+            orchestrator.emit_runtime_metrics_snapshot = lambda **kwargs: None
+            orchestrator.write_agent_status = lambda *args, **kwargs: None
+            orchestrator.reap = lambda: 0
+            orchestrator._write_workflow_check_report = lambda issues, reaped=0: None
+            orchestrator._write_workflow_alert = lambda issue, reason: alerts.append(reason) or "alert.md"
+            orchestrator.tick_self_repair_resolution = lambda: {"resolved": 0, "stalled": 0}
+            orchestrator.tick_self_repair_queue = lambda: {"scheduled": 0}
+            try:
+                if mode == "reconstruct":
+                    orchestrator.TRANSITIONS_LOG.write_text(
+                        f"2026-04-15T10:00:00\t{scenario['task_id']}\tqueued\t->\tclaimed\tclaim\n"
+                        f"2026-04-15T10:01:00\t{scenario['task_id']}\tclaimed\t->\tdone\tdone\n"
+                    )
+                feature = {
+                    "feature_id": scenario["feature_id"],
+                    "project": scenario["project"],
+                    "status": "open",
+                    "summary": "missing child feature",
+                    "child_task_ids": [scenario["task_id"]],
+                }
+                orchestrator.write_json_atomic(feats / f"{scenario['feature_id']}.json", feature)
+                orchestrator.tick_workflow_check()
+                saved = orchestrator.read_json(feats / f"{scenario['feature_id']}.json", {})
+                reconstructed = orchestrator.read_json(queue_root / "done" / f"{scenario['task_id']}.json", {})
+            finally:
+                for key, value in old.items():
+                    setattr(orchestrator, key, value)
+            results[mode] = {
+                "feature_status": saved.get("status"),
+                "blocker_code": ((saved.get("blocker") or {}).get("code")),
+                "reconstructed_state": reconstructed.get("state"),
+                "alert_count": len(alerts),
+            }
+    return results
+
+
+def _run_canary_fallback(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    results = {}
+    for mode in ("fallback_ok", "fallback_stale"):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            primary_repo = root / "primary"
+            fallback_repo = root / "fallback"
+            for repo in (primary_repo, fallback_repo):
+                (repo / "repo-memory").mkdir(parents=True, exist_ok=True)
+                (repo / "repo-memory" / "CURRENT_STATE.md").write_text("ok\n")
+            old = {
+                "FEATURES_DIR": orchestrator.FEATURES_DIR,
+                "EVENTS_LOG": orchestrator.EVENTS_LOG,
+                "_write_workflow_alert": orchestrator._write_workflow_alert,
+                "load_config": orchestrator.load_config,
+                "engine_outstanding": orchestrator.engine_outstanding,
+                "write_agent_status": orchestrator.write_agent_status,
+                "create_feature": orchestrator.create_feature,
+                "new_task": orchestrator.new_task,
+                "enqueue_task": orchestrator.enqueue_task,
+                "append_event": orchestrator.append_event,
+                "project_environment_ok": orchestrator.project_environment_ok,
+                "_project_has_open_feature": orchestrator._project_has_open_feature,
+                "planner_disabled": orchestrator.planner_disabled,
+                "project_hard_stopped": orchestrator.project_hard_stopped,
+                "_canary_success_overdue": orchestrator._canary_success_overdue,
+                "list_canary_features": orchestrator.list_canary_features,
+                "_canary_interval_due": orchestrator._canary_interval_due,
+                "project_historian_template": orchestrator.project_historian_template,
+            }
+            alerts = []
+            calls = []
+            orchestrator.FEATURES_DIR = root / "features"
+            orchestrator.FEATURES_DIR.mkdir()
+            orchestrator.EVENTS_LOG = root / "events.jsonl"
+            orchestrator._write_workflow_alert = lambda issue, reason: alerts.append(reason) or "alert.md"
+            orchestrator.load_config = lambda: {
+                "projects": [
+                    {"name": "primary", "path": str(primary_repo)},
+                    {"name": "fallback", "path": str(fallback_repo)},
+                ],
+                "synthetic_canary": {
+                    "enabled": True,
+                    "project": "primary",
+                    "fallback_project": "fallback",
+                    "summary": "Canary",
+                    "roadmap_entry_id": "C-1",
+                    "roadmap_title": "Canary",
+                    "roadmap_body": "body",
+                    "interval_hours": 6,
+                    "success_sla_hours": 24,
+                },
+            }
+            orchestrator.engine_outstanding = lambda: {"claude": 0, "codex": 0, "qa": 0}
+            orchestrator.write_agent_status = lambda *args, **kwargs: None
+            orchestrator.create_feature = lambda **kwargs: {"feature_id": "feature-canary", **kwargs}
+            orchestrator.new_task = lambda **kwargs: {"task_id": "task-canary", **kwargs}
+            orchestrator.enqueue_task = lambda task: calls.append(task)
+            orchestrator.append_event = lambda *args, **kwargs: None
+            orchestrator.project_environment_ok = lambda name, refresh=True: True
+            orchestrator._project_has_open_feature = lambda name: False
+            orchestrator.planner_disabled = lambda name: False
+            orchestrator.project_hard_stopped = lambda name: False
+            orchestrator._canary_success_overdue = lambda cfg, project_name: (mode == "fallback_stale", None) if project_name == "fallback" else (True, None)
+            orchestrator.list_canary_features = lambda **kwargs: []
+            orchestrator._canary_interval_due = lambda cfg, project_name: (True, None)
+            orchestrator.project_historian_template = lambda project_name: "template"
+            try:
+                issue = {"project": "primary", "feature_id": "feature-primary", "issue_key": "canary:primary"}
+                out = orchestrator._enqueue_canary_fallback(issue, orchestrator.load_config())
+            finally:
+                for key, value in old.items():
+                    setattr(orchestrator, key, value)
+            results[mode] = {
+                "reason": out.get("reason"),
+                "blocker_code": out.get("blocker_code"),
+                "enqueued_project": (calls[0] if calls else {}).get("project"),
+                "alert_count": len(alerts),
+            }
+    return results
+
+
+def _run_qa_contract_scoped(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        feats = root / "features"
+        feats.mkdir()
+        queue_root = root / "queue"
+        for state in orchestrator.STATES:
+            (queue_root / state).mkdir(parents=True, exist_ok=True)
+        old = {
+            "FEATURES_DIR": orchestrator.FEATURES_DIR,
+            "QUEUE_ROOT": orchestrator.QUEUE_ROOT,
+            "REPORT_DIR": orchestrator.REPORT_DIR,
+            "EVENTS_LOG": orchestrator.EVENTS_LOG,
+            "load_config": orchestrator.load_config,
+            "emit_runtime_metrics_snapshot": orchestrator.emit_runtime_metrics_snapshot,
+            "write_agent_status": orchestrator.write_agent_status,
+            "reap": orchestrator.reap,
+            "_write_workflow_check_report": orchestrator._write_workflow_check_report,
+            "tick_self_repair_resolution": orchestrator.tick_self_repair_resolution,
+            "tick_self_repair_queue": orchestrator.tick_self_repair_queue,
+            "project_environment_ok": orchestrator.project_environment_ok,
+            "project_hard_stopped": orchestrator.project_hard_stopped,
+            "enqueue_task": orchestrator.enqueue_task,
+        }
+        orchestrator.FEATURES_DIR = feats
+        orchestrator.QUEUE_ROOT = queue_root
+        orchestrator.REPORT_DIR = root / "reports"
+        orchestrator.EVENTS_LOG = root / "events.jsonl"
+        orchestrator.load_config = lambda: {
+            "workflow_check_max_attempts": 3,
+            "projects": [
+                {"name": scenario["project"], "path": str(root / "repo")},
+                {"name": "devmini-orchestrator", "path": str(root / "orchestrator")},
+            ],
+            "synthetic_canary": {"enabled": False},
+        }
+        orchestrator.emit_runtime_metrics_snapshot = lambda **kwargs: None
+        orchestrator.write_agent_status = lambda *args, **kwargs: None
+        orchestrator.reap = lambda: 0
+        orchestrator._write_workflow_check_report = lambda issues, reaped=0: None
+        orchestrator.tick_self_repair_resolution = lambda: {"resolved": 0, "stalled": 0}
+        orchestrator.tick_self_repair_queue = lambda: {"scheduled": 0}
+        orchestrator.project_environment_ok = lambda project_name, refresh=False: True
+        orchestrator.project_hard_stopped = lambda project_name: False
+        orchestrator.enqueue_task = lambda task: orchestrator.write_json_atomic(orchestrator.task_path(task["task_id"], "queued"), task)
+        try:
+            t1 = orchestrator.new_task(
+                role="implementer",
+                engine="codex",
+                project=scenario["project"],
+                summary="qa contract fail",
+                source="scenario-32",
+                feature_id=scenario["feature_id"],
+            )
+            t1["task_id"] = scenario["failed_task_id"]
+            t1["state"] = "failed"
+            t1["blocker"] = orchestrator.make_blocker(
+                "qa_contract_error",
+                summary="QA config invalid",
+                detail="bad config",
+                source="scenario",
+                retryable=False,
+            )
+            orchestrator.write_json_atomic(orchestrator.task_path(t1["task_id"], "failed"), t1)
+            t2 = orchestrator.new_task(
+                role="implementer",
+                engine="codex",
+                project=scenario["project"],
+                summary="normal queued task",
+                source="scenario-32",
+            )
+            t2["task_id"] = scenario["queued_task_id"]
+            t2["state"] = "queued"
+            orchestrator.write_json_atomic(orchestrator.task_path(t2["task_id"], "queued"), t2)
+            feature = {
+                "feature_id": scenario["feature_id"],
+                "project": scenario["project"],
+                "status": "open",
+                "summary": "qa contract feature",
+                "child_task_ids": [t1["task_id"]],
+            }
+            orchestrator.write_json_atomic(feats / f"{scenario['feature_id']}.json", feature)
+            orchestrator._enqueue_qa_contract_repair(t1)
+            env_ok = orchestrator.project_environment_ok(scenario["project"])
+            repair_tasks = []
+            queued_ids = []
+            for state in ("queued", "claimed"):
+                for path in (queue_root / state).glob("*.json"):
+                    row = orchestrator.read_json(path, {})
+                    if state == "queued":
+                        queued_ids.append(row.get("task_id"))
+                    if str(row.get("source") or "").startswith("fix-qa-contract:"):
+                        repair_tasks.append(row.get("task_id"))
+            failed_state = orchestrator.find_task(scenario["failed_task_id"])[0]
+        finally:
+            for key, value in old.items():
+                setattr(orchestrator, key, value)
+        return {
+            "failed_state": failed_state,
+            "repair_task_count": len(repair_tasks),
+            "claimed_ids": [scenario["queued_task_id"]] if scenario["queued_task_id"] in queued_ids else [],
+            "project_environment_ok": env_ok,
+        }
+
+
+def _run_qa_contract_full_tick(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        feats = root / "features"
+        feats.mkdir()
+        queue_root = root / "queue"
+        for state in orchestrator.STATES:
+            (queue_root / state).mkdir(parents=True, exist_ok=True)
+        old = {
+            "FEATURES_DIR": orchestrator.FEATURES_DIR,
+            "QUEUE_ROOT": orchestrator.QUEUE_ROOT,
+            "REPORT_DIR": orchestrator.REPORT_DIR,
+            "EVENTS_LOG": orchestrator.EVENTS_LOG,
+            "load_config": orchestrator.load_config,
+            "emit_runtime_metrics_snapshot": orchestrator.emit_runtime_metrics_snapshot,
+            "write_agent_status": orchestrator.write_agent_status,
+            "reap": orchestrator.reap,
+            "_write_workflow_check_report": orchestrator._write_workflow_check_report,
+            "tick_self_repair_resolution": orchestrator.tick_self_repair_resolution,
+            "tick_self_repair_queue": orchestrator.tick_self_repair_queue,
+            "project_environment_ok": orchestrator.project_environment_ok,
+            "project_hard_stopped": orchestrator.project_hard_stopped,
+            "environment_health": orchestrator.environment_health,
+            "subprocess": orchestrator.subprocess,
+        }
+        kickstarts = []
+        orchestrator.FEATURES_DIR = feats
+        orchestrator.QUEUE_ROOT = queue_root
+        orchestrator.REPORT_DIR = root / "reports"
+        orchestrator.EVENTS_LOG = root / "events.jsonl"
+        orchestrator.load_config = lambda: {
+            "workflow_check_max_attempts": 3,
+            "projects": [
+                {"name": scenario["project"], "path": str(root / "repo")},
+                {"name": "devmini-orchestrator", "path": str(root / "orchestrator")},
+            ],
+            "synthetic_canary": {"enabled": False},
+        }
+        orchestrator.emit_runtime_metrics_snapshot = lambda **kwargs: None
+        orchestrator.write_agent_status = lambda *args, **kwargs: None
+        orchestrator.reap = lambda: 0
+        orchestrator._write_workflow_check_report = lambda issues, reaped=0: None
+        orchestrator.tick_self_repair_resolution = lambda: {"resolved": 0, "stalled": 0}
+        orchestrator.tick_self_repair_queue = lambda: {"scheduled": 0}
+        orchestrator.project_environment_ok = lambda project_name, refresh=False: True
+        orchestrator.project_hard_stopped = lambda project_name: False
+        orchestrator.environment_health = lambda refresh=False: {"ok": True, "issues": []}
+        class _Proc:
+            def __init__(self, returncode=0):
+                self.returncode = returncode
+                self.stdout = ""
+                self.stderr = ""
+        orchestrator.subprocess.run = lambda cmd, **kwargs: (kickstarts.append(cmd) if cmd and cmd[0] == "launchctl" else None) or _Proc(0)
+        try:
+            t1 = orchestrator.new_task(
+                role="implementer",
+                engine="codex",
+                project=scenario["project"],
+                summary="qa contract fail",
+                source="scenario-33",
+                feature_id=scenario["feature_id"],
+            )
+            t1["task_id"] = scenario["failed_task_id"]
+            t1["state"] = "failed"
+            t1["blocker"] = orchestrator.make_blocker(
+                "qa_contract_error",
+                summary="QA config invalid",
+                detail="bad config",
+                source="scenario",
+                retryable=False,
+            )
+            orchestrator.write_json_atomic(orchestrator.task_path(t1["task_id"], "failed"), t1)
+            feature = {
+                "feature_id": scenario["feature_id"],
+                "project": scenario["project"],
+                "status": "open",
+                "summary": "qa contract feature",
+                "child_task_ids": [t1["task_id"]],
+            }
+            orchestrator.write_json_atomic(feats / f"{scenario['feature_id']}.json", feature)
+            out = orchestrator.tick_workflow_check()
+            repair_tasks = []
+            for state in ("queued", "claimed"):
+                for path in (queue_root / state).glob("*.json"):
+                    row = orchestrator.read_json(path, {})
+                    if str(row.get("source") or "").startswith("fix-qa-contract:"):
+                        repair_tasks.append(row.get("task_id"))
+        finally:
+            for key, value in old.items():
+                setattr(orchestrator, key, value)
+        return {
+            "issues": out.get("issues"),
+            "repair_task_count": len(repair_tasks),
+            "kickstart_calls": len(kickstarts),
+        }
+
+
 def main(argv):
     if len(argv) != 2:
         raise SystemExit("usage: harness/run_scenario.py <scenario-dir>")
@@ -458,6 +1017,18 @@ def main(argv):
         actual = _run_false_blocker_attach(repo_root, scenario)
     elif kind == "qa_preflight":
         actual = _run_qa_preflight(repo_root, scenario)
+    elif kind == "project_main_dirty_cap":
+        actual = _run_project_main_dirty_cap(repo_root, scenario)
+    elif kind == "regression_clear":
+        actual = _run_regression_clear(repo_root, scenario)
+    elif kind == "missing_child":
+        actual = _run_missing_child(repo_root, scenario)
+    elif kind == "canary_fallback":
+        actual = _run_canary_fallback(repo_root, scenario)
+    elif kind == "qa_contract_scoped":
+        actual = _run_qa_contract_scoped(repo_root, scenario)
+    elif kind == "qa_contract_full_tick":
+        actual = _run_qa_contract_full_tick(repo_root, scenario)
     else:
         raise SystemExit(f"unknown scenario kind: {kind}")
 

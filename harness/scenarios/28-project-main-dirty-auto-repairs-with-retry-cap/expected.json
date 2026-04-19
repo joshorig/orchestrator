@@ -1,0 +1,10 @@
+{
+  "ticks": [
+    {"attempts": 1, "hard_stopped": false},
+    {"attempts": 2, "hard_stopped": false},
+    {"attempts": 3, "hard_stopped": false},
+    {"attempts": 3, "hard_stopped": true}
+  ],
+  "alert_count": 1,
+  "hard_stop_event": true
+}

@@ -68,6 +68,7 @@ TRANSITIONS_LOG = RUNTIME_DIR / "transitions.log"
 REPORT_DIR = STATE_ROOT / "reports"
 LOGS_DIR = STATE_ROOT / "logs"
 LOG_ARCHIVE_DIR = LOGS_DIR / "archive"
+PROJECT_HARD_STOPS_PATH = RUNTIME_DIR / "project-hard-stops.json"
 TELEGRAM_INBOX = STATE_ROOT / "telegram" / "inbox"
 TELEGRAM_OUTBOX = STATE_ROOT / "telegram" / "outbox"
 BRAID_DIR = STATE_ROOT / "braid"
@@ -128,10 +129,12 @@ BLOCKER_CODES = (
     "planner_emitted_no_children",
     "feature_has_no_children",
     "missing_child",
+    "missing_child_unrecoverable",
     "final_pr_blocked",
     "finalize_follow_up_dead",
     "canary_missing_recent_success",
     "canary_stale",
+    "canary_unrecoverable",
     "runtime_env_dirty",
     "delivery_auth_expired",
     "runtime_unknown_project",
@@ -355,6 +358,22 @@ WORKFLOW_REPAIR_POLICY = (
         "when": "review_feedback_stale",
     },
     {
+        "name": "regression_green_clear",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "project_regression_failed",
+        "action": "clear_regression_hard_stop",
+        "diagnosis": "a fresh green regression run proves the hard-stop can be cleared",
+        "when": "project_regression_green",
+    },
+    {
+        "name": "regression_human_push_clear",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "project_regression_failed",
+        "action": "clear_regression_hard_stop",
+        "diagnosis": "a newer human commit landed after the regression failure, so clear the stale hard-stop",
+        "when": "project_regression_human_push",
+    },
+    {
         "name": "regression_self_repair",
         "kind": "frontier_task_blocked",
         "blocker_code": "project_regression_failed",
@@ -387,8 +406,8 @@ WORKFLOW_REPAIR_POLICY = (
         "name": "qa_contract_repair",
         "kind": "frontier_task_blocked",
         "blocker_code": "qa_contract_error",
-        "action": "repair_qa_then_retry",
-        "diagnosis": "QA contract or script configuration is missing; attempt bounded repair before retrying",
+        "action": "enqueue_qa_contract_repair",
+        "diagnosis": "QA contract or script configuration is missing; queue a dedicated repair task without blocking unrelated work",
     },
     {
         "name": "qa_target_missing_retry",
@@ -477,11 +496,11 @@ WORKFLOW_REPAIR_POLICY = (
         "diagnosis": "task exceeded the cumulative retry limit and requires operator review before any further execution",
     },
     {
-        "name": "missing_child_self_repair",
+        "name": "missing_child_recover",
         "kind": "missing_child",
         "blocker_code": "missing_child",
-        "action": "enqueue_self_repair",
-        "diagnosis": "feature child task file is missing; attach a self-repair issue so queue corruption is investigated automatically",
+        "action": "recover_missing_child",
+        "diagnosis": "feature child task file is missing; reconstruct it from the transition log if possible",
     },
     {
         "name": "planner_empty_retry",
@@ -528,8 +547,8 @@ WORKFLOW_REPAIR_POLICY = (
         "name": "canary_stale_self_repair",
         "kind": "canary_stale",
         "blocker_code": "canary_stale",
-        "action": "enqueue_self_repair",
-        "diagnosis": "synthetic canary has been in-flight too long; attach a self-repair issue for the stuck validator lane",
+        "action": "enqueue_canary_fallback",
+        "diagnosis": "synthetic canary has been in-flight too long; rotate to the configured fallback canary project before paging an operator",
     },
 )
 ATTEMPT_ARCHIVE_FIELDS = (
@@ -2038,6 +2057,46 @@ def append_event(role, event, *, task_id=None, feature_id=None, details=None):
         f.write(json.dumps(payload, sort_keys=True) + "\n")
 
 
+def _read_project_hard_stops():
+    data = read_json(PROJECT_HARD_STOPS_PATH, {}) or {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_project_hard_stops(data):
+    write_json_atomic(PROJECT_HARD_STOPS_PATH, data)
+
+
+def set_project_hard_stop(project_name, code, detail):
+    stops = _read_project_hard_stops()
+    entry = {"code": code, "detail": detail, "ts": now_iso()}
+    stops[project_name] = entry
+    _write_project_hard_stops(stops)
+    append_event(
+        "workflow-check",
+        "project_hard_stopped",
+        details={"project": project_name, "code": code, "reason": detail},
+    )
+    return entry
+
+
+def clear_project_hard_stop(project_name, *, cleared_by=None, detail=None):
+    stops = _read_project_hard_stops()
+    removed = stops.pop(project_name, None)
+    if removed is not None:
+        _write_project_hard_stops(stops)
+        append_event(
+            "workflow-check",
+            "project_hard_stop_cleared",
+            details={
+                "project": project_name,
+                "code": removed.get("code"),
+                "cleared_by": cleared_by or "unknown",
+                "detail": detail or removed.get("detail"),
+            },
+        )
+    return removed
+
+
 def read_events(*, feature_id=None, task_id=None, role=None, limit=None):
     """Return structured rows from the append-only event log.
 
@@ -2565,14 +2624,16 @@ def _nudge_engine_workers(engine):
     for label in labels:
         attempted.append(label)
         try:
-            subprocess.run(
+            proc = subprocess.run(
                 ["launchctl", "kickstart", f"gui/{uid}/{label}"],
                 check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 text=True,
-                timeout=10,
+                timeout=2,
             )
+            if proc.returncode == 0:
+                break
         except (OSError, subprocess.SubprocessError):
             continue
     return attempted
@@ -2846,6 +2907,8 @@ def project_hard_stopped(project_name):
     human reviews and clears the blocked regression task."""
     if not project_name:
         return False
+    if project_name in _read_project_hard_stops():
+        return True
     for p in queue_dir("blocked").glob("*.json"):
         t = read_json(p, {})
         if t.get("project") == project_name and t.get("topology_error") == "regression-failure":
@@ -3019,7 +3082,6 @@ def reap():
     """Return stale claimed/running tasks to the queue when their worker died."""
     CLAIMS_DIR.mkdir(parents=True, exist_ok=True)
     reaped = 0
-    orphan_claim_grace_sec = 120
     for pidfile in CLAIMS_DIR.glob("*.pid"):
         task_id = pidfile.stem
         try:
@@ -3043,27 +3105,6 @@ def reap():
                 reaped += 1
                 break
         pidfile.unlink(missing_ok=True)
-    # Also recover tasks that are stuck in claimed/running without any claim pid.
-    for state in ("claimed", "running"):
-        for src in queue_dir(state).glob("*.json"):
-            task = read_json(src, {})
-            task_id = task.get("task_id")
-            if not task_id:
-                continue
-            pidfile = CLAIMS_DIR / f"{task_id}.pid"
-            if pidfile.exists():
-                continue
-            entered_at = task.get("started_at") if state == "running" else task.get("claimed_at")
-            age = _seconds_since_iso(entered_at)
-            if age is None or age < orphan_claim_grace_sec:
-                continue
-            reset_task_for_retry(
-                task_id,
-                state,
-                reason=f"reaper: {state} task orphaned without claim pid",
-                source="reaper",
-            )
-            reaped += 1
     # Also: transition blocked tasks that have a regenerated template back to queued.
     for src in queue_dir("blocked").glob("*.json"):
         task = read_json(src, {})
@@ -8229,7 +8270,7 @@ def tick_memory_synthesis(force=False):
     return enqueued
 
 
-def tick_canary_workflows(force=False):
+def tick_canary_workflows(force=False, *, project_override=None, fallback_from=None):
     """Queue a synthetic canary feature through the normal planner path.
 
     >>> import pathlib, tempfile, types
@@ -8273,7 +8314,7 @@ def tick_canary_workflows(force=False):
         write_agent_status("canary", "gated", msg)
         return {"enqueued": 0, "reason": "gated"}
 
-    project_name = canary_cfg.get("project")
+    project_name = project_override or canary_cfg.get("project")
     try:
         project = get_project(cfg, project_name)
     except KeyError:
@@ -8320,6 +8361,8 @@ def tick_canary_workflows(force=False):
         "interval_hours": canary_cfg.get("interval_hours", 6),
         "config_project": project_name,
     }
+    if fallback_from:
+        canary_meta["fallback_from"] = fallback_from
     feature = create_feature(
         project=project_name,
         summary=canary_cfg.get("summary") or "Synthetic workflow canary",
@@ -8349,6 +8392,14 @@ def tick_canary_workflows(force=False):
         feature_id=feature["feature_id"],
         details={"project": project_name, "summary": feature.get("summary"), "force": force},
     )
+    if fallback_from:
+        append_event(
+            "canary",
+            "canary_fallback_engaged",
+            task_id=task.get("task_id"),
+            feature_id=feature["feature_id"],
+            details={"primary": fallback_from, "fallback": project_name},
+        )
     write_agent_status("canary", "idle", f"enqueued {feature['feature_id']} for {project_name}")
     return {"enqueued": 1, "reason": "queued", "feature_id": feature["feature_id"], "task_id": task.get("task_id")}
 
@@ -9377,7 +9428,7 @@ def _repair_project_main_checkout(project):
     for cmd in (
         ["git", "-C", str(repo_path), "fetch", "origin", "main"],
         ["git", "-C", str(repo_path), "checkout", "main"],
-        ["git", "-C", str(repo_path), "pull", "--ff-only", "origin", "main"],
+        ["git", "-C", str(repo_path), "reset", "--hard", "origin/main"],
     ):
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False)
         if proc.returncode != 0:
@@ -9405,6 +9456,141 @@ def _repair_qa_contract(task):
         except OSError as exc:
             return {"fixed": False, "detail": str(exc), "restored": restored}
     return {"fixed": bool(script_abs.exists()) and os.access(script_abs, os.X_OK), "detail": detail or str(script_abs), "restored": restored}
+
+
+def _enqueue_qa_contract_repair(task):
+    if not task:
+        return {"enqueued": False, "reason": "missing_task"}
+    target_task_id = task.get("task_id")
+    source = f"fix-qa-contract:{target_task_id}"
+    for state_name in ("queued", "claimed", "running", "awaiting-review", "awaiting-qa"):
+        for path in queue_dir(state_name).glob("*.json"):
+            existing = read_json(path, {})
+            if existing.get("source") == source:
+                return {"enqueued": False, "reason": "already_exists", "task_id": existing.get("task_id")}
+    repair_task = new_task(
+        role="implementer",
+        engine="codex",
+        project=task.get("project"),
+        summary=f"Repair QA contract for {task.get('project')}",
+        source=source,
+        braid_template="orchestrator-self-repair" if task.get("project") == "devmini-orchestrator" else None,
+        engine_args={
+            "self_repair": {"enabled": task.get("project") == "devmini-orchestrator"},
+            "qa_contract_repair": {
+                "target_task_id": target_task_id,
+                "contract": ((task.get("engine_args") or {}).get("contract") or "smoke"),
+                "script": ((task.get("engine_args") or {}).get("script")),
+            },
+        },
+    )
+    enqueue_task(repair_task)
+    append_event(
+        "workflow-check",
+        "qa_contract_repair_enqueued",
+        task_id=repair_task.get("task_id"),
+        details={"target_task_id": target_task_id, "project": task.get("project")},
+    )
+    return {"enqueued": True, "task_id": repair_task.get("task_id")}
+
+
+def _synthesize_task_from_transitions(task_id):
+    rows = read_transitions(task_id=task_id)
+    if not rows:
+        return None
+    final = rows[-1]
+    state = final.get("to_state")
+    if state not in STATES:
+        return None
+    task = {
+        "task_id": task_id,
+        "state": state,
+        "reconstructed_from": "transition_log",
+        "reconstructed_at": now_iso(),
+    }
+    if state in ("done", "failed", "abandoned", "blocked"):
+        task["finished_at"] = final.get("ts")
+    return task
+
+
+def _recover_missing_child_task(task_id):
+    task = _synthesize_task_from_transitions(task_id)
+    if not task:
+        return {"recovered": False, "reason": "transition_log_missing"}
+    write_json_atomic(task_path(task_id, task["state"]), task)
+    append_event(
+        "workflow-check",
+        "missing_child_recovered",
+        task_id=task_id,
+        details={"state": task["state"]},
+    )
+    return {"recovered": True, "state": task["state"]}
+
+
+def _abandon_feature_missing_child(feature_id, task_id):
+    blocker = make_blocker(
+        "missing_child_unrecoverable",
+        summary="feature child task could not be reconstructed",
+        detail=f"child task {task_id} is missing from queue state and transition log",
+        source="workflow-check",
+        retryable=False,
+    )
+    def mut(feature):
+        feature["status"] = "abandoned"
+        feature["finished_at"] = now_iso()
+        feature["blocker"] = blocker
+    update_feature(feature_id, mut)
+    append_event(
+        "workflow-check",
+        "missing_child_unrecoverable",
+        feature_id=feature_id,
+        details={"task_id": task_id},
+    )
+    return {"abandoned": True, "blocker_code": blocker["code"]}
+
+
+def _project_green_regression_after(project_name, failed_at):
+    for path in queue_dir("done").glob("*.json"):
+        task = read_json(path, {})
+        if task.get("project") != project_name or task.get("role") != "qa":
+            continue
+        if (task.get("finished_at") or "") > (failed_at or ""):
+            return True
+    return False
+
+
+def _project_human_push_after(project, failed_at):
+    repo_path = pathlib.Path(project["path"])
+    if not repo_path.exists():
+        return False
+    ok, detail = _git_ok(repo_path, "log", "-1", "--format=%cI", "main")
+    return bool(ok and (detail or "") > (failed_at or ""))
+
+
+def _clear_regression_hard_stop(task, state, project, *, cleared_by):
+    reason = f"workflow-check: regression cleared via {cleared_by}"
+    if state in ("blocked", "failed"):
+        move_task(
+            task["task_id"],
+            state,
+            "abandoned",
+            reason=reason,
+            mutator=lambda t: t.update(
+                {
+                    "finished_at": now_iso(),
+                    "abandoned_reason": reason,
+                    "regression_cleared_by": cleared_by,
+                }
+            ),
+        )
+    clear_project_hard_stop(project["name"], cleared_by=cleared_by, detail=reason)
+    append_event(
+        "workflow-check",
+        "project_regression_cleared",
+        task_id=task.get("task_id"),
+        details={"project": project["name"], "cleared_by": cleared_by},
+    )
+    return True
 
 
 def _workflow_policy_matches(policy, issue, task, project):
@@ -9483,6 +9669,12 @@ def _workflow_policy_matches(policy, issue, task, project):
     if when == "project_main_still_dirty":
         repo = repo_status(project["path"])
         return not (repo.get("exists") and not repo.get("dirty"))
+    if when == "project_regression_green":
+        failed_at = (task or {}).get("finished_at") or (task or {}).get("updated_at") or ""
+        return _project_green_regression_after(project["name"], failed_at)
+    if when == "project_regression_human_push":
+        failed_at = (task or {}).get("finished_at") or (task or {}).get("updated_at") or ""
+        return _project_human_push_after(project, failed_at)
     if when == "control_plane_feedback_bug":
         source = str((task or {}).get("source") or "")
         detail = str((issue.get("blocker") or {}).get("detail") or "")
@@ -10039,6 +10231,31 @@ def _canary_freshness_issue(cfg):
     return issue
 
 
+def _enqueue_canary_fallback(issue, cfg):
+    canary_cfg = cfg.get("synthetic_canary") or {}
+    primary = issue.get("project")
+    fallback = (canary_cfg.get("fallback_project") or "").strip()
+    if not fallback:
+        return {"enqueued": 0, "reason": "no_fallback_project"}
+    overdue, _ = _canary_success_overdue(cfg, fallback)
+    if overdue:
+        alert_path = _write_workflow_alert(
+            {
+                **issue,
+                "blocker": make_blocker(
+                    "canary_unrecoverable",
+                    summary="primary and fallback canary are both stale",
+                    detail=f"primary={primary} fallback={fallback}",
+                    source="workflow-check",
+                    retryable=False,
+                ),
+            },
+            f"synthetic canary fallback also stale: primary={primary} fallback={fallback}",
+        )
+        return {"enqueued": 0, "reason": "fallback_stale", "blocker_code": "canary_unrecoverable", "alert": bool(alert_path)}
+    return tick_canary_workflows(force=True, project_override=fallback, fallback_from=primary)
+
+
 def _environment_health_issues():
     issues = []
     for issue in environment_health(refresh=True).get("issues", []):
@@ -10154,6 +10371,7 @@ def tick_workflow_check():
         issue["attempts"] = attempts
         issue["max_attempts"] = max_attempts
         outcome = "diagnosed only"
+        project = get_project(cfg, issue["project"])
 
         if issue.get("action") and attempts < max_attempts:
             action = issue["action"]
@@ -10216,6 +10434,12 @@ def tick_workflow_check():
                     lambda: tick_canary_workflows(force=True),
                 )
                 outcome = f"canary scheduler result: {json.dumps(out, sort_keys=True)}"
+            elif action == "enqueue_canary_fallback":
+                out = cached_action(
+                    f"canary_fallback:{issue.get('project')}",
+                    lambda: _enqueue_canary_fallback(issue, cfg),
+                )
+                outcome = f"canary fallback result: {json.dumps(out, sort_keys=True)}"
             elif action == "enqueue_reviewer":
                 cached_action("tick_reviewer", tick_reviewer)
                 outcome = "reviewer sweep enqueued"
@@ -10238,22 +10462,12 @@ def tick_workflow_check():
                     f"project-main repair fixed={repair.get('fixed')} detail={repair.get('detail')}; "
                     f"{'task requeued' if ok else 'retry deferred'}"
                 )
-            elif action == "repair_qa_then_retry":
-                repair = cached_action(
+            elif action == "enqueue_qa_contract_repair":
+                out = cached_action(
                     f"repair_qa:{issue.get('task_id')}",
-                    lambda: _repair_qa_contract(issue["task"]),
+                    lambda: _enqueue_qa_contract_repair(issue["task"]),
                 )
-                ok = False
-                if repair.get("fixed") and issue.get("task"):
-                    ok = _workflow_check_retry_task(
-                        issue["task"],
-                        issue["task_state"],
-                        reason="workflow-check: QA contract repaired, retrying task",
-                    )
-                outcome = (
-                    f"qa-contract repair fixed={repair.get('fixed')} detail={repair.get('detail')}; "
-                    f"{'task requeued' if ok else 'retry deferred'}"
-                )
+                outcome = f"qa-contract repair task: {json.dumps(out, sort_keys=True)}"
             elif action == "mark_ready_for_merge":
                 ok = _workflow_check_mark_ready_for_merge(
                     feature,
@@ -10261,6 +10475,18 @@ def tick_workflow_check():
                     reason=issue["diagnosis"],
                 )
                 outcome = "dead follow-up retired; feature marked merge-ready" if ok else "mark-merge-ready failed"
+            elif action == "clear_regression_hard_stop":
+                cleared_by = "green_run" if _project_green_regression_after(project["name"], (issue.get("task") or {}).get("finished_at")) else "human_push"
+                ok = _clear_regression_hard_stop(issue["task"], issue["task_state"], project, cleared_by=cleared_by)
+                outcome = f"regression hard-stop cleared via {cleared_by}" if ok else "regression hard-stop clear failed"
+            elif action == "recover_missing_child":
+                recover = _recover_missing_child_task(issue["task_id"])
+                if recover.get("recovered"):
+                    outcome = f"missing child reconstructed into {recover.get('state')}"
+                else:
+                    abandoned = _abandon_feature_missing_child(feature["feature_id"], issue["task_id"])
+                    _write_workflow_alert(issue, "missing child could not be reconstructed; feature abandoned")
+                    outcome = f"missing child unrecoverable; feature abandoned with {abandoned.get('blocker_code')}"
             elif action == "enqueue_self_repair":
                 out = cached_action(
                     f"self_repair:{issue['issue_key']}",
@@ -10284,6 +10510,11 @@ def tick_workflow_check():
 
         elif issue.get("action"):
             outcome = "automatic attempts exhausted"
+            blocker_code = ((issue.get("blocker") or {}).get("code") or "")
+            if blocker_code == "project_main_dirty":
+                set_project_hard_stop(project["name"], "project_main_dirty", "project_main_dirty:repair_exhausted")
+                _write_workflow_alert(issue, "project main checkout repair attempts exhausted")
+                outcome = "project hard-stopped: project_main_dirty:repair_exhausted"
 
         issue["outcome"] = outcome
         issues.append(issue)

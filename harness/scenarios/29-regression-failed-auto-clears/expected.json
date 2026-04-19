@@ -1,0 +1,12 @@
+{
+  "green_run": {
+    "state": "abandoned",
+    "hard_stopped": false,
+    "cleared_event": "green_run"
+  },
+  "human_push": {
+    "state": "abandoned",
+    "hard_stopped": false,
+    "cleared_event": "human_push"
+  }
+}
