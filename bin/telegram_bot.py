@@ -158,14 +158,79 @@ def build_handlers(cfg):
 
     def feature_buttons(feature):
         frontier = (feature.get("frontier") or {}).get("task_id")
+        planner = (feature.get("planner") or {}).get("task_id")
         fid = feature.get("feature_id")
-        first_row = []
+        first_row = [("Open feature", f"feature:{fid}")]
         if frontier:
-            first_row.append(("Force retry", f"action:{frontier}:retry"))
-            first_row.append(("Abandon", f"action:{frontier}:abandon"))
-        rows = [first_row] if first_row else []
+            first_row.append(("Frontier task", f"task:{frontier}"))
+        rows = [first_row]
+        if planner:
+            rows.append([("Planner task", f"task:{planner}")])
+        action_row = []
+        if frontier:
+            action_row.append(("Force retry", f"action:{frontier}:retry"))
+            action_row.append(("Abandon", f"action:{frontier}:abandon"))
+        if action_row:
+            rows.append(action_row)
+        for task_id, state in list((feature.get("child_states") or {}).items())[:4]:
+            label = f"{task_id[-6:]} {state}"
+            rows.append([(label[:32], f"task:{task_id}")])
+        if len(feature.get("child_states") or {}) < 4:
+            for task_id, state in list((feature.get("follow_up_states") or {}).items())[: 4 - len(feature.get("child_states") or {})]:
+                label = f"{task_id[-6:]} {state}"
+                rows.append([(label[:32], f"task:{task_id}")])
         rows.append([("Open council", f"council:{fid}")])
         return rows
+
+    def feature_list_buttons(workflows):
+        rows = []
+        for wf in workflows[:8]:
+            frontier = wf.get("frontier") or {}
+            label = f"{(wf.get('project') or '?')[:10]} {wf.get('feature_id','')[-6:]}"
+            if frontier.get("state"):
+                label += f" {frontier['state']}"
+            rows.append([(label[:32], f"feature:{wf.get('feature_id')}")])
+        return rows or None
+
+    def feature_text(feature):
+        if not feature:
+            return "feature not found"
+        wf = feature if feature.get("frontier") is not None else o.feature_workflow_summary(feature)
+        frontier = wf.get("frontier") or {}
+        planner = wf.get("planner") or {}
+        lines = [
+            wf.get("feature_id") or "feature",
+            f"project: {wf.get('project') or '-'}",
+            f"status: {wf.get('feature_status') or '-'}",
+            f"summary: {wf.get('summary') or ''}",
+            f"planner: {planner.get('state') or '-'} {planner.get('task_id') or '-'}",
+            f"frontier: {frontier.get('state') or '-'} {frontier.get('task_id') or '-'}",
+        ]
+        if frontier.get("age_text"):
+            lines.append(f"frontier_age: {frontier.get('age_text')}")
+        if frontier.get("attempt"):
+            lines.append(f"frontier_attempt: {frontier.get('attempt')}")
+        blocker = frontier.get("blocker") or {}
+        if blocker.get("code"):
+            lines.append(f"blocker: {blocker.get('code')}")
+        child_states = wf.get("child_states") or {}
+        if child_states:
+            lines.append("tasks:")
+            for task_id, state in list(child_states.items())[:4]:
+                lines.append(f"  {task_id} {state}")
+        follow_up_states = wf.get("follow_up_states") or {}
+        if follow_up_states:
+            lines.append("follow_up:")
+            for task_id, state in list(follow_up_states.items())[:4]:
+                lines.append(f"  {task_id} {state}")
+        recent_events = wf.get("recent_events") or []
+        if recent_events:
+            lines.append("recent:")
+            for evt in recent_events[:3]:
+                lines.append(
+                    f"  {(evt.get('ts') or '')[11:16]} {evt.get('role') or '-'}:{evt.get('event') or '-'}"
+                )
+        return "\n".join(lines)
 
     def task_action_rows(task_id):
         found = o.find_task(task_id)
@@ -204,10 +269,8 @@ def build_handlers(cfg):
         parts = text.split(maxsplit=1)
         project = parts[1].strip() if len(parts) > 1 else None
         body = o.features_brief(project)
-        buttons = None
         workflows = o.open_feature_workflow_summaries(project_name=project)
-        if workflows:
-            buttons = feature_buttons(workflows[0])
+        buttons = feature_list_buttons(workflows)
         await send_card(update, "🧩", "features", body, buttons=buttons)
 
     async def cmd_queue(update, ctx, text):
@@ -331,6 +394,13 @@ def build_handlers(cfg):
         if data.startswith("task:"):
             task_id = data.split(":", 1)[1]
             await query.message.reply_text(o.task_text(task_id), reply_markup=keyboard(task_action_rows(task_id)) if task_action_rows(task_id) else None)
+            return
+        if data.startswith("feature:"):
+            feature_id = data.split(":", 1)[1]
+            feature = o.read_feature(feature_id)
+            wf = o.feature_workflow_summary(feature) if feature else {}
+            buttons = feature_buttons(wf) if wf else None
+            await query.message.reply_text(feature_text(wf or feature), reply_markup=keyboard(buttons) if buttons else None)
             return
         if data.startswith("readfull:"):
             token = data.split(":", 1)[1]
