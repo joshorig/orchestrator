@@ -3565,6 +3565,20 @@ def run_claude_planner(task, cfg, timeout, log_path):
         t["log_path"] = str(log_path)
     o.move_task(task_id, "running", "done", reason=f"decomposed into {len(enqueued)}", mutator=mut)
     if planner_mode == "self-repair-plan" and feature_id and (task.get("engine_args") or {}).get("issue_key"):
+        issue_status = "planned"
+        issue_updates = {
+            "planner_task_id": task_id,
+            "chosen_strategy": council_meta.get("chosen_strategy") or "",
+            "rejected_strategies": list(council_meta.get("rejected_strategies") or ()),
+            "dissent_reasons": list(council_meta.get("dissent_reasons") or ()),
+            "confidence": council_meta.get("confidence"),
+            "retry_conditions": list(council_meta.get("retry_conditions") or ()),
+            "escalation_threshold": council_meta.get("escalation_threshold") or "",
+            "planned_task_ids": list(enqueued),
+        }
+        if enqueued:
+            issue_status = "executing"
+            issue_updates["execution_task_ids"] = list(enqueued)
         o.self_repair_record_deliberation(
             feature_id,
             (task.get("engine_args") or {}).get("issue_key"),
@@ -3583,14 +3597,8 @@ def run_claude_planner(task, cfg, timeout, log_path):
         o._self_repair_mark_issue(
             feature_id,
             (task.get("engine_args") or {}).get("issue_key"),
-            status="planned",
-            planner_task_id=task_id,
-            chosen_strategy=council_meta.get("chosen_strategy") or "",
-            rejected_strategies=list(council_meta.get("rejected_strategies") or ()),
-            dissent_reasons=list(council_meta.get("dissent_reasons") or ()),
-            confidence=council_meta.get("confidence"),
-            retry_conditions=list(council_meta.get("retry_conditions") or ()),
-            escalation_threshold=council_meta.get("escalation_threshold") or "",
+            status=issue_status,
+            **issue_updates,
         )
 
 

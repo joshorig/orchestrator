@@ -1,0 +1,10 @@
+{
+  "scheduled": 1,
+  "planner_task_id": "task-new-planner",
+  "status": "scheduled",
+  "superseded_task_ids": [
+    "task-old-manually-abandoned"
+  ],
+  "execution_task_ids": [],
+  "captured_task_id": "task-new-planner"
+}

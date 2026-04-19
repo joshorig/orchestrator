@@ -1,4 +1,5 @@
 {
+  "kind": "attempt_cap",
   "name": "self-repair-review-rigor-loop",
   "task_id": "task-scenario-19",
   "feature_id": "feature-scenario-19",

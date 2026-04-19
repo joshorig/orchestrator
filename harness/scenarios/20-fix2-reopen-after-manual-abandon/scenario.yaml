@@ -1,0 +1,10 @@
+{
+  "kind": "fix2_reopen_after_manual_abandon",
+  "name": "fix2-reopen-after-manual-abandon",
+  "feature_id": "feature-scenario-20",
+  "project": "devmini-orchestrator",
+  "summary": "Synthetic self-repair reopen after manual abandon",
+  "issue_key": "task:blocked:scenario-20",
+  "old_task_id": "task-old-manually-abandoned",
+  "new_task_id": "task-new-planner"
+}

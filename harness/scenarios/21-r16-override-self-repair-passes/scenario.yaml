@@ -1,0 +1,24 @@
+{
+  "kind": "r16_override",
+  "name": "r16-override-self-repair-passes",
+  "braid_template": "orchestrator-self-repair",
+  "changed_files_text": "bin/orchestrator.py\nbin/worker.py\n",
+  "cfg": {
+    "review_policy": {
+      "test_to_code_ratio": {
+        "min_ratio": 0.5,
+        "accept_doctest": false,
+        "template_overrides": {
+          "orchestrator-self-repair": {
+            "min_ratio": 0.0,
+            "accept_doctest": true
+          }
+        }
+      }
+    }
+  },
+  "worktree_files": {
+    "bin/orchestrator.py": "def example():\n    \"\"\"doctest placeholder\"\"\"\n    return 1\n",
+    "bin/worker.py": "def example():\n    \"\"\"doctest placeholder\"\"\"\n    return 2\n"
+  }
+}

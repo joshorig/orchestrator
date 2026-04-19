@@ -6405,11 +6405,17 @@ def _self_repair_issue_key(*, issue_key=None, issue_kind="runtime_bug", summary=
 
 
 def _self_repair_issue_live(issue):
-    task_id = (issue or {}).get("planner_task_id")
-    if not task_id:
-        return False
-    found = find_task(task_id)
-    return bool(found and found[0] in ("queued", "claimed", "running"))
+    issue = issue or {}
+    task_ids = []
+    planner_task_id = issue.get("planner_task_id")
+    if planner_task_id:
+        task_ids.append(planner_task_id)
+    task_ids.extend(issue.get("execution_task_ids") or ())
+    for task_id in task_ids:
+        found = find_task(task_id)
+        if found and found[0] in ("queued", "claimed", "running"):
+            return True
+    return False
 
 
 def _self_repair_pending_issues(feature):
@@ -6531,6 +6537,8 @@ def self_repair_reopen_issue(
     >>> issue = out["self_repair"]["issues"][0]
     >>> issue["status"], issue["planner_task_id"] is None, issue["reopen_count"]
     ('pending', True, 1)
+    >>> issue["execution_task_ids"], issue["superseded_task_ids"]
+    ([], ['task-old'])
     """
     reopened_at = now_iso()
 
@@ -6551,7 +6559,11 @@ def self_repair_reopen_issue(
             superseded = list(issue.get("superseded_task_ids") or [])
             if prior_task_id and prior_task_id not in superseded:
                 superseded.append(prior_task_id)
+            for task_id in (issue.get("execution_task_ids") or []):
+                if task_id and task_id not in superseded:
+                    superseded.append(task_id)
             issue["superseded_task_ids"] = superseded
+            issue["execution_task_ids"] = []
             if summary:
                 issue["summary"] = summary[:240]
             if evidence:
@@ -6589,6 +6601,10 @@ def self_repair_reopen_issue(
 def _enqueue_self_repair_issue_task(feature, issue):
     feature_id = feature["feature_id"]
     repair_cfg = (feature.get("self_repair") or {}).copy()
+    prior_task_id = issue.get("planner_task_id")
+    superseded_task_ids = list(issue.get("superseded_task_ids") or [])
+    if prior_task_id and prior_task_id not in superseded_task_ids:
+        superseded_task_ids.append(prior_task_id)
     task = new_task(
         role="planner",
         engine="claude",
@@ -6620,6 +6636,8 @@ def _enqueue_self_repair_issue_task(feature, issue):
         planner_task_id=task["task_id"],
         status="scheduled",
         scheduled_at=now_iso(),
+        execution_task_ids=[],
+        superseded_task_ids=superseded_task_ids,
     )
     update_feature(
         feature_id,
@@ -6713,7 +6731,7 @@ def tick_self_repair_queue():
     ...         "summary": "repair",
     ...         "source": "self-repair:test",
     ...         "child_task_ids": [],
-    ...         "self_repair": {"enabled": True, "issues": [{"issue_key": "i1", "summary": "fix queue", "evidence": "e", "source": "workflow-check", "issue_kind": "runtime_bug", "status": "pending"}]},
+    ...         "self_repair": {"enabled": True, "issues": [{"issue_key": "i1", "summary": "fix queue", "evidence": "e", "source": "workflow-check", "issue_kind": "runtime_bug", "status": "pending", "planner_task_id": "task-old"}]},
     ...     }
     ...     old = {k: tick_self_repair_queue.__globals__[k] for k in ("FEATURES_DIR", "QUEUE_ROOT", "new_task", "enqueue_task", "append_feature_child")}
     ...     captured = {}
@@ -6729,6 +6747,8 @@ def tick_self_repair_queue():
     ...         tick_self_repair_queue.__globals__[key] = value
     >>> out["scheduled"], captured["task"]["task_id"], saved["self_repair"]["issues"][0]["planner_task_id"]
     (1, 'task-sr', 'task-sr')
+    >>> saved["self_repair"]["issues"][0]["superseded_task_ids"]
+    ['task-old']
     """
     scheduled = []
     lock_fh = acquire_lock("self-repair.lock", mode="exclusive", timeout_sec=10)
