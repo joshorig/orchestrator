@@ -1,0 +1,7 @@
+{
+  "kind": "security_secret_gate",
+  "project": "devmini-orchestrator",
+  "file_path": "config/example.env",
+  "baseline_body": "APP_ENV=dev\n",
+  "candidate_body": "APP_ENV=dev\nGITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz123456\n"
+}

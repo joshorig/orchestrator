@@ -1,0 +1,16 @@
+flowchart TD;
+Start[Start] --> Enum[Enumerate dependency and source changes];
+Enum --> C1;
+C1[Check: manifests identified] -->|"pass"| C2;
+C1 -->|"fail"| RC[RequestChange: collect];
+C2[Check: no known high-severity vulnerable versions introduced] -->|"pass"| C3;
+C2 -->|"fail"| RC;
+C3[Check: dependency provenance and lockfiles are coherent] -->|"pass"| C4;
+C3 -->|"fail"| RC;
+C4[Check: build/runtime trust surface not widened silently] -->|"pass"| Verdict;
+C4 -->|"fail"| RC;
+RC --> Verdict{Any change requested};
+Verdict -->|"yes"| Emit[Emit change list];
+Verdict -->|"no"| Approve[Approve diff];
+Emit --> End[End];
+Approve --> End;

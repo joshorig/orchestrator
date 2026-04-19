@@ -48,6 +48,67 @@
       "review_gates": ["security-review-pass"]
     }
   },
+  "skills": {
+    "trusted_root": ".claude/skills",
+    "trusted_skills": [
+      {
+        "name": "performance-profiler",
+        "source": "github:alirezarezvani/claude-skills",
+        "sha": "3960661ae5bd81ef3af1ac56e83b042fe3a6bfea",
+        "install_path": "performance-profiler",
+        "upstream_path": "engineering/performance-profiler"
+      },
+      {
+        "name": "env-secrets-manager",
+        "source": "github:alirezarezvani/claude-skills",
+        "sha": "3960661ae5bd81ef3af1ac56e83b042fe3a6bfea",
+        "install_path": "env-secrets-manager",
+        "upstream_path": "engineering/env-secrets-manager"
+      },
+      {
+        "name": "code-reviewer",
+        "source": "github:alirezarezvani/claude-skills",
+        "sha": "3960661ae5bd81ef3af1ac56e83b042fe3a6bfea",
+        "install_path": "code-reviewer",
+        "upstream_path": "engineering-team/code-reviewer"
+      },
+      {
+        "name": "performing-sca-dependency-scanning-with-snyk",
+        "source": "github:mukul975/Anthropic-Cybersecurity-Skills",
+        "sha": "c0ab6cfccb0ad151d130b1c243a05af6120861ff",
+        "install_path": "performing-sca-dependency-scanning-with-snyk",
+        "upstream_path": "skills/performing-sca-dependency-scanning-with-snyk"
+      },
+      {
+        "name": "analyzing-sbom-for-supply-chain-vulnerabilities",
+        "source": "github:mukul975/Anthropic-Cybersecurity-Skills",
+        "sha": "c0ab6cfccb0ad151d130b1c243a05af6120861ff",
+        "install_path": "analyzing-sbom-for-supply-chain-vulnerabilities",
+        "upstream_path": "skills/analyzing-sbom-for-supply-chain-vulnerabilities"
+      },
+      {
+        "name": "implementing-secret-scanning-with-gitleaks",
+        "source": "github:mukul975/Anthropic-Cybersecurity-Skills",
+        "sha": "c0ab6cfccb0ad151d130b1c243a05af6120861ff",
+        "install_path": "implementing-secret-scanning-with-gitleaks",
+        "upstream_path": "skills/implementing-secret-scanning-with-gitleaks"
+      },
+      {
+        "name": "detecting-ai-model-prompt-injection-attacks",
+        "source": "github:mukul975/Anthropic-Cybersecurity-Skills",
+        "sha": "c0ab6cfccb0ad151d130b1c243a05af6120861ff",
+        "install_path": "detecting-ai-model-prompt-injection-attacks",
+        "upstream_path": "skills/detecting-ai-model-prompt-injection-attacks"
+      },
+      {
+        "name": "testing-api-security-with-owasp-top-10",
+        "source": "github:mukul975/Anthropic-Cybersecurity-Skills",
+        "sha": "c0ab6cfccb0ad151d130b1c243a05af6120861ff",
+        "install_path": "testing-api-security-with-owasp-top-10",
+        "upstream_path": "skills/testing-api-security-with-owasp-top-10"
+      }
+    ]
+  },
   "workflow_repair_policy": "default",
   "review_policy": {
     "test_to_code_ratio": {

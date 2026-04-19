@@ -11,6 +11,23 @@ _Architectural decisions with enough context that a future agent can tell whethe
 
 ---
 
+## 2026-04-20 — Third-party skill adoption uses a repo-controlled trusted root with pinned SHAs
+**Context:** Wave C’s remaining scope was third-party skill adoption, but the repo had no trust boundary around external `SKILL.md` content. `worker.py` only loaded the local engineering-memory skills, there was no `agent-scan` audit surface, and the exact folder names proposed in the audit prose did not all exist in the upstream repos at the tagged releases. Harness scenario numbers `43/44/45` were also already occupied by existing Wave C coverage.
+
+**Decision:** Add a repo-controlled `.claude/skills` root, a config-backed `skills.trusted_skills` allowlist, and an `agent-scan` CLI that writes audit reports under `state/runtime/agent_scans/` (and `state/runtime/mcp_audits/` for MCP roots). The worker will only load external skills that both exist under the trusted root and appear in `trusted_skills`; anything else is refused with an `untrusted_skill_rejected` event. Pin the imported skills to explicit upstream SHAs:
+- `performance-profiler` ← `alirezarezvani/claude-skills` `engineering/performance-profiler` @ `3960661ae5bd81ef3af1ac56e83b042fe3a6bfea`
+- `env-secrets-manager` ← `alirezarezvani/claude-skills` `engineering/env-secrets-manager` @ `3960661ae5bd81ef3af1ac56e83b042fe3a6bfea`
+- `code-reviewer` ← `alirezarezvani/claude-skills` `engineering-team/code-reviewer` @ `3960661ae5bd81ef3af1ac56e83b042fe3a6bfea`
+- `performing-sca-dependency-scanning-with-snyk` ← `mukul975/Anthropic-Cybersecurity-Skills` @ `c0ab6cfccb0ad151d130b1c243a05af6120861ff`
+- `analyzing-sbom-for-supply-chain-vulnerabilities` ← `mukul975/Anthropic-Cybersecurity-Skills` @ `c0ab6cfccb0ad151d130b1c243a05af6120861ff`
+- `implementing-secret-scanning-with-gitleaks` ← `mukul975/Anthropic-Cybersecurity-Skills` @ `c0ab6cfccb0ad151d130b1c243a05af6120861ff`
+- `detecting-ai-model-prompt-injection-attacks` ← `mukul975/Anthropic-Cybersecurity-Skills` @ `c0ab6cfccb0ad151d130b1c243a05af6120861ff`
+- `testing-api-security-with-owasp-top-10` ← `mukul975/Anthropic-Cybersecurity-Skills` @ `c0ab6cfccb0ad151d130b1c243a05af6120861ff`
+
+Where the upstream repo did not provide the exact Java/Python/MCP-specific folders described in the audit prose, use the closest pinned skill that covers the same risk class and record that mapping here instead of inventing a path that does not exist. Because harness scenarios `43/44/45` are already used, the skill-adoption scenarios start at `46`.
+
+**Consequences:** Third-party skills become explicit supply-chain dependencies rather than ambient prompt text. External skills can influence gate prompts only after a static audit plus an allowlist entry. This locks in SHA pinning and refusal-by-default for any copied-but-untrusted skill folder. It also means the repo’s skill numbering in the audit and in the harness are intentionally decoupled where collisions already existed.
+
 ## 2026-04-15 — Roadmap priority shifts from throughput/features to control-plane correctness
 **Context:** Live operation exposed that the main blockers to autonomous development were not lack of slots or missing surface features, but orchestration brittleness: advisory checks blocking progress, free-text failure parsing, stale retry state, and workflow bugs requiring manual interpretation. The previous roadmap emphasized vertical-slice proof, fleet widening, and BRAID future-work before fully hardening the runtime contract.
 

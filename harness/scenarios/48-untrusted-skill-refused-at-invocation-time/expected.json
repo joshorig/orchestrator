@@ -1,0 +1,6 @@
+{
+  "context": "",
+  "event_count": 1,
+  "event_name": "untrusted_skill_rejected",
+  "event_skill": "code-reviewer"
+}

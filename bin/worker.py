@@ -1442,7 +1442,86 @@ def _read_text_if_exists(path, *, tail_lines=None, max_chars=None):
     return body
 
 
-def _project_policy_context(project_name, project_path):
+def _trusted_external_skills_root():
+    cfg = o.load_config()
+    return pathlib.Path(o.skills_config(cfg=cfg)["trusted_root"])
+
+
+def _trusted_external_skill_registry():
+    return o.trusted_skill_registry(cfg=o.load_config())
+
+
+def _file_list_has_prefix(files, prefixes):
+    for rel in files:
+        norm = rel.replace("\\", "/")
+        if any(norm.startswith(prefix) for prefix in prefixes):
+            return True
+    return False
+
+
+def _requested_external_skills(project_name, *, gate_name=None, changed_files_text=None):
+    files = _changed_file_list(changed_files_text or "")
+    requested = []
+    if not files:
+        if project_name in ULL_PROJECTS:
+            requested.append("performance-profiler")
+        if project_name in {"devmini-orchestrator", "trade-research-platform"}:
+            requested.append("code-reviewer")
+    if any(rel.endswith(".py") for rel in files):
+        requested.append("code-reviewer")
+    if any(rel.endswith(".java") for rel in files):
+        requested.append("performance-profiler")
+    if any(".env" in pathlib.Path(rel).name.lower() or rel.startswith("config/") for rel in files):
+        requested.append("env-secrets-manager")
+    if gate_name == "security-review-pass":
+        requested.append("implementing-secret-scanning-with-gitleaks")
+        if _file_list_has_prefix(files, ("bin/", "config/", ".codex/", ".claude/", "mcp/", "connectors/")):
+            requested.append("detecting-ai-model-prompt-injection-attacks")
+        if project_name == "trade-research-platform" and _file_list_has_prefix(files, ("ui/", "app/", "api/", "src/")):
+            requested.append("testing-api-security-with-owasp-top-10")
+    if gate_name == "supply-chain-audit-pass":
+        requested.extend([
+            "performing-sca-dependency-scanning-with-snyk",
+            "analyzing-sbom-for-supply-chain-vulnerabilities",
+        ])
+    if project_name == "trade-research-platform" and _file_list_has_prefix(files, ("ui/", "app/", "api/", "src/")):
+        requested.append("testing-api-security-with-owasp-top-10")
+    deduped = []
+    for name in requested:
+        if name not in deduped:
+            deduped.append(name)
+    return deduped
+
+
+def _external_skill_context(project_name, *, task_id=None, gate_name=None, changed_files_text=None):
+    registry = _trusted_external_skill_registry()
+    root = _trusted_external_skills_root()
+    if not root.exists():
+        return ""
+    parts = []
+    for skill_name in _requested_external_skills(
+        project_name,
+        gate_name=gate_name,
+        changed_files_text=changed_files_text,
+    ):
+        skill_dir = root / skill_name
+        entry = registry.get(skill_name)
+        if entry is None:
+            if skill_dir.exists():
+                o.append_event(
+                    "skills",
+                    "untrusted_skill_rejected",
+                    task_id=task_id,
+                    details={"skill": skill_name, "gate_name": gate_name, "project": project_name},
+                )
+            continue
+        body = _read_text_if_exists(skill_dir / "SKILL.md", tail_lines=220, max_chars=7000)
+        if body:
+            parts.append(f"### trusted-skill/{skill_name}\n{body}")
+    return "\n\n".join(parts)
+
+
+def _project_policy_context(project_name, project_path, *, task_id=None, gate_name=None, changed_files_text=None):
     project_root = pathlib.Path(project_path)
     parts = []
     for name in CONTEXT_RULE_FILES:
@@ -1467,6 +1546,14 @@ def _project_policy_context(project_name, project_path):
         )
         if body:
             parts.append(f"### engineering-memory/{skill_name}\n{body}")
+    external = _external_skill_context(
+        project_name,
+        task_id=task_id,
+        gate_name=gate_name,
+        changed_files_text=changed_files_text,
+    )
+    if external:
+        parts.append(external)
     return "\n\n".join(parts)
 
 
@@ -1617,7 +1704,7 @@ def _legacy_markdown_memory_context(project_path):
     return "\n\n".join(parts)
 
 
-def read_memory_context(project_name, project_path, *, role=None, query=None, gate_name=None):
+def read_memory_context(project_name, project_path, *, role=None, query=None, gate_name=None, task_id=None, changed_files_text=None):
     memory_ctx = _db_memory_context(project_name, query=query, gate_name=gate_name)
     parts = []
     if memory_ctx:
@@ -1626,7 +1713,13 @@ def read_memory_context(project_name, project_path, *, role=None, query=None, ga
         legacy = _legacy_markdown_memory_context(project_path)
         if legacy:
             parts.append(legacy)
-    policy = _project_policy_context(project_name, project_path)
+    policy = _project_policy_context(
+        project_name,
+        project_path,
+        task_id=task_id,
+        gate_name=gate_name,
+        changed_files_text=changed_files_text,
+    )
     if policy:
         parts.append(f"### POLICY\n{policy}")
     token_ctx = _token_savior_context(project_name, project_path, role=role, query=query)
@@ -1974,6 +2067,60 @@ def _policy_findings_for_diff(project_name, worktree, base_ref):
     return findings
 
 
+_HIGH_CONFIDENCE_SECRET_TYPES = {
+    "Secret Keyword",
+    "AWS Access Key",
+    "AWS Secret Access Key",
+    "Private Key",
+    "Base64 High Entropy String",
+}
+
+
+def _security_gate_findings(worktree, base_ref):
+    findings = []
+    changed = _changed_files_against_base(pathlib.Path(worktree), base_ref)
+    diff_text = _git(pathlib.Path(worktree), "diff", base_ref).stdout or ""
+    for label, snippet in scan_for_secrets(diff_text):
+        findings.append(f"high-confidence secret pattern in diff: {label} ({snippet[:80]})")
+    hook_findings = _detect_secrets_hook_findings(pathlib.Path(worktree), changed)
+    for finding in hook_findings or []:
+        label = str(finding.get("type") or finding.get("secret_type") or "secret finding")
+        if label in _HIGH_CONFIDENCE_SECRET_TYPES:
+            findings.append(
+                f"high-confidence secret finding: {label} in {finding.get('filename') or '(unknown file)'}"
+            )
+    return findings
+
+
+_SUPPLY_CHAIN_VERSION_RULES = (
+    (re.compile(r"\blog4j[-.]core\b.*\b2\.14\.1\b", re.I), "high-severity Java dependency: log4j-core 2.14.1"),
+    (re.compile(r"\brequests\s*(?:==|>=?)\s*2\.19(?:\.1)?\b", re.I), "high-severity Python dependency: requests 2.19.x"),
+    (re.compile(r"\burllib3\s*(?:==|>=?)\s*1\.25(?:\.\d+)?\b", re.I), "high-severity Python dependency: urllib3 1.25.x"),
+)
+
+
+def _supply_chain_findings(worktree, base_ref):
+    changed = _changed_files_against_base(pathlib.Path(worktree), base_ref)
+    if not any(
+        rel.endswith((".java", ".py", "pom.xml", "build.gradle", "requirements.txt", "requirements-dev.txt", "pyproject.toml"))
+        for rel in changed
+    ):
+        return []
+    findings = []
+    for rel in changed:
+        path = pathlib.Path(worktree) / rel
+        if not path.exists() or not path.is_file():
+            continue
+        try:
+            body = path.read_text(errors="replace")
+        except OSError:
+            continue
+        for pattern, reason in _SUPPLY_CHAIN_VERSION_RULES:
+            if pattern.search(body):
+                findings.append(f"{rel}: {reason}")
+    return findings
+
+
 def _restore_project_file_from_head(project_path, rel_path):
     try:
         proc = subprocess.run(
@@ -2142,6 +2289,12 @@ def _specialized_review_prompt(
             "- Hunt for auth/secret exposure, unsafe subprocess/file/network use, trust-boundary mistakes, missing validation, and review-bot bypasses.\n"
             "- Treat config drift, shell invocation, and credential handling as high-risk.\n"
             "- Request change if the diff weakens security posture or leaks local/operator information.\n"
+        ),
+        "supply-chain-audit-pass": (
+            "You are the dedicated supply-chain audit gate before autonomous push.\n"
+            "- Focus on dependency risk, manifest drift, vulnerable package versions, and supply-chain exposure.\n"
+            "- Treat pinned high-severity vulnerable versions as blocking unless the diff explicitly remediates them.\n"
+            "- Request change if dependency provenance or manifest safety is unclear.\n"
         ),
         "architectural-fit-review-pass": (
             "You are the dedicated architecture-fit review gate before autonomous push.\n"
@@ -3990,8 +4143,17 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
         return
     changed_files, diff_text = _git_diff_summary(target_wt, target_base)
     review_query = " ".join(filter(None, [target.get("summary"), changed_files]))
-    memory_ctx = read_memory_context(project["name"], project["path"], role="reviewer", query=review_query)
+    memory_ctx = read_memory_context(
+        project["name"],
+        project["path"],
+        role="reviewer",
+        query=review_query,
+        task_id=task_id,
+        changed_files_text=changed_files,
+    )
     policy_findings = _policy_findings_for_diff(project_name, target_wt, target_base)
+    secret_findings = _security_gate_findings(target_wt, target_base)
+    supply_chain_findings = _supply_chain_findings(target_wt, target_base)
     compile_findings = _compile_gate_findings(project, target_wt, changed_files)
     ratio_findings = _test_ratio_findings(changed_files, task=target, worktree=target_wt, cfg=cfg)
     feature = o.read_feature(target.get("feature_id")) if target.get("feature_id") else None
@@ -4004,9 +4166,13 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
         )
     review_panel = _config_council_panel(cfg, "review_panel", ("socrates", "kahneman", "torvalds"))
     council_ctx = "\n\n".join(_council_member_context(member) for member in review_panel)
-    gate_names = ("security-review-pass", "architectural-fit-review-pass")
+    gate_names = ["security-review-pass"]
+    if supply_chain_findings:
+        gate_names.append("supply-chain-audit-pass")
+    gate_names.append("architectural-fit-review-pass")
     gate_panels = {
         "security-review-pass": _config_council_panel(cfg, "security_panel", review_panel or ("socrates", "kahneman", "torvalds")),
+        "supply-chain-audit-pass": _config_council_panel(cfg, "security_panel", review_panel or ("socrates", "kahneman", "torvalds")),
         "architectural-fit-review-pass": _config_council_panel(cfg, "architecture_panel", review_panel or ("socrates", "kahneman", "torvalds")),
     }
     is_self_repair_target = _self_repair_enabled(target)
@@ -4029,9 +4195,9 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
         f"{roadmap_ctx}"
         + (
             "[PRE-CHECK POLICY FINDINGS]\n"
-            + "\n".join(f"- {item}" for item in (policy_findings + compile_findings + ratio_findings))
+            + "\n".join(f"- {item}" for item in (policy_findings + secret_findings + supply_chain_findings + compile_findings + ratio_findings))
             + "\n\n"
-            if (policy_findings or compile_findings or ratio_findings) else ""
+            if (policy_findings or secret_findings or supply_chain_findings or compile_findings or ratio_findings) else ""
         )
         + f"[PROJECT CONTEXT]\n{memory_ctx}\n\n"
         "Emit EXACTLY one final line:\n"
@@ -4061,9 +4227,9 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
         f"{roadmap_ctx}"
         + (
             "[PRE-CHECK POLICY FINDINGS]\n"
-            + "\n".join(f"- {item}" for item in (policy_findings + compile_findings + ratio_findings))
+            + "\n".join(f"- {item}" for item in (policy_findings + secret_findings + supply_chain_findings + compile_findings + ratio_findings))
             + "\n\n"
-            if (policy_findings or compile_findings or ratio_findings) else ""
+            if (policy_findings or secret_findings or supply_chain_findings or compile_findings or ratio_findings) else ""
         )
         + f"[PROJECT CONTEXT]\n{memory_ctx}\n\n"
         "Emit EXACTLY one final line:\n"
@@ -4196,6 +4362,8 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
                     role="reviewer",
                     query=review_query,
                     gate_name=gate_name,
+                    task_id=task_id,
+                    changed_files_text=changed_files,
                 )
                 try:
                     gate_result = _run_specialized_review_gate(
@@ -4313,7 +4481,7 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
                 "request_change" if self_repair_adjudication.get("verdict") == "request_change" else self_repair_adjudication.get("verdict")
             )
 
-        hard_gate_findings = policy_findings + compile_findings + ratio_findings
+        hard_gate_findings = policy_findings + secret_findings + supply_chain_findings + compile_findings + ratio_findings
         if final_verdict == "approve" and hard_gate_findings:
             final_verdict = "request_change"
             combined_findings = (
@@ -4341,7 +4509,7 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
         t["review_verdict"] = final_verdict
         t["reviewed_at"] = o.now_iso()
         t["reviewed_by"] = task_id
-        t["policy_review_findings"] = policy_findings + compile_findings + ratio_findings
+        t["policy_review_findings"] = policy_findings + secret_findings + supply_chain_findings + compile_findings + ratio_findings
         t["review_council_panel"] = list(review_panel)
         t["review_gates"] = ["functional-review", "council-review", *gate_names] + (["self-repair-adjudication"] if is_self_repair_target else [])
         t["review_gate_panels"] = {name: list(gate_panels.get(name) or ()) for name in gate_names}

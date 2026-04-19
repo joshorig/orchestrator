@@ -1,0 +1,8 @@
+{
+  "finding_count": 1,
+  "first_finding": "requirements.txt: high-severity Python dependency: requests 2.19.x",
+  "requested_skills": [
+    "performing-sca-dependency-scanning-with-snyk",
+    "analyzing-sbom-for-supply-chain-vulnerabilities"
+  ]
+}

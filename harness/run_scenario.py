@@ -1879,6 +1879,92 @@ def _run_task_cost_capture(repo_root, scenario):
         }
 
 
+def _run_supply_chain_gate(repo_root, scenario):
+    _, worker = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        wt = pathlib.Path(tmp) / "repo"
+        subprocess.run(["git", "init", "-b", "main", str(wt)], check=True, capture_output=True, text=True)
+        subprocess.run(["git", "-C", str(wt), "config", "user.name", "Doctest"], check=True, capture_output=True, text=True)
+        subprocess.run(["git", "-C", str(wt), "config", "user.email", "doctest@example.com"], check=True, capture_output=True, text=True)
+        path = wt / scenario["manifest_path"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(scenario["baseline_body"])
+        subprocess.run(["git", "-C", str(wt), "add", "."], check=True, capture_output=True, text=True)
+        subprocess.run(["git", "-C", str(wt), "commit", "-m", "baseline"], check=True, capture_output=True, text=True)
+        path.write_text(scenario["candidate_body"])
+        findings = worker._supply_chain_findings(wt, "main")
+        requested = worker._requested_external_skills(
+            scenario["project"],
+            gate_name="supply-chain-audit-pass",
+            changed_files_text=f"{scenario['manifest_path']}\n",
+        )
+        return {
+            "finding_count": len(findings),
+            "first_finding": findings[0] if findings else None,
+            "requested_skills": requested,
+        }
+
+
+def _run_security_secret_gate(repo_root, scenario):
+    _, worker = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        wt = pathlib.Path(tmp) / "repo"
+        subprocess.run(["git", "init", "-b", "main", str(wt)], check=True, capture_output=True, text=True)
+        subprocess.run(["git", "-C", str(wt), "config", "user.name", "Doctest"], check=True, capture_output=True, text=True)
+        subprocess.run(["git", "-C", str(wt), "config", "user.email", "doctest@example.com"], check=True, capture_output=True, text=True)
+        path = wt / scenario["file_path"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(scenario.get("baseline_body", ""))
+        subprocess.run(["git", "-C", str(wt), "add", "."], check=True, capture_output=True, text=True)
+        subprocess.run(["git", "-C", str(wt), "commit", "-m", "baseline"], check=True, capture_output=True, text=True)
+        path.write_text(scenario["candidate_body"])
+        findings = worker._security_gate_findings(wt, "main")
+        requested = worker._requested_external_skills(
+            scenario["project"],
+            gate_name="security-review-pass",
+            changed_files_text=f"{scenario['file_path']}\n",
+        )
+        return {
+            "finding_count": len(findings),
+            "first_finding": findings[0] if findings else None,
+            "requested_skills": requested,
+        }
+
+
+def _run_untrusted_skill_refusal(repo_root, scenario):
+    orchestrator, worker = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        skill_dir = root / "code-reviewer"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("# untrusted skill\n")
+        old = {
+            "_trusted_external_skills_root": worker._trusted_external_skills_root,
+            "_trusted_external_skill_registry": worker._trusted_external_skill_registry,
+            "append_event": orchestrator.append_event,
+        }
+        events = []
+        worker._trusted_external_skills_root = lambda: root
+        worker._trusted_external_skill_registry = lambda: {}
+        orchestrator.append_event = lambda *args, **kwargs: events.append({"args": args, "kwargs": kwargs})
+        try:
+            context = worker._external_skill_context(
+                scenario["project"],
+                task_id=scenario["task_id"],
+                changed_files_text=scenario["changed_files_text"],
+            )
+        finally:
+            worker._trusted_external_skills_root = old["_trusted_external_skills_root"]
+            worker._trusted_external_skill_registry = old["_trusted_external_skill_registry"]
+            orchestrator.append_event = old["append_event"]
+        return {
+            "context": context,
+            "event_count": len(events),
+            "event_name": events[0]["args"][1] if events else None,
+            "event_skill": ((events[0]["kwargs"].get("details") or {}).get("skill") if events else None),
+        }
+
+
 def main(argv):
     if len(argv) != 2:
         raise SystemExit("usage: harness/run_scenario.py <scenario-dir>")
@@ -1941,6 +2027,12 @@ def main(argv):
         actual = _run_telegram_surface(repo_root, scenario)
     elif kind == "task_cost_capture":
         actual = _run_task_cost_capture(repo_root, scenario)
+    elif kind == "supply_chain_gate":
+        actual = _run_supply_chain_gate(repo_root, scenario)
+    elif kind == "security_secret_gate":
+        actual = _run_security_secret_gate(repo_root, scenario)
+    elif kind == "untrusted_skill_refusal":
+        actual = _run_untrusted_skill_refusal(repo_root, scenario)
     else:
         raise SystemExit(f"unknown scenario kind: {kind}")
 

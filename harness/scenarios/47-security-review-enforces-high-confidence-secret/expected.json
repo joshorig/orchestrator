@@ -1,0 +1,9 @@
+{
+  "finding_count": 2,
+  "first_finding": "high-confidence secret pattern in diff: github personal token (V=dev +GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz123456 )",
+  "requested_skills": [
+    "env-secrets-manager",
+    "implementing-secret-scanning-with-gitleaks",
+    "detecting-ai-model-prompt-injection-attacks"
+  ]
+}

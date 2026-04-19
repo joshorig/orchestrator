@@ -1,0 +1,6 @@
+{
+  "kind": "untrusted_skill_refusal",
+  "project": "devmini-orchestrator",
+  "task_id": "task-untrusted",
+  "changed_files_text": "bin/demo.py\n"
+}

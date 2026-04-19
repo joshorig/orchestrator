@@ -68,6 +68,8 @@ TRANSITIONS_LOG = RUNTIME_DIR / "transitions.log"
 REPORT_DIR = STATE_ROOT / "reports"
 LOGS_DIR = STATE_ROOT / "logs"
 LOG_ARCHIVE_DIR = LOGS_DIR / "archive"
+AGENT_SCAN_DIR = RUNTIME_DIR / "agent_scans"
+MCP_AUDIT_DIR = RUNTIME_DIR / "mcp_audits"
 PROJECT_HARD_STOPS_PATH = RUNTIME_DIR / "project-hard-stops.json"
 TELEGRAM_INBOX = STATE_ROOT / "telegram" / "inbox"
 TELEGRAM_OUTBOX = STATE_ROOT / "telegram" / "outbox"
@@ -156,6 +158,7 @@ BLOCKER_CODES = (
     "auto_commit_failed",
     "delivery_push_failed",
     "attempt_exhausted",
+    "untrusted_skill_rejected",
 )
 WORKFLOW_REPAIR_POLICY = (
     {
@@ -606,6 +609,10 @@ CONFIG_DEFAULTS = {
             "accept_doctest": False,
             "template_overrides": {},
         },
+    },
+    "skills": {
+        "trusted_root": ".claude/skills",
+        "trusted_skills": (),
     },
     "synthetic_canary": {
         "enabled": False,
@@ -1357,6 +1364,132 @@ def _state_engine_write_enabled(*, cfg=None):
 
 def _state_engine_read_enabled(*, cfg=None):
     return _state_engine_mode(cfg=cfg) == "primary"
+
+
+def skills_config(*, cfg=None):
+    cfg = cfg or load_config()
+    base = dict(CONFIG_DEFAULTS.get("skills") or {})
+    base.update((cfg.get("skills") or {}))
+    root = pathlib.Path(str(base.get("trusted_root") or ".claude/skills"))
+    if not root.is_absolute():
+        root = (STATE_ROOT / root).resolve()
+    trusted = []
+    for item in base.get("trusted_skills") or ():
+        if isinstance(item, dict) and item.get("name"):
+            trusted.append(dict(item))
+    return {
+        "trusted_root": str(root),
+        "trusted_skills": trusted,
+    }
+
+
+def trusted_skill_registry(*, cfg=None):
+    cfg = cfg or load_config()
+    data = skills_config(cfg=cfg)
+    return {
+        row["name"]: row
+        for row in data["trusted_skills"]
+    }
+
+
+def trusted_skill_path(name, *, cfg=None):
+    cfg = cfg or load_config()
+    data = skills_config(cfg=cfg)
+    entry = trusted_skill_registry(cfg=cfg).get(name)
+    if not entry:
+        return None
+    rel = entry.get("install_path") or name
+    path = pathlib.Path(data["trusted_root"]) / rel
+    return path.resolve()
+
+
+_AGENT_SCAN_RISK_RULES = (
+    ("high", re.compile(r"Authorization:\s*Bearer\s+\$?[A-Z0-9_]+", re.I), "contains authenticated outbound request example"),
+    ("low", re.compile(r"https?://", re.I), "contains external URL"),
+    ("medium", re.compile(r"\b(?:curl|wget)\b"), "contains network shell command"),
+    ("medium", re.compile(r"\b(?:requests|httpx|urllib|socket)\b"), "contains network-capable Python import/use"),
+    ("high", re.compile(r"\b(?:ghp_|ghs_|xox[baprs]-|AKIA|sk-)\w*"), "contains token-like literal"),
+    ("high", re.compile(r"\b(?:GITHUB_TOKEN|GH_TOKEN|OPENAI_API_KEY|AWS_SECRET_ACCESS_KEY|ANTHROPIC_API_KEY)\b"), "references credential env var"),
+    ("medium", re.compile(r"\bsubprocess\.(?:run|Popen)\b"), "contains subprocess execution"),
+    ("medium", re.compile(r"\bos\.environ\b"), "reads environment variables"),
+    ("medium", re.compile(r"\b(?:rm -rf|git reset --hard|git push --force)\b"), "contains destructive shell command"),
+    ("medium", re.compile(r"\b(?:eval|exec)\b"), "contains dynamic code execution"),
+)
+
+
+def scan_agent_roots(paths, *, kind="skills", opt_out=False):
+    """Static audit for third-party skills or MCP roots.
+
+    Returns a report dict with high/medium/low findings and writes a JSON audit
+    file under state/runtime.
+    """
+    paths = [pathlib.Path(p).resolve() for p in paths if str(p).strip()]
+    AGENT_SCAN_DIR.mkdir(parents=True, exist_ok=True)
+    MCP_AUDIT_DIR.mkdir(parents=True, exist_ok=True)
+    findings = []
+    for root in paths:
+        if not root.exists():
+            findings.append({
+                "severity": "high",
+                "path": str(root),
+                "reason": f"{kind[:-1] if kind.endswith('s') else kind} root missing",
+            })
+            continue
+        for file_path in sorted(p for p in root.rglob("*") if p.is_file()):
+            if file_path.suffix.lower() not in {".md", ".py", ".sh", ".json", ".yaml", ".yml", ".toml", ".txt"}:
+                continue
+            try:
+                body = file_path.read_text(errors="replace")
+            except OSError:
+                findings.append({
+                    "severity": "medium",
+                    "path": str(file_path),
+                    "reason": "could not read file for scan",
+                })
+                continue
+            rel = str(file_path.relative_to(root))
+            for severity, pattern, reason in _AGENT_SCAN_RISK_RULES:
+                if pattern.search(body):
+                    adjusted = severity
+                    if file_path.suffix.lower() == ".md" and reason == "contains external URL":
+                        adjusted = "low"
+                    elif file_path.suffix.lower() == ".md" and reason == "references credential env var":
+                        adjusted = "medium"
+                    elif file_path.suffix.lower() == ".md" and reason in {"contains authenticated outbound request example", "contains token-like literal"}:
+                        adjusted = "medium"
+                    findings.append({
+                        "severity": adjusted,
+                        "path": str(file_path),
+                        "relative_path": rel,
+                        "reason": reason,
+                    })
+    counts = {"high": 0, "medium": 0, "low": 0}
+    for finding in findings:
+        counts[finding["severity"]] = counts.get(finding["severity"], 0) + 1
+    report = {
+        "kind": kind,
+        "paths": [str(p) for p in paths],
+        "opt_out": bool(opt_out),
+        "counts": counts,
+        "accepted": counts["high"] == 0,
+        "findings": findings,
+        "scanned_at": now_iso(),
+    }
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    out_dir = AGENT_SCAN_DIR if kind == "skills" else MCP_AUDIT_DIR
+    out_path = out_dir / f"{kind}-audit-{stamp}.json"
+    write_json_atomic(out_path, report)
+    append_event(
+        "agent-scan",
+        "completed",
+        details={
+            "kind": kind,
+            "accepted": report["accepted"],
+            "counts": counts,
+            "path": str(out_path),
+        },
+    )
+    return report
 
 
 def _record_state_engine_fs_fallback(scope, key):
@@ -11658,6 +11791,11 @@ def main(argv=None):
     sub.add_parser("state-engine-reconcile")
     p_state_backup = sub.add_parser("state-engine-backup")
     p_state_backup.add_argument("--path", default=None)
+    p_agent_scan = sub.add_parser("agent-scan")
+    p_agent_scan.add_argument("action", choices=("scan",))
+    p_agent_scan.add_argument("--skills", action="append", default=[])
+    p_agent_scan.add_argument("--mcp-root", action="append", dest="mcp_roots", default=[])
+    p_agent_scan.add_argument("--opt-out", action="store_true")
 
     p_env = sub.add_parser("env-health")
     p_env.add_argument("--refresh", action="store_true")
@@ -11806,6 +11944,14 @@ def main(argv=None):
         print(json.dumps(state_engine_reconcile(), sort_keys=True))
     elif args.cmd == "state-engine-backup":
         print(json.dumps(state_engine_backup(backup_path=args.path), sort_keys=True))
+    elif args.cmd == "agent-scan":
+        if args.action == "scan":
+            if args.skills:
+                print(json.dumps(scan_agent_roots(args.skills, kind="skills", opt_out=args.opt_out), sort_keys=True))
+            elif args.mcp_roots:
+                print(json.dumps(scan_agent_roots(args.mcp_roots, kind="mcp-roots", opt_out=args.opt_out), sort_keys=True))
+            else:
+                raise SystemExit("agent-scan scan requires --skills or --mcp-root")
     elif args.cmd == "env-health":
         print(environment_health_text(refresh=args.refresh))
     elif args.cmd == "repair-environment":

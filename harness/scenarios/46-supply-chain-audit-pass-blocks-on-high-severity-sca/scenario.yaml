@@ -1,0 +1,7 @@
+{
+  "kind": "supply_chain_gate",
+  "project": "devmini-orchestrator",
+  "manifest_path": "requirements.txt",
+  "baseline_body": "requests==2.31.0\n",
+  "candidate_body": "requests==2.19.1\n"
+}
