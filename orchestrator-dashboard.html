@@ -269,6 +269,7 @@
     }
     .task-row:hover { transform: translateY(-1px); border-color: var(--border-strong); }
     .task-row.frontier { border-color: rgba(251, 113, 133, 0.45); }
+    .agent-task-row { cursor: pointer; }
     .task-head {
       display: flex;
       justify-content: space-between;
@@ -519,6 +520,13 @@
       </div>
       <div class="card">
         <div class="section-head">
+          <span class="section-title">Agent Tasks</span>
+          <span class="section-sub" id="agentTaskCount">select an agent</span>
+        </div>
+        <div class="mini-list" id="agentTasks"></div>
+      </div>
+      <div class="card">
+        <div class="section-head">
           <span class="section-title">Dashboard Server</span>
           <span class="section-sub">live config</span>
         </div>
@@ -581,6 +589,8 @@
       frontierState: null,
       blockerCode: null,
       agentStatus: null,
+      agentRole: null,
+      featureStatus: null,
     };
     const QUEUE_COLORS = {
       queued: "#22d3ee",
@@ -602,6 +612,7 @@
     let eventSource = null;
     let reconnectTimer = null;
     let pollingTimer = null;
+    const FEATURE_SECTION_STATE = {};
 
     function esc(value) {
       return String(value ?? "").replace(/[&<>"]/g, ch => ({
@@ -639,6 +650,17 @@
       return Object.entries(FILTERS).filter(([, value]) => value);
     }
 
+    function sectionStateKey(featureId, section) {
+      return `${featureId}::${section}`;
+    }
+
+    function sectionIsOpen(featureId, section, defaultOpen = false) {
+      const key = sectionStateKey(featureId, section);
+      return Object.prototype.hasOwnProperty.call(FEATURE_SECTION_STATE, key)
+        ? FEATURE_SECTION_STATE[key]
+        : defaultOpen;
+    }
+
     function setFilter(key, value) {
       FILTERS[key] = FILTERS[key] === value ? null : value;
       render(latestData);
@@ -666,6 +688,7 @@
 
     function featureMatches(feature) {
       if (FILTERS.project && feature.project !== FILTERS.project) return false;
+      if (FILTERS.featureStatus && (feature.status || "") !== FILTERS.featureStatus) return false;
       if (FILTERS.frontierState && (feature.frontier?.state || "") !== FILTERS.frontierState) return false;
       if (FILTERS.blockerCode && ((feature.frontier?.blocker?.code || "") !== FILTERS.blockerCode)) return false;
       return true;
@@ -724,7 +747,7 @@
       const rows = (data.agents || []).filter(row => !FILTERS.agentStatus || row.status === FILTERS.agentStatus);
       document.getElementById("agentCount").textContent = `${rows.length}/${data.agents.length} visible`;
       document.getElementById("agents").innerHTML = rows.length ? rows.map(row => `
-        <div class="agent-row ${FILTERS.agentStatus === row.status ? "active" : ""}">
+        <div class="agent-row ${(FILTERS.agentStatus === row.status || FILTERS.agentRole === row.role) ? "active" : ""}" onclick="setFilter('agentRole','${escAttr(row.role)}')">
           <div class="agent-top">
             <span class="agent-role">${esc(row.role)}</span>
             <span class="status-badge status-${esc(row.status)}" onclick="event.stopPropagation(); setFilter('agentStatus','${escAttr(row.status)}')">${esc(row.status)}</span>
@@ -733,6 +756,34 @@
           <div class="tiny">updated ${esc(formatTs(row.updated_at))}</div>
         </div>
       `).join("") : `<div class="empty">No agents match the active filter.</div>`;
+    }
+
+    function renderAgentTasks() {
+      const host = document.getElementById("agentTasks");
+      const count = document.getElementById("agentTaskCount");
+      if (!FILTERS.agentRole) {
+        count.textContent = "select an agent";
+        host.innerHTML = `<div class="empty">Click an agent row to see tasks for that role.</div>`;
+        return;
+      }
+      const rows = Object.values(taskIndex)
+        .filter((task) => task.role === FILTERS.agentRole && (task.state === "running" || task.finished_at))
+        .sort((a, b) => {
+          if (a.state === "running" && b.state !== "running") return -1;
+          if (a.state !== "running" && b.state === "running") return 1;
+          return String(b.finished_at || b.started_at || b.created_at || "").localeCompare(String(a.finished_at || a.started_at || a.created_at || ""));
+        });
+      count.textContent = `${rows.length} task${rows.length === 1 ? "" : "s"}`;
+      host.innerHTML = rows.length ? rows.map((task) => `
+        <div class="mini-row agent-task-row" onclick="showTaskModal('${escAttr(task.task_id)}')">
+          <div class="mini-top">
+            <strong>${esc(task.task_id)}</strong>
+            <span class="state-chip state-${esc(task.state || "queued")}">${esc(task.state || "-")}</span>
+          </div>
+          <div class="mini-detail">${esc(task.summary || "")}</div>
+          <div class="tiny">${esc(task.project || "-")} · ${esc(formatTs(task.finished_at || task.started_at || task.created_at))}</div>
+        </div>
+      `).join("") : `<div class="empty">No running or completed tasks for ${esc(FILTERS.agentRole)}.</div>`;
     }
 
     function renderServer(data) {
@@ -824,7 +875,7 @@
 
     function featureSection(title, summary, body, open = false) {
       return `
-        <details class="feature-section" ${open ? "open" : ""}>
+        <details class="feature-section" data-section="${escAttr(title)}" data-default-open="${open ? "1" : "0"}" ${open ? "open" : ""}>
           <summary>
             <span class="summary-label">${esc(title)}</span>
             <span class="summary-value">${summary}</span>
@@ -844,14 +895,14 @@
       const childStates = Object.entries(feature.child_states || {});
       const followUpStates = Object.entries(feature.follow_up_states || {});
       return `
-        <div class="feature-card ${stale ? "stale" : ""} ${blocked ? "blocked" : ""}">
+        <div class="feature-card ${stale ? "stale" : ""} ${blocked ? "blocked" : ""}" data-feature-id="${escAttr(feature.feature_id)}">
           <div class="feature-top">
             <div>
               <div class="feature-id">${esc(feature.feature_id)}</div>
               <div class="feature-project" onclick="setFilter('project','${escAttr(feature.project)}')">${esc(feature.project)}</div>
             </div>
             <div>
-              <span class="state-chip state-${esc(feature.status || "open")}">${esc(feature.status || "open")}</span>
+              <span class="state-chip state-${esc(feature.status || "open")}" onclick="setFilter('featureStatus','${escAttr(feature.status || "open")}')">${esc(feature.status || "open")}</span>
             </div>
           </div>
 
@@ -875,7 +926,7 @@
                   <div class="mini-detail">${esc(feature.frontier?.blocker?.detail || feature.frontier?.blocker?.summary || "")}</div>
                 </div>
               </div>
-            `, true)}
+            `, sectionIsOpen(feature.feature_id, "Frontier", true))}
             ${featureSection("Roadmap", `${esc(feature.roadmap?.id || "-")} ${feature.branch ? `· ${esc(feature.branch)}` : ""}`, `
               <div class="feature-meta">
                 <div class="meta-box">
@@ -889,7 +940,7 @@
                   <div class="tiny">${esc(feature.branch || "")}</div>
                 </div>
               </div>
-            `)}
+            `, sectionIsOpen(feature.feature_id, "Roadmap", false))}
             ${featureSection("Delivery", delivery.final_pr_number ? `PR #${esc(delivery.final_pr_number)}` : "no final PR", `
               <div class="feature-delivery">
                 <div class="delivery-box">
@@ -903,7 +954,7 @@
                   <div class="tiny">unresolved bot threads ${esc((delivery.final_pr_sweep || {}).unresolved_bot_threads || 0)} · mergeable ${esc((delivery.final_pr_sweep || {}).last_mergeable || "-")}</div>
                 </div>
               </div>
-            `)}
+            `, sectionIsOpen(feature.feature_id, "Delivery", false))}
             ${featureSection("Repair", `${repair.enabled ? esc(repair.status || "enabled") : "disabled"} · ${esc(repair.issue_count || 0)} issues`, `
               <div class="feature-repair">
                 <div class="repair-box">
@@ -917,7 +968,7 @@
                   <div class="tiny">${childStates.map(([, state]) => state).join(", ") || "no child tasks recorded"}</div>
                 </div>
               </div>
-            `)}
+            `, sectionIsOpen(feature.feature_id, "Repair", false))}
             ${featureSection("Tasks", `${tasks.length} task${tasks.length === 1 ? "" : "s"}`, `
               <div class="tasks-box">
                 <div class="box-k">Tasks</div>
@@ -947,7 +998,7 @@
                   `).join("") : `<div class="empty">No task detail exported for this feature.</div>`}
                 </div>
               </div>
-            `)}
+            `, sectionIsOpen(feature.feature_id, "Tasks", false))}
             ${featureSection("Events", `${events.length} recent event${events.length === 1 ? "" : "s"}`, `
               <div class="events-box">
                 <div class="box-k">Recent Workflow Events</div>
@@ -961,16 +1012,33 @@
                   `).join("") : `<div class="empty">No recent feature events.</div>`}
                 </div>
               </div>
-            `)}
+            `, sectionIsOpen(feature.feature_id, "Events", false))}
           </div>
         </div>
       `;
+    }
+
+    function wireFeatureSections() {
+      document.querySelectorAll(".feature-card").forEach((card) => {
+        const featureId = card.dataset.featureId;
+        card.querySelectorAll(".feature-section").forEach((section) => {
+          const title = section.dataset.section;
+          const key = sectionStateKey(featureId, title);
+          if (Object.prototype.hasOwnProperty.call(FEATURE_SECTION_STATE, key)) {
+            section.open = FEATURE_SECTION_STATE[key];
+          }
+          section.addEventListener("toggle", () => {
+            FEATURE_SECTION_STATE[key] = section.open;
+          });
+        });
+      });
     }
 
     function renderFeatures(data) {
       const rows = (data.features || []).filter(featureMatches);
       document.getElementById("featureCount").textContent = `${rows.length}/${data.features.length} visible`;
       document.getElementById("features").innerHTML = rows.length ? rows.map(renderFeature).join("") : `<div class="empty">No features match the active filters.</div>`;
+      wireFeatureSections();
     }
 
     function timelineRow(label, ts) {
@@ -1106,6 +1174,7 @@
       renderFilters();
       renderScorecards(data);
       renderAgents(data);
+      renderAgentTasks();
       renderServer(data);
       renderBudget(data);
       renderQueue(data);
