@@ -1,0 +1,9 @@
+{
+  "queue_queued_db": 100,
+  "queue_queued_fs": 100,
+  "queue_queued_diff": 0,
+  "features_db": 1,
+  "features_fs": 1,
+  "features_diff": 0,
+  "integrity_check": "ok"
+}

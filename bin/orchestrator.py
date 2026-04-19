@@ -77,6 +77,8 @@ BRAID_GENERATORS = BRAID_DIR / "generators"
 BRAID_INDEX = BRAID_DIR / "index.json"
 DASHBOARD_FEED_PATH = RUNTIME_DIR / "dashboard-feed.json"
 DASHBOARD_HTML_PATH = STATE_ROOT / "orchestrator-dashboard.html"
+STATE_ENGINE_DB_PATH = RUNTIME_DIR / "orchestrator.db"
+STATE_MIGRATIONS_DIR = STATE_ROOT / "state" / "migrations"
 BRAID_NODE_DEF_RE = re.compile(r"(?P<node>[A-Za-z_][A-Za-z0-9_]*)\s*(?P<shape>\[[^\]\n]*\]|\{[^\}\n]*\})")
 BRAID_EDGE_START_RE = re.compile(r"^\s*(?P<node>[A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]\n]*\]|\{[^\}\n]*\})?")
 BRAID_EDGE_END_RE = re.compile(r"(?P<node>[A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]\n]*\]|\{[^\}\n]*\})?\s*;?\s*$")
@@ -583,6 +585,11 @@ CONFIG_DEFAULTS = {
     "workflow_check_max_attempts": 6,
     "self_repair_issue_max_attempts": 3,
     "max_task_attempts": 5,
+    "state_engine": {
+        "mode": "off",
+        "path": str(STATE_ENGINE_DB_PATH),
+        "checkpoint_interval_sec": 300,
+    },
     "review_policy": {
         "test_to_code_ratio": {
             "min_ratio": 0.5,
@@ -701,6 +708,8 @@ BRAID_RECENT_OUTCOMES_MAX = 50
 LOG_RETENTION_DAYS = 7
 LOG_SIZE_CAP_BYTES = 1024 * 1024 * 1024
 _ENV_HEALTH_CACHE = {"ts": 0.0, "data": None}
+_STATE_ENGINE_CACHE = {"key": None, "engine": None}
+_STATE_ENGINE_RECONCILE = {"ts": 0.0, "active": False, "last": None}
 R7_ALLOWED_CAPS = {
     "API", "BRAID", "CI", "CLI", "CPU", "CSS", "FIXME", "GH", "HTML", "HTTP",
     "JSON", "JVM", "OK", "PNG", "PPD", "PR", "QA", "RSA", "SHA", "TODO",
@@ -980,10 +989,19 @@ def append_metric(name, value, *, metric_type="gauge", tags=None, source=None, t
     }
     with METRICS_LOG.open("a") as f:
         f.write(json.dumps(row, sort_keys=True) + "\n")
+    _mirror_metric_row(row)
     return row
 
 
 def read_metrics(*, name=None, limit=None):
+    if _state_engine_read_enabled():
+        try:
+            rows = get_state_engine().read_metrics(name=name, limit=limit)
+            if rows or not METRICS_LOG.exists():
+                return rows
+            _record_state_engine_fs_fallback("metrics", name or "*")
+        except Exception:
+            _record_state_engine_fs_fallback("metrics", name or "*")
     if not METRICS_LOG.exists():
         return []
     rows = []
@@ -1226,6 +1244,253 @@ def load_config():
         else:
             data.setdefault(key, value)
     return data
+
+
+def state_engine_config(*, cfg=None):
+    cfg = cfg or load_config()
+    base = _deep_merge_dicts(CONFIG_DEFAULTS.get("state_engine") or {}, cfg.get("state_engine") or {})
+    mode = str(os.environ.get("STATE_ENGINE_MODE", base.get("mode", "off")) or "off").strip().lower()
+    if mode not in {"off", "mirror", "primary"}:
+        mode = "off"
+    path_value = str(
+        os.environ.get("STATE_ENGINE_PATH", base.get("path", str(STATE_ENGINE_DB_PATH)))
+        or str(STATE_ENGINE_DB_PATH)
+    )
+    return {
+        "mode": mode,
+        "path": path_value,
+        "checkpoint_interval_sec": max(1, int(base.get("checkpoint_interval_sec") or 300)),
+        "migrations_dir": str(STATE_MIGRATIONS_DIR),
+    }
+
+
+def get_state_engine(*, cfg=None):
+    cfg = cfg or load_config()
+    engine_cfg = state_engine_config(cfg=cfg)
+    key = (
+        engine_cfg["mode"],
+        engine_cfg["path"],
+        engine_cfg["checkpoint_interval_sec"],
+        engine_cfg["migrations_dir"],
+    )
+    if _STATE_ENGINE_CACHE["key"] == key:
+        return _STATE_ENGINE_CACHE["engine"]
+    from state_engine import StateEngine, StateEngineConfig
+
+    engine = StateEngine(
+        StateEngineConfig(
+            root=STATE_ROOT,
+            db_path=pathlib.Path(engine_cfg["path"]),
+            migrations_dir=pathlib.Path(engine_cfg["migrations_dir"]),
+            mode=engine_cfg["mode"],
+            checkpoint_interval_sec=engine_cfg["checkpoint_interval_sec"],
+        )
+    )
+    _STATE_ENGINE_CACHE["key"] = key
+    _STATE_ENGINE_CACHE["engine"] = engine
+    return engine
+
+
+def state_engine_status(*, cfg=None):
+    cfg = cfg or load_config()
+    engine = get_state_engine(cfg=cfg)
+    status = engine.initialize()
+    if not status.get("enabled"):
+        return status
+    status["seeded_blocker_codes"] = engine.seed_blocker_codes(BLOCKER_CODES)
+    status.update(engine.status())
+    return status
+
+
+def _state_engine_mode(*, cfg=None):
+    return state_engine_config(cfg=cfg or load_config())["mode"]
+
+
+def _state_engine_write_enabled(*, cfg=None):
+    return _state_engine_mode(cfg=cfg) in {"mirror", "primary"}
+
+
+def _state_engine_read_enabled(*, cfg=None):
+    return _state_engine_mode(cfg=cfg) == "primary"
+
+
+def _record_state_engine_fs_fallback(scope, key):
+    append_metric(
+        "state_engine.fs_fallback",
+        1,
+        metric_type="counter",
+        tags={"scope": scope, "key": key},
+        source="state-engine",
+    )
+
+
+def iter_tasks(*, states=None, project=None, engine=None, role=None, limit=None, newest_first=False):
+    states = tuple(states or STATES)
+    if _state_engine_read_enabled():
+        try:
+            rows = get_state_engine().read_tasks(
+                states=states,
+                project=project,
+                engine=engine,
+                role=role,
+                limit=limit,
+                newest_first=newest_first,
+            )
+            if rows or not QUEUE_ROOT.exists():
+                return rows
+            key = project or engine or role or ",".join(states) or "*"
+            _record_state_engine_fs_fallback("tasks", key)
+        except Exception:
+            key = project or engine or role or ",".join(states) or "*"
+            _record_state_engine_fs_fallback("tasks", key)
+    rows = []
+    for state in states:
+        for p in queue_dir(state).glob("*.json"):
+            t = read_json(p, {})
+            if project is not None and t.get("project") != project:
+                continue
+            if engine is not None and t.get("engine") != engine:
+                continue
+            if role is not None and t.get("role") != role:
+                continue
+            rows.append(t)
+    rows.sort(key=lambda t: t.get("created_at", ""), reverse=newest_first)
+    if limit is not None and limit >= 0:
+        rows = rows[:limit]
+    return rows
+
+
+def _mirror_fs_write(path, obj, *, cfg=None):
+    if not _state_engine_write_enabled(cfg=cfg):
+        return False
+    try:
+        rel = pathlib.Path(path).resolve().relative_to(STATE_ROOT.resolve())
+    except ValueError:
+        return False
+    parts = rel.parts
+    if not parts:
+        return False
+    engine = get_state_engine(cfg=cfg)
+    engine.initialize()
+    if len(parts) >= 3 and parts[0] == "queue" and parts[1] in STATES and parts[-1].endswith(".json"):
+        engine.upsert_task_from_fs(obj, state=parts[1])
+        _state_engine_maybe_reconcile(cfg=cfg)
+        return True
+    if len(parts) >= 3 and parts[0] == "state" and parts[1] == "features" and parts[-1].endswith(".json"):
+        engine.upsert_feature_from_fs(obj)
+        _state_engine_maybe_reconcile(cfg=cfg)
+        return True
+    return False
+
+
+def _mirror_transition_row(row, *, cfg=None):
+    if not _state_engine_write_enabled(cfg=cfg):
+        return False
+    engine = get_state_engine(cfg=cfg)
+    engine.initialize()
+    engine.record_transition(row)
+    return True
+
+
+def _mirror_event_row(row, *, cfg=None):
+    if not _state_engine_write_enabled(cfg=cfg):
+        return False
+    engine = get_state_engine(cfg=cfg)
+    engine.initialize()
+    engine.record_event(row)
+    return True
+
+
+def _mirror_metric_row(row, *, cfg=None):
+    if not _state_engine_write_enabled(cfg=cfg):
+        return False
+    engine = get_state_engine(cfg=cfg)
+    engine.initialize()
+    engine.record_metric(row)
+    return True
+
+
+def _fs_queue_state_counts():
+    counts = {}
+    for state in STATES:
+        state_dir = queue_dir(state)
+        counts[state] = sum(1 for _ in state_dir.glob("*.json")) if state_dir.exists() else 0
+    return counts
+
+
+def _fs_feature_count():
+    return sum(1 for _ in FEATURES_DIR.glob("*.json")) if FEATURES_DIR.exists() else 0
+
+
+def state_engine_reconcile(*, cfg=None, emit_metrics=True):
+    cfg = cfg or load_config()
+    engine = get_state_engine(cfg=cfg)
+    status = engine.initialize()
+    if not status.get("enabled"):
+        return {
+            "enabled": False,
+            "mode": status.get("mode"),
+            "queue": {},
+            "features": {"db": 0, "fs": 0, "diff": 0},
+        }
+    primary = status.get("mode") == "primary"
+    relation = "fs_subset_of_db" if primary else "db_equals_fs"
+    db_counts = engine.queue_state_counts()
+    fs_counts = _fs_queue_state_counts()
+    queue = {}
+    for state in STATES:
+        db_n = int(db_counts.get(state, 0))
+        fs_n = int(fs_counts.get(state, 0))
+        diff = (fs_n - db_n) if primary else (db_n - fs_n)
+        queue[state] = {"db": db_n, "fs": fs_n, "diff": diff}
+        if emit_metrics:
+            append_metric(
+                "state_engine.reconciliation_diff",
+                diff,
+                metric_type="gauge",
+                tags={"scope": "queue", "state": state, "relation": relation},
+                source="state-engine",
+            )
+    features = {
+        "db": engine.feature_count(),
+        "fs": _fs_feature_count(),
+    }
+    features["diff"] = int(features["fs"]) - int(features["db"]) if primary else int(features["db"]) - int(features["fs"])
+    if emit_metrics:
+        append_metric(
+            "state_engine.reconciliation_diff",
+            features["diff"],
+            metric_type="gauge",
+            tags={"scope": "features", "state": "all", "relation": relation},
+            source="state-engine",
+        )
+    return {
+        "enabled": True,
+        "mode": status.get("mode"),
+        "relation": relation,
+        "queue": queue,
+        "features": features,
+        "integrity_check": status.get("integrity_check"),
+    }
+
+
+def _state_engine_maybe_reconcile(*, cfg=None):
+    cfg = cfg or load_config()
+    if not _state_engine_write_enabled(cfg=cfg):
+        return None
+    now = time.time()
+    if _STATE_ENGINE_RECONCILE["active"]:
+        return _STATE_ENGINE_RECONCILE["last"]
+    if (now - float(_STATE_ENGINE_RECONCILE["ts"] or 0.0)) < 60.0:
+        return _STATE_ENGINE_RECONCILE["last"]
+    _STATE_ENGINE_RECONCILE["active"] = True
+    try:
+        result = state_engine_reconcile(cfg=cfg, emit_metrics=True)
+        _STATE_ENGINE_RECONCILE["ts"] = now
+        _STATE_ENGINE_RECONCILE["last"] = result
+        return result
+    finally:
+        _STATE_ENGINE_RECONCILE["active"] = False
 
 
 def claude_budget_usd(kind="claude_default", *, cfg=None, task=None, mode=None):
@@ -1885,6 +2150,7 @@ def write_json_atomic(path, obj):
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(obj, indent=2, sort_keys=True))
     os.rename(tmp, path)
+    _mirror_fs_write(path, obj)
 
 
 def read_json(path, default=None):
@@ -1895,10 +2161,18 @@ def read_json(path, default=None):
 
 def append_transition(task_id, from_state, to_state, reason=""):
     TRANSITIONS_LOG.parent.mkdir(parents=True, exist_ok=True)
+    row = {
+        "ts": now_iso(),
+        "task_id": task_id,
+        "from_state": from_state,
+        "to_state": to_state,
+        "reason": reason,
+    }
     with TRANSITIONS_LOG.open("a") as f:
-        f.write(f"{now_iso()}\t{task_id}\t{from_state}\t->\t{to_state}\t{reason}\n")
+        f.write(f"{row['ts']}\t{task_id}\t{from_state}\t->\t{to_state}\t{reason}\n")
         f.flush()
         os.fsync(f.fileno())
+    _mirror_transition_row(row)
 
 
 def make_blocker(code, *, summary=None, detail=None, source=None, confidence="high", retryable=None, metadata=None):
@@ -2055,6 +2329,7 @@ def append_event(role, event, *, task_id=None, feature_id=None, details=None):
     }
     with EVENTS_LOG.open("a") as f:
         f.write(json.dumps(payload, sort_keys=True) + "\n")
+    _mirror_event_row(payload)
 
 
 def _read_project_hard_stops():
@@ -2114,6 +2389,15 @@ def read_events(*, feature_id=None, task_id=None, role=None, limit=None):
     >>> (len(out), out[0]["event"])
     (1, 'task_enqueued')
     """
+    if _state_engine_read_enabled():
+        key = feature_id or task_id or role or "*"
+        try:
+            rows = get_state_engine().read_events(feature_id=feature_id, task_id=task_id, role=role, limit=limit)
+            if rows or not EVENTS_LOG.exists():
+                return rows
+            _record_state_engine_fs_fallback("events", key)
+        except Exception:
+            _record_state_engine_fs_fallback("events", key)
     if not EVENTS_LOG.exists():
         return []
     rows = []
@@ -2162,6 +2446,15 @@ def read_transitions(*, task_id=None, limit=None):
     >>> (out[0]["task_id"], out[-1]["to_state"], len(out))
     ('task-1', 'running', 2)
     """
+    if _state_engine_read_enabled():
+        key = task_id or "*"
+        try:
+            rows = get_state_engine().read_transitions(task_id=task_id, limit=limit)
+            if rows or not TRANSITIONS_LOG.exists():
+                return rows
+            _record_state_engine_fs_fallback("transitions", key)
+        except Exception:
+            _record_state_engine_fs_fallback("transitions", key)
     if not TRANSITIONS_LOG.exists():
         return []
     rows = []
@@ -6299,10 +6592,26 @@ def feature_path(feature_id):
 
 
 def read_feature(feature_id):
+    if _state_engine_read_enabled():
+        try:
+            row = get_state_engine().read_feature(feature_id)
+            if row is not None or not feature_path(feature_id).exists():
+                return row
+            _record_state_engine_fs_fallback("feature", feature_id)
+        except Exception:
+            _record_state_engine_fs_fallback("feature", feature_id)
     return read_json(feature_path(feature_id), None)
 
 
 def list_features(status=None):
+    if _state_engine_read_enabled():
+        try:
+            rows = get_state_engine().read_features(status=status)
+            if rows or not FEATURES_DIR.exists():
+                return rows
+            _record_state_engine_fs_fallback("features", status or "*")
+        except Exception:
+            _record_state_engine_fs_fallback("features", status or "*")
     FEATURES_DIR.mkdir(parents=True, exist_ok=True)
     out = []
     for p in sorted(FEATURES_DIR.glob("*.json")):
@@ -7353,18 +7662,16 @@ def agent_statuses():
 
 def _matching_tasks(*, states, engine=None, role=None, source=None):
     tasks = []
-    for state in states:
-        for p in sorted(queue_dir(state).glob("*.json")):
-            task = read_json(p, {})
-            if not task:
-                continue
-            if engine and task.get("engine") != engine:
-                continue
-            if role and task.get("role") != role:
-                continue
-            if source and task.get("source") != source:
-                continue
-            tasks.append((state, task))
+    for task in iter_tasks(states=states):
+        if not task:
+            continue
+        if engine and task.get("engine") != engine:
+            continue
+        if role and task.get("role") != role:
+            continue
+        if source and task.get("source") != source:
+            continue
+        tasks.append((task.get("state"), task))
     return tasks
 
 
@@ -7395,7 +7702,7 @@ def effective_agent_statuses():
 
     reviewer_active = _matching_tasks(states=("claimed", "running"), engine="claude", role="reviewer", source="tick-reviewer")
     reviewer_queued = _matching_tasks(states=("queued",), engine="claude", role="reviewer", source="tick-reviewer")
-    reviewer_pending = len(list(queue_dir("awaiting-review").glob("*.json")))
+    reviewer_pending = len(iter_tasks(states=("awaiting-review",)))
     row = dict(rows.get("reviewer") or {"role": "reviewer", "updated_at": now_iso()})
     if reviewer_active:
         row["status"] = "running"
@@ -7413,7 +7720,7 @@ def effective_agent_statuses():
 
     qa_active = _matching_tasks(states=("claimed", "running"), engine="qa", role="qa", source="tick-qa")
     qa_queued = _matching_tasks(states=("queued",), engine="qa", role="qa", source="tick-qa")
-    qa_pending = len(list(queue_dir("awaiting-qa").glob("*.json")))
+    qa_pending = len(iter_tasks(states=("awaiting-qa",)))
     row = dict(rows.get("qa") or {"role": "qa", "updated_at": now_iso()})
     if qa_active:
         row["status"] = "running"
@@ -7575,6 +7882,15 @@ def crash_loop_guard_status(slot):
 # --- Queue inspection --------------------------------------------------------
 
 def queue_counts():
+    if _state_engine_read_enabled():
+        try:
+            db_counts = get_state_engine().queue_state_counts()
+            counts = {state: int(db_counts.get(state, 0)) for state in STATES}
+            if any(counts.values()) or not QUEUE_ROOT.exists():
+                return counts
+            _record_state_engine_fs_fallback("queue_counts", "*")
+        except Exception:
+            _record_state_engine_fs_fallback("queue_counts", "*")
     counts = {}
     for state in STATES:
         counts[state] = len(list(queue_dir(state).glob("*.json")))
@@ -7590,12 +7906,10 @@ def engine_outstanding():
     by their own tickers.
     """
     counts = {"claude": 0, "codex": 0, "qa": 0}
-    for state in ("queued", "claimed", "running"):
-        for p in queue_dir(state).glob("*.json"):
-            t = read_json(p, {})
-            eng = t.get("engine")
-            if eng in counts:
-                counts[eng] += 1
+    for t in iter_tasks(states=("queued", "claimed", "running")):
+        eng = t.get("engine")
+        if eng in counts:
+            counts[eng] += 1
     return counts
 
 
@@ -7619,19 +7933,16 @@ def engine_active_counts():
     True
     """
     counts = {"claude": 0, "codex": 0, "qa": 0}
-    for state in ("claimed", "running"):
-        for p in queue_dir(state).glob("*.json"):
-            t = read_json(p, {})
-            eng = t.get("engine")
-            if eng in counts:
-                counts[eng] += 1
+    for t in iter_tasks(states=("claimed", "running")):
+        eng = t.get("engine")
+        if eng in counts:
+            counts[eng] += 1
     return counts
 
 
 def queue_sample(state, limit=10):
     items = []
-    for p in sorted(queue_dir(state).glob("*.json"))[:limit]:
-        t = read_json(p, {})
+    for t in iter_tasks(states=(state,), limit=limit):
         attempt = int(t.get("attempt", 1) or 1)
         retry_note = f" a{attempt}" if attempt > 1 else ""
         items.append(
@@ -7656,6 +7967,16 @@ def find_task(task_id, states=STATES):
     >>> out1[0], out1[1]["summary"], out2 is None
     ('running', 'demo', True)
     """
+    if _state_engine_read_enabled():
+        try:
+            row = get_state_engine().find_task(task_id, states=states)
+            if row is not None:
+                return row
+            if not any(task_path(task_id, state).exists() for state in states):
+                return None
+            _record_state_engine_fs_fallback("task", task_id)
+        except Exception:
+            _record_state_engine_fs_fallback("task", task_id)
     for state in states:
         path = task_path(task_id, state)
         if path.exists():
@@ -7933,8 +8254,7 @@ def tick_reviewer():
         return
     # Count awaiting-review per project.
     ar_by_project = {}
-    for p in queue_dir("awaiting-review").glob("*.json"):
-        t = read_json(p, {})
+    for t in iter_tasks(states=("awaiting-review",)):
         proj = t.get("project")
         if proj:
             ar_by_project[proj] = ar_by_project.get(proj, 0) + 1
@@ -7993,8 +8313,7 @@ def tick_qa():
         )
         return
     aq_by_project = {}
-    for p in queue_dir("awaiting-qa").glob("*.json"):
-        t = read_json(p, {})
+    for t in iter_tasks(states=("awaiting-qa",)):
         proj = t.get("project")
         if proj:
             aq_by_project[proj] = aq_by_project.get(proj, 0) + 1
@@ -8550,12 +8869,7 @@ def status_text():
     for st in STATES:
         if counts[st]:
             lines.append(f"  {st}: {counts[st]}")
-    retried = 0
-    for state in STATES:
-        for p in queue_dir(state).glob("*.json"):
-            t = read_json(p, {})
-            if int(t.get("attempt", 1) or 1) > 1:
-                retried += 1
+    retried = sum(1 for t in iter_tasks(states=STATES) if int(t.get("attempt", 1) or 1) > 1)
     if retried:
         lines.append(f"  retried_tasks: {retried}")
     health = environment_health()
@@ -8816,14 +9130,7 @@ def _feature_workflow_context(project_name=None, limit=5):
 
 
 def _recent_project_task_context(project_name, limit=8):
-    tasks = []
-    for state in STATES:
-        for path in queue_dir(state).glob("*.json"):
-            task = read_json(path, None)
-            if not task or task.get("project") != project_name:
-                continue
-            tasks.append(task)
-    tasks.sort(key=lambda t: t.get("created_at", ""), reverse=True)
+    tasks = iter_tasks(project=project_name, newest_first=True)
     rows = []
     for task in tasks[:limit]:
         row = {
@@ -11019,6 +11326,8 @@ def main(argv=None):
 
     p_canary = sub.add_parser("tick-canary-workflows")
     p_canary.add_argument("--force", action="store_true")
+    sub.add_parser("state-engine-status")
+    sub.add_parser("state-engine-reconcile")
 
     p_env = sub.add_parser("env-health")
     p_env.add_argument("--refresh", action="store_true")
@@ -11161,6 +11470,10 @@ def main(argv=None):
     elif args.cmd == "tick-canary-workflows":
         out = tick_canary_workflows(force=args.force)
         print(json.dumps(out, sort_keys=True))
+    elif args.cmd == "state-engine-status":
+        print(json.dumps(state_engine_status(), sort_keys=True))
+    elif args.cmd == "state-engine-reconcile":
+        print(json.dumps(state_engine_reconcile(), sort_keys=True))
     elif args.cmd == "env-health":
         print(environment_health_text(refresh=args.refresh))
     elif args.cmd == "repair-environment":

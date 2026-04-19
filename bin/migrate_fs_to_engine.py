@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""One-shot migration from filesystem state to the SQLite state engine."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import pathlib
+import shutil
+import sqlite3
+import sys
+import tempfile
+
+
+def _load_module(name: str, path: pathlib.Path):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def migrate_from_fs(repo_root: pathlib.Path, db_path: pathlib.Path, *, backup_path: pathlib.Path | None = None) -> dict[str, int | str]:
+    orchestrator = _load_module("orchestrator", repo_root / "bin" / "orchestrator.py")
+    state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
+
+    engine = state_engine.StateEngine(
+        state_engine.StateEngineConfig(
+            root=repo_root,
+            db_path=db_path,
+            migrations_dir=repo_root / "state" / "migrations",
+            mode="mirror",
+        )
+    )
+    backup_file = backup_path
+    if backup_file is None:
+        backup_file = db_path.with_suffix(db_path.suffix + ".bak")
+    if db_path.exists():
+        backup_file.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(db_path, backup_file)
+
+    engine.initialize()
+    conn = engine.connect()
+    try:
+        _clear_engine_tables(conn)
+        counts = {
+            "tasks": 0,
+            "features": 0,
+            "transitions": 0,
+            "events": 0,
+            "metrics": 0,
+        }
+        for state in orchestrator.STATES:
+            for path in (repo_root / "queue" / state).glob("*.json"):
+                task = json.loads(path.read_text())
+                engine.upsert_task_from_fs(task, state=state, conn=conn)
+                counts["tasks"] += 1
+        for path in (repo_root / "state" / "features").glob("*.json"):
+            feature = json.loads(path.read_text())
+            engine.upsert_feature_from_fs(feature, conn=conn)
+            counts["features"] += 1
+        for row in orchestrator.read_transitions():
+            engine.record_transition(row, conn=conn)
+            counts["transitions"] += 1
+        for row in orchestrator.read_events():
+            engine.record_event(row, conn=conn)
+            counts["events"] += 1
+        for row in orchestrator.read_metrics():
+            engine.record_metric(row, conn=conn)
+            counts["metrics"] += 1
+        integrity = engine.integrity_check(conn=conn)
+        if integrity != "ok":
+            raise RuntimeError(f"integrity_check failed: {integrity}")
+        return {**counts, "integrity_check": integrity, "db_path": str(db_path), "backup_path": str(backup_file)}
+    except Exception:
+        if backup_file.exists():
+            shutil.copy2(backup_file, db_path)
+        raise
+    finally:
+        engine.close()
+
+
+def _clear_engine_tables(conn: sqlite3.Connection) -> None:
+    with conn:
+        for table in (
+            "artifacts",
+            "task_transitions",
+            "feature_children",
+            "self_repair_deliberations",
+            "self_repair_issues",
+            "tasks",
+            "features",
+            "metrics",
+            "events",
+        ):
+            conn.execute(f"DELETE FROM {table}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="migrate_fs_to_engine")
+    parser.add_argument("--repo-root", default=str(pathlib.Path(__file__).resolve().parent.parent))
+    parser.add_argument("--db-path", default=None)
+    parser.add_argument("--backup-path", default=None)
+    args = parser.parse_args(argv)
+
+    repo_root = pathlib.Path(args.repo_root).resolve()
+    db_path = pathlib.Path(args.db_path).resolve() if args.db_path else repo_root / "state" / "runtime" / "orchestrator.db"
+    backup_path = pathlib.Path(args.backup_path).resolve() if args.backup_path else None
+    print(json.dumps(migrate_from_fs(repo_root, db_path, backup_path=backup_path), sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

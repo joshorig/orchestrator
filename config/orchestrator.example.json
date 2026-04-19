@@ -33,6 +33,11 @@
   },
   "workflow_check_max_attempts": 8,
   "max_task_attempts": 5,
+  "state_engine": {
+    "mode": "off",
+    "path": "state/runtime/orchestrator.db",
+    "checkpoint_interval_sec": 300
+  },
   "workflow_repair_policy": "default",
   "review_policy": {
     "test_to_code_ratio": {

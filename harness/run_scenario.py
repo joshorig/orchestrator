@@ -1049,6 +1049,175 @@ def _run_self_repair_issue_backfill(repo_root, scenario):
         }
 
 
+def _run_state_engine_mirror(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    import os
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        queue_root = root / "queue"
+        runtime_dir = root / "state" / "runtime"
+        features_dir = root / "state" / "features"
+        for state in orchestrator.STATES:
+            (queue_root / state).mkdir(parents=True, exist_ok=True)
+        features_dir.mkdir(parents=True, exist_ok=True)
+        db_path = runtime_dir / "orchestrator.db"
+        old = {
+            "STATE_ROOT": orchestrator.STATE_ROOT,
+            "QUEUE_ROOT": orchestrator.QUEUE_ROOT,
+            "RUNTIME_DIR": orchestrator.RUNTIME_DIR,
+            "FEATURES_DIR": orchestrator.FEATURES_DIR,
+            "TRANSITIONS_LOG": orchestrator.TRANSITIONS_LOG,
+            "EVENTS_LOG": orchestrator.EVENTS_LOG,
+            "METRICS_LOG": orchestrator.METRICS_LOG,
+            "STATE_ENGINE_DB_PATH": orchestrator.STATE_ENGINE_DB_PATH,
+            "_STATE_ENGINE_CACHE": orchestrator._STATE_ENGINE_CACHE,
+            "_STATE_ENGINE_RECONCILE": orchestrator._STATE_ENGINE_RECONCILE,
+        }
+        old_env = {
+            "STATE_ENGINE_MODE": os.environ.get("STATE_ENGINE_MODE"),
+            "STATE_ENGINE_PATH": os.environ.get("STATE_ENGINE_PATH"),
+        }
+        orchestrator.STATE_ROOT = root
+        orchestrator.QUEUE_ROOT = queue_root
+        orchestrator.RUNTIME_DIR = runtime_dir
+        orchestrator.FEATURES_DIR = features_dir
+        orchestrator.TRANSITIONS_LOG = runtime_dir / "transitions.log"
+        orchestrator.EVENTS_LOG = runtime_dir / "events.jsonl"
+        orchestrator.METRICS_LOG = runtime_dir / "metrics.jsonl"
+        orchestrator.STATE_ENGINE_DB_PATH = db_path
+        orchestrator._STATE_ENGINE_CACHE = {"key": None, "engine": None}
+        orchestrator._STATE_ENGINE_RECONCILE = {"ts": 0.0, "active": False, "last": None}
+        os.environ["STATE_ENGINE_MODE"] = "mirror"
+        os.environ["STATE_ENGINE_PATH"] = str(db_path)
+        try:
+            for idx in range(int(scenario["write_count"])):
+                task = {
+                    "task_id": f"task-{idx:03d}",
+                    "engine": "codex",
+                    "role": "implementer",
+                    "project": "demo",
+                    "summary": f"task {idx}",
+                    "source": "scenario-35",
+                    "state": "queued",
+                    "blocker": None,
+                    "attempt": 1,
+                    "created_at": orchestrator.now_iso(),
+                    "claimed_at": None,
+                    "started_at": None,
+                    "finished_at": None,
+                }
+                orchestrator.write_json_atomic(orchestrator.task_path(task["task_id"], "queued"), task)
+            feature = {
+                "feature_id": scenario["feature_id"],
+                "project": "demo",
+                "status": "open",
+                "branch": f"feature/{scenario['feature_id']}",
+                "summary": "state engine mirror scenario",
+                "source": "scenario-35",
+                "created_at": orchestrator.now_iso(),
+                "child_task_ids": [f"task-{idx:03d}" for idx in range(int(scenario["write_count"]))],
+                "self_repair": {"enabled": False, "issues": []},
+            }
+            orchestrator.write_json_atomic(orchestrator.feature_path(scenario["feature_id"]), feature)
+            out = orchestrator.state_engine_reconcile()
+        finally:
+            orchestrator.STATE_ROOT = old["STATE_ROOT"]
+            orchestrator.QUEUE_ROOT = old["QUEUE_ROOT"]
+            orchestrator.RUNTIME_DIR = old["RUNTIME_DIR"]
+            orchestrator.FEATURES_DIR = old["FEATURES_DIR"]
+            orchestrator.TRANSITIONS_LOG = old["TRANSITIONS_LOG"]
+            orchestrator.EVENTS_LOG = old["EVENTS_LOG"]
+            orchestrator.METRICS_LOG = old["METRICS_LOG"]
+            orchestrator.STATE_ENGINE_DB_PATH = old["STATE_ENGINE_DB_PATH"]
+            orchestrator._STATE_ENGINE_CACHE = old["_STATE_ENGINE_CACHE"]
+            orchestrator._STATE_ENGINE_RECONCILE = old["_STATE_ENGINE_RECONCILE"]
+            if old_env["STATE_ENGINE_MODE"] is None:
+                os.environ.pop("STATE_ENGINE_MODE", None)
+            else:
+                os.environ["STATE_ENGINE_MODE"] = old_env["STATE_ENGINE_MODE"]
+            if old_env["STATE_ENGINE_PATH"] is None:
+                os.environ.pop("STATE_ENGINE_PATH", None)
+            else:
+                os.environ["STATE_ENGINE_PATH"] = old_env["STATE_ENGINE_PATH"]
+        return {
+            "queue_queued_db": out["queue"]["queued"]["db"],
+            "queue_queued_fs": out["queue"]["queued"]["fs"],
+            "queue_queued_diff": out["queue"]["queued"]["diff"],
+            "features_db": out["features"]["db"],
+            "features_fs": out["features"]["fs"],
+            "features_diff": out["features"]["diff"],
+            "integrity_check": out["integrity_check"],
+        }
+
+
+def _run_fs_to_engine_migration(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    migrate = _load_module("migrate_fs_to_engine", repo_root / "bin" / "migrate_fs_to_engine.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        for state in orchestrator.STATES:
+            (root / "queue" / state).mkdir(parents=True, exist_ok=True)
+        (root / "state" / "features").mkdir(parents=True, exist_ok=True)
+        (root / "state" / "runtime").mkdir(parents=True, exist_ok=True)
+        (root / "state" / "migrations").mkdir(parents=True, exist_ok=True)
+        (root / "bin").mkdir(parents=True, exist_ok=True)
+        (root / "config").mkdir(parents=True, exist_ok=True)
+        shutil_copy = __import__("shutil").copy2
+        shutil_copy(repo_root / "bin" / "orchestrator.py", root / "bin" / "orchestrator.py")
+        shutil_copy(repo_root / "bin" / "state_engine.py", root / "bin" / "state_engine.py")
+        shutil_copy(repo_root / "bin" / "migrate_fs_to_engine.py", root / "bin" / "migrate_fs_to_engine.py")
+        shutil_copy(repo_root / "state" / "migrations" / "0001_initial.sql", root / "state" / "migrations" / "0001_initial.sql")
+        if (repo_root / "state" / "migrations" / "0002_aux_runtime_logs.sql").exists():
+            shutil_copy(repo_root / "state" / "migrations" / "0002_aux_runtime_logs.sql", root / "state" / "migrations" / "0002_aux_runtime_logs.sql")
+        shutil_copy(repo_root / "config" / "orchestrator.example.json", root / "config" / "orchestrator.example.json")
+        task = {
+            "task_id": "task-36",
+            "engine": "codex",
+            "role": "implementer",
+            "project": "demo",
+            "summary": "migrate task",
+            "source": "scenario-36",
+            "state": "queued",
+            "blocker": None,
+            "attempt": 1,
+            "created_at": "2026-04-19T19:10:00",
+            "claimed_at": None,
+            "started_at": None,
+            "finished_at": None,
+        }
+        (root / "queue" / "queued" / "task-36.json").write_text(json.dumps(task, indent=2, sort_keys=True))
+        feature = {
+            "feature_id": "feature-36",
+            "project": "demo",
+            "status": "open",
+            "summary": "migrate feature",
+            "source": "scenario-36",
+            "created_at": "2026-04-19T19:10:00",
+            "child_task_ids": ["task-36"],
+            "self_repair": {"enabled": True, "issues": [{"issue_key": "issue-36", "status": "pending"}]},
+        }
+        (root / "state" / "features" / "feature-36.json").write_text(json.dumps(feature, indent=2, sort_keys=True))
+        (root / "state" / "runtime" / "transitions.log").write_text(
+            "2026-04-19T19:10:00\ttask-36\tnew\t->\tqueued\tscenario-36\n"
+        )
+        (root / "state" / "runtime" / "events.jsonl").write_text(
+            json.dumps({"ts": "2026-04-19T19:10:01", "role": "implementer", "event": "task_enqueued", "task_id": "task-36", "feature_id": "feature-36", "details": {}}, sort_keys=True) + "\n"
+        )
+        (root / "state" / "runtime" / "metrics.jsonl").write_text(
+            json.dumps({"ts": "2026-04-19T19:10:02", "name": "task.enqueued", "type": "counter", "value": 1, "tags": {}, "source": "scenario-36"}, sort_keys=True) + "\n"
+        )
+        out = migrate.migrate_from_fs(root, root / "state" / "runtime" / "orchestrator.db")
+        return {
+            "tasks": out["tasks"],
+            "features": out["features"],
+            "transitions": out["transitions"],
+            "events": out["events"],
+            "metrics": out["metrics"],
+            "integrity_check": out["integrity_check"],
+        }
+
+
 def main(argv):
     if len(argv) != 2:
         raise SystemExit("usage: harness/run_scenario.py <scenario-dir>")
@@ -1087,6 +1256,10 @@ def main(argv):
         actual = _run_qa_contract_full_tick(repo_root, scenario)
     elif kind == "self_repair_issue_backfill":
         actual = _run_self_repair_issue_backfill(repo_root, scenario)
+    elif kind == "state_engine_mirror":
+        actual = _run_state_engine_mirror(repo_root, scenario)
+    elif kind == "fs_to_engine_migration":
+        actual = _run_fs_to_engine_migration(repo_root, scenario)
     else:
         raise SystemExit(f"unknown scenario kind: {kind}")
 

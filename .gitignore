@@ -12,6 +12,10 @@ braid/index.json
 logs/
 queue/
 state/
+!state/
+state/*
+!state/migrations/
+!state/migrations/*.sql
 artifacts/
 reports/
 telegram/inbox/
