@@ -130,17 +130,54 @@ def _claude_budget_exhausted(text):
 def _pause_claude_slot_if_needed(reason, *, task=None):
     if not _claude_budget_exhausted(reason):
         return False
+    lane = _claude_budget_lane(task)
     detail = f"Claude budget exhausted while handling {task.get('task_id') if task else '-'}: {reason[:180]}"
     o.set_slot_paused("claude", True, reason=detail, source="worker")
+    o.append_metric(
+        "claude.budget_exhausted",
+        1,
+        metric_type="counter",
+        tags={
+            "lane": lane,
+            "project": (task or {}).get("project") or "",
+            "role": (task or {}).get("role") or "",
+            "mode": ((task or {}).get("engine_args") or {}).get("mode") or "",
+        },
+        source="worker",
+    )
     if task:
         o.append_event(
             "worker",
             "slot_paused_budget_exhausted",
             task_id=task.get("task_id"),
             feature_id=task.get("feature_id"),
-            details={"slot": "claude", "reason": detail},
+            details={"slot": "claude", "lane": lane, "reason": detail},
         )
     return True
+
+
+def _claude_budget_flag(kind, *, cfg, task=None, mode=None):
+    return f"{o.claude_budget_usd(kind, cfg=cfg, task=task, mode=mode):.2f}"
+
+
+def _claude_budget_lane(task):
+    if not task:
+        return "unknown"
+    mode = ((task.get("engine_args") or {}).get("mode") or "").strip()
+    role = (task.get("role") or "").strip()
+    if mode == "self-repair-plan":
+        return "self_repair"
+    if mode == "memory-synthesis":
+        return "memory_synthesis"
+    if mode == "template-refine":
+        return "template_refine"
+    if mode == "template-gen":
+        return "template_gen"
+    if role == "reviewer":
+        return "review"
+    if role == "planner":
+        return "planner"
+    return "claude_default"
 
 
 def block_task(task_id, from_state, reason, *, blocker_code, summary=None, detail=None, retryable=True, mutator=None):
@@ -1509,7 +1546,7 @@ def run_claude_memory_synthesis(task, cfg, timeout, log_path):
         "--system-prompt", system_prompt,
         "--output-format", "text",
         "--model", "sonnet",
-        "--max-budget-usd", "1.00",
+        "--max-budget-usd", _claude_budget_flag("memory_synthesis", cfg=cfg, task=task),
         "--no-session-persistence",
     ]
 
@@ -1854,7 +1891,7 @@ def _run_review_agent(kind, *, prompt, worktree, timeout, logf, last_msg_path):
             "--dangerously-skip-permissions",
             "--output-format", "text",
             "--model", "sonnet",
-            "--max-budget-usd", "1.00",
+            "--max-budget-usd", _claude_budget_flag("review", cfg=o.load_config()),
             "--no-session-persistence",
         ]
         cwd = str(worktree)
@@ -2120,7 +2157,7 @@ def run_claude_template_gen(task, cfg, task_type, timeout, log_path):
         "--system-prompt", gen_system,
         "--output-format", "text",
         "--model", "opus",
-        "--max-budget-usd", "2.00" if planner_mode == "self-repair-plan" else "1.00",
+        "--max-budget-usd", _claude_budget_flag("template_gen", cfg=cfg, task=task, mode=planner_mode),
         "--no-session-persistence",
     ]
 
@@ -2131,7 +2168,7 @@ def run_claude_template_gen(task, cfg, task_type, timeout, log_path):
 
     with log_path.open("w") as logf:
         logf.write(f"# claude template-gen task={task_id} task_type={task_type}\n")
-        logf.write(f"# model: opus\n# max_budget_usd: 1.00\n\n")
+        logf.write(f"# model: opus\n# max_budget_usd: {_claude_budget_flag('template_gen', cfg=cfg, task=task, mode=planner_mode)}\n\n")
         logf.flush()
         try:
             proc = _run_bounded(
@@ -2230,7 +2267,7 @@ def run_claude_template_refine(task, cfg, task_type, timeout, log_path):
         "--system-prompt", gen_system,
         "--output-format", "text",
         "--model", "opus",
-        "--max-budget-usd", "1.00",
+        "--max-budget-usd", _claude_budget_flag("template_refine", cfg=cfg, task=task),
         "--no-session-persistence",
     ]
 
@@ -2550,7 +2587,7 @@ def _run_self_repair_council(
         "--system-prompt", system_prompt,
         "--output-format", "text",
         "--model", model,
-        "--max-budget-usd", "1.00",
+        "--max-budget-usd", _claude_budget_flag("review", cfg=o.load_config(), task=task),
         "--no-session-persistence",
     ]
     proc = _run_bounded(
@@ -3143,7 +3180,7 @@ def run_claude_planner(task, cfg, timeout, log_path):
         "--system-prompt", system_prompt,
         "--output-format", "text",
         "--model", "opus" if planner_mode == "self-repair-plan" else "sonnet",
-        "--max-budget-usd", "1.00",
+        "--max-budget-usd", _claude_budget_flag("planner", cfg=cfg, task=task, mode=planner_mode),
         "--disallowedTools", "Bash,Read,Write,Edit,Grep,Glob,Agent,WebFetch,WebSearch",
         "--no-session-persistence",
     ]

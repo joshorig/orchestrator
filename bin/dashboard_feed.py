@@ -7,6 +7,7 @@ import json
 import os
 import pathlib
 import sys
+import datetime as dt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import orchestrator as o  # noqa: E402
@@ -109,6 +110,58 @@ def _recent_transitions():
     return rows
 
 
+def _claude_budget():
+    cfg = o.load_config()
+    budgets = cfg.get("budgets") or {}
+    configured = {
+        "ask": float(budgets.get("ask_usd", o.claude_budget_usd("ask", cfg=cfg))),
+        "review": float(budgets.get("review_usd", o.claude_budget_usd("review", cfg=cfg))),
+        "planner": float(budgets.get("planner_usd", o.claude_budget_usd("planner", cfg=cfg))),
+        "template_gen": float(budgets.get("template_gen_usd", o.claude_budget_usd("template_gen", cfg=cfg))),
+        "template_refine": float(budgets.get("template_refine_usd", o.claude_budget_usd("template_refine", cfg=cfg))),
+        "memory_synthesis": float(budgets.get("memory_synthesis_usd", o.claude_budget_usd("memory_synthesis", cfg=cfg))),
+        "self_repair": float(budgets.get("self_repair_usd", o.claude_budget_usd("planner", cfg=cfg, mode="self-repair-plan"))),
+    }
+    since = dt.datetime.now() - dt.timedelta(hours=24)
+    counts = {}
+    recent = []
+    for row in o.read_metrics(name="claude.budget_exhausted", limit=500):
+        try:
+            ts = dt.datetime.fromisoformat(row.get("ts") or "")
+        except ValueError:
+            continue
+        if ts.tzinfo is not None:
+            ts = ts.astimezone().replace(tzinfo=None)
+        if ts < since:
+            continue
+        tags = row.get("tags") or {}
+        lane = tags.get("lane") or "unknown"
+        counts[lane] = counts.get(lane, 0) + int(row.get("value", 0) or 0)
+        recent.append(
+            {
+                "ts": row.get("ts"),
+                "lane": lane,
+                "project": tags.get("project") or "",
+                "role": tags.get("role") or "",
+            }
+        )
+    return {
+        "configured": configured,
+        "hits_24h": counts,
+        "recent_hits": recent[-12:],
+    }
+
+
+def _dashboard_server():
+    cfg = o.dashboard_server_config()
+    return {
+        "host": cfg["host"],
+        "port": cfg["port"],
+        "allowed_cidrs": list(cfg["allowed_cidrs"]),
+        "dashboard_url": f"http://{cfg['host']}:{cfg['port']}/",
+    }
+
+
 def build_feed():
     return {
         "timestamp": o.now_iso(),
@@ -118,6 +171,8 @@ def build_feed():
         "features": _features(),
         "blocker_codes": _blocker_codes(),
         "recent_transitions": _recent_transitions(),
+        "claude_budget": _claude_budget(),
+        "dashboard_server": _dashboard_server(),
     }
 
 

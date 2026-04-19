@@ -21,6 +21,7 @@ import errno
 import fcntl
 import gzip
 import hashlib
+import ipaddress
 import json
 import os
 import pathlib
@@ -74,6 +75,7 @@ BRAID_TEMPLATES = BRAID_DIR / "templates"
 BRAID_GENERATORS = BRAID_DIR / "generators"
 BRAID_INDEX = BRAID_DIR / "index.json"
 DASHBOARD_FEED_PATH = RUNTIME_DIR / "dashboard-feed.json"
+DASHBOARD_HTML_PATH = STATE_ROOT / "orchestrator-dashboard.html"
 BRAID_NODE_DEF_RE = re.compile(r"(?P<node>[A-Za-z_][A-Za-z0-9_]*)\s*(?P<shape>\[[^\]\n]*\]|\{[^\}\n]*\})")
 BRAID_EDGE_START_RE = re.compile(r"^\s*(?P<node>[A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]\n]*\]|\{[^\}\n]*\})?")
 BRAID_EDGE_END_RE = re.compile(r"(?P<node>[A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]\n]*\]|\{[^\}\n]*\})?\s*;?\s*$")
@@ -522,6 +524,28 @@ CONFIG_DEFAULTS = {
     "telegram": {
         "card_limit": 600,
         "full_message_limit": 6000,
+    },
+    "dashboard": {
+        "host": "127.0.0.1",
+        "port": 8765,
+        "allowed_cidrs": (
+            "127.0.0.0/8",
+            "::1/128",
+            "10.0.0.0/8",
+            "172.16.0.0/12",
+            "192.168.0.0/16",
+            "100.64.0.0/10",
+        ),
+    },
+    "budgets": {
+        "claude_default_usd": 0.50,
+        "ask_usd": 0.50,
+        "review_usd": 1.00,
+        "planner_usd": 1.00,
+        "template_gen_usd": 1.00,
+        "template_refine_usd": 1.00,
+        "memory_synthesis_usd": 1.00,
+        "self_repair_usd": 2.00,
     },
     "reviews": {
         "self_review": True,
@@ -1102,6 +1126,52 @@ def load_config():
         else:
             data.setdefault(key, value)
     return data
+
+
+def claude_budget_usd(kind="claude_default", *, cfg=None, task=None, mode=None):
+    cfg = cfg or load_config()
+    budgets = cfg.get("budgets") or {}
+    slots = cfg.get("slots") or {}
+    claude_slot = slots.get("claude") or {}
+    fallback = float(
+        budgets.get("claude_default_usd", claude_slot.get("max_budget_usd", CONFIG_DEFAULTS["budgets"]["claude_default_usd"]))
+        or CONFIG_DEFAULTS["budgets"]["claude_default_usd"]
+    )
+    if mode == "self-repair-plan":
+        return float(budgets.get("self_repair_usd", fallback) or fallback)
+    if task is not None:
+        engine_args = task.get("engine_args") or {}
+        if engine_args.get("max_budget_usd") is not None:
+            return float(engine_args.get("max_budget_usd"))
+    key = f"{kind}_usd"
+    return float(budgets.get(key, fallback) or fallback)
+
+
+def dashboard_server_config(*, cfg=None):
+    cfg = cfg or load_config()
+    dashboard = cfg.get("dashboard") or {}
+    defaults = CONFIG_DEFAULTS["dashboard"]
+    return {
+        "host": str(dashboard.get("host", defaults["host"]) or defaults["host"]),
+        "port": int(dashboard.get("port", defaults["port"]) or defaults["port"]),
+        "allowed_cidrs": tuple(dashboard.get("allowed_cidrs", defaults["allowed_cidrs"]) or defaults["allowed_cidrs"]),
+    }
+
+
+def dashboard_client_allowed(client_ip, *, cfg=None):
+    cfg = cfg or load_config()
+    allowed_cidrs = dashboard_server_config(cfg=cfg)["allowed_cidrs"]
+    try:
+        addr = ipaddress.ip_address(client_ip)
+    except ValueError:
+        return False
+    for cidr in allowed_cidrs:
+        try:
+            if addr in ipaddress.ip_network(cidr, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 def load_context_sources():
@@ -9595,7 +9665,7 @@ def _claude_investigation_answer(question, context_text):
                 "--system-prompt", system_prompt,
                 "--output-format", "text",
                 "--model", "sonnet",
-                "--max-budget-usd", "0.50",
+                "--max-budget-usd", f"{claude_budget_usd('ask'):.2f}",
                 "--disallowedTools", "Bash,Read,Write,Edit,Grep,Glob,Agent,WebFetch,WebSearch",
                 "--no-session-persistence",
             ],

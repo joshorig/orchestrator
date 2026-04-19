@@ -244,6 +244,7 @@ The orchestrator is launchd-driven. All plists live in `~/Library/LaunchAgents/c
 | `feature-finalize` | StartInterval=600 | Opens feature->main PRs |
 | `workflow-check` | StartInterval=1800 | Diagnoses blocked feature workflows, reports to Telegram, attempts bounded self-heal |
 | `dashboard-feed` | StartInterval=5 | Writes `state/runtime/dashboard-feed.json` for the live dashboard |
+| `dashboard-server` | KeepAlive | Serves the dashboard/feed over a private network or Tailscale |
 | `canary-workflows` | StartInterval=21600 | Enqueues one synthetic end-to-end canary feature when due |
 | `cleanup-worktrees` | StartInterval=3600s | Removes worktrees + local branches for merged/closed PRs |
 | `regression` | Weekly (lvc-standard) | Full JMH sweep under exclusive project lock |
@@ -354,9 +355,17 @@ The runtime now emits structured metric rows to `state/runtime/metrics.jsonl`. `
 
 ## Dashboard
 
-`bin/dashboard_feed.py` writes `state/runtime/dashboard-feed.json` for the live dashboard. Open [orchestrator-dashboard.html](orchestrator-dashboard.html) through any static file server rooted at the repo and it will poll that feed every 5 seconds.
+`bin/dashboard_feed.py` writes `state/runtime/dashboard-feed.json` for the live dashboard. `bin/dashboard_server.py` serves [orchestrator-dashboard.html](orchestrator-dashboard.html) and the feed directly.
 
 For launchd installs, use [launchd/com.devmini.orchestrator.dashboard-feed.plist](launchd/com.devmini.orchestrator.dashboard-feed.plist) as the tracked template for the 5-second feed writer job.
+
+For private-network / Tailscale access, use [launchd/com.devmini.orchestrator.dashboard-server.plist](launchd/com.devmini.orchestrator.dashboard-server.plist) as the tracked server job template. The server defaults to `127.0.0.1:8765`, and the runtime config supports:
+
+- `dashboard.host`
+- `dashboard.port`
+- `dashboard.allowed_cidrs`
+
+The default allowlist includes loopback, RFC1918 private ranges, and Tailscale’s CGNAT range `100.64.0.0/10`. To view the dashboard from a phone over Tailscale, set `dashboard.host` to either `0.0.0.0` or the machine’s Tailscale IP in local config, keep the CIDR allowlist in place, then load the dashboard-server plist.
 
 ## Review gates
 

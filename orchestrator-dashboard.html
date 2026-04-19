@@ -99,12 +99,20 @@
     </div>
     <div class="list">
       <div class="card">
+        <p class="section-title">Dashboard Server</p>
+        <div class="list" id="dashboardServer"></div>
+      </div>
+      <div class="card">
         <p class="section-title">Queue</p>
         <div class="list" id="queue"></div>
       </div>
       <div class="card">
         <p class="section-title">Blockers</p>
         <div class="list" id="blockers"></div>
+      </div>
+      <div class="card">
+        <p class="section-title">Claude Budget</p>
+        <div class="list" id="claudeBudget"></div>
       </div>
       <div class="card">
         <p class="section-title">Recent Transitions</p>
@@ -164,6 +172,37 @@
       document.getElementById("blockers").innerHTML = data.blocker_codes.length ? data.blocker_codes.map(row => `
         <div class="row"><strong>${esc(row.code)}</strong> <span class="accent">${esc(row.count)}</span> <span class="muted">${esc(row.pct_of_blocked)}%</span></div>
       `).join("") : `<div class="muted">No blocked tasks.</div>`;
+
+      const server = data.dashboard_server || {};
+      document.getElementById("dashboardServer").innerHTML = `
+        <div class="row">
+          <div><strong>${esc(server.dashboard_url || "-")}</strong></div>
+          <div class="muted">bind ${esc(server.host || "-")}:${esc(server.port || "-")}</div>
+        </div>
+        <div class="row">
+          <div><strong>Allowed CIDRs</strong></div>
+          <div class="muted">${esc((server.allowed_cidrs || []).join(", "))}</div>
+        </div>
+      `;
+
+      const configured = data.claude_budget.configured || {};
+      const hits = data.claude_budget.hits_24h || {};
+      const lanes = Object.keys(configured);
+      document.getElementById("claudeBudget").innerHTML = lanes.map(lane => `
+        <div class="row">
+          <div><strong>${esc(lane)}</strong> <span class="accent">$${esc(configured[lane].toFixed ? configured[lane].toFixed(2) : configured[lane])}</span></div>
+          <div class="muted">24h cap hits: ${esc(hits[lane] || 0)}</div>
+        </div>
+      `).join("") + (
+        data.claude_budget.recent_hits.length
+          ? data.claude_budget.recent_hits.slice(-4).reverse().map(hit => `
+            <div class="row">
+              <div><strong>${esc(hit.lane)}</strong> · ${esc(hit.project || hit.role || "-")}</div>
+              <div class="muted">${esc(hit.ts)}</div>
+            </div>
+          `).join("")
+          : `<div class="muted">No budget-cap hits in the last 24h.</div>`
+      );
 
       document.getElementById("transitions").innerHTML = data.recent_transitions.length ? data.recent_transitions.slice(-8).reverse().map(row => `
         <div class="row">

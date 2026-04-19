@@ -4,6 +4,28 @@
     "codex": { "timeout_sec": 7200 },
     "qa": { "timeout_sec": 1800 }
   },
+  "budgets": {
+    "claude_default_usd": 0.5,
+    "ask_usd": 0.5,
+    "review_usd": 1.0,
+    "planner_usd": 1.0,
+    "template_gen_usd": 1.0,
+    "template_refine_usd": 1.0,
+    "memory_synthesis_usd": 1.0,
+    "self_repair_usd": 2.0
+  },
+  "dashboard": {
+    "host": "127.0.0.1",
+    "port": 8765,
+    "allowed_cidrs": [
+      "127.0.0.0/8",
+      "::1/128",
+      "10.0.0.0/8",
+      "172.16.0.0/12",
+      "192.168.0.0/16",
+      "100.64.0.0/10"
+    ]
+  },
   "concurrency": {
     "coding_workers": 1,
     "review_workers": 1,
