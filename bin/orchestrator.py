@@ -6444,6 +6444,39 @@ def _active_self_repair_feature(project_name="devmini-orchestrator"):
     return rows[0] if rows else None
 
 
+def _normalize_self_repair_issue(issue, *, cfg=None):
+    issue = issue or {}
+    changed = False
+    normalized_attempts = int(issue.get("attempts") or 0)
+    if issue.get("attempts") != normalized_attempts:
+        issue["attempts"] = normalized_attempts
+        changed = True
+    normalized_max_attempts = int(issue.get("max_attempts") or self_repair_issue_max_attempts(cfg=cfg))
+    if issue.get("max_attempts") != normalized_max_attempts:
+        issue["max_attempts"] = normalized_max_attempts
+        changed = True
+    if "execution_task_ids" not in issue or issue.get("execution_task_ids") is None:
+        issue["execution_task_ids"] = []
+        changed = True
+    if "superseded_task_ids" not in issue or issue.get("superseded_task_ids") is None:
+        issue["superseded_task_ids"] = []
+        changed = True
+    return changed
+
+
+def _normalize_self_repair_feature_issues(feature_id, *, cfg=None):
+    changed = False
+
+    def mut(feature):
+        nonlocal changed
+        issues = ((feature.setdefault("self_repair", {})).setdefault("issues", []))
+        for issue in issues:
+            changed = _normalize_self_repair_issue(issue, cfg=cfg) or changed
+
+    updated = update_feature(feature_id, mut)
+    return updated, changed
+
+
 def _self_repair_issue_key(*, issue_key=None, issue_kind="runtime_bug", summary="", evidence="", source="manual"):
     if issue_key:
         return str(issue_key)
@@ -6566,9 +6599,14 @@ def tick_self_repair_resolution():
     resolved = 0
     stalled = 0
     changed_features = []
+    cfg = load_config()
     for feature in list_features():
         if feature.get("status") not in ("open", "finalizing"):
             continue
+        if is_self_repair_feature(feature):
+            feature, normalized = _normalize_self_repair_feature_issues(feature["feature_id"], cfg=cfg)
+            if normalized and feature["feature_id"] not in changed_features:
+                changed_features.append(feature["feature_id"])
         issues = ((feature.get("self_repair") or {}).get("issues") or [])
         mutated = False
         for issue in issues:
@@ -6960,9 +6998,11 @@ def tick_self_repair_queue():
     scheduled = []
     lock_fh = acquire_lock("self-repair.lock", mode="exclusive", timeout_sec=10)
     try:
+        cfg = load_config()
         active = _active_self_repair_feature()
         if not active or active.get("status") != "open":
             return {"scheduled": 0, "feature_id": (active or {}).get("feature_id")}
+        active, _ = _normalize_self_repair_feature_issues(active["feature_id"], cfg=cfg)
         if _self_repair_has_active_work(active):
             return {"scheduled": 0, "feature_id": active["feature_id"], "reason": "feature_busy"}
         pending = [issue for issue in _self_repair_pending_issues(active) if not _self_repair_issue_live(issue)]
@@ -6972,7 +7012,7 @@ def tick_self_repair_queue():
         escalated = 0
         for issue in pending:
             attempts = int(issue.get("attempts") or 0)
-            max_attempts = int(issue.get("max_attempts") or self_repair_issue_max_attempts())
+            max_attempts = int(issue.get("max_attempts") or self_repair_issue_max_attempts(cfg=cfg))
             if attempts >= max_attempts:
                 _self_repair_mark_issue(
                     active["feature_id"],

@@ -1,0 +1,9 @@
+{
+  "scheduled": 1,
+  "legacy_attempts": 0,
+  "legacy_max_attempts": 3,
+  "legacy_execution_task_ids": [],
+  "legacy_superseded_task_ids": [],
+  "new_attempts": 0,
+  "new_max_attempts": 3
+}

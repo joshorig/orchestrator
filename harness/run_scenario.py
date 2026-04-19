@@ -993,6 +993,62 @@ def _run_qa_contract_full_tick(repo_root, scenario):
         }
 
 
+def _run_self_repair_issue_backfill(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        feats = root / "features"
+        feats.mkdir()
+        queue_root = root / "queue"
+        for state in orchestrator.STATES:
+            (queue_root / state).mkdir(parents=True, exist_ok=True)
+        old = {
+            "FEATURES_DIR": orchestrator.FEATURES_DIR,
+            "QUEUE_ROOT": orchestrator.QUEUE_ROOT,
+            "load_config": orchestrator.load_config,
+            "append_event": orchestrator.append_event,
+            "append_transition": orchestrator.append_transition,
+        }
+        orchestrator.FEATURES_DIR = feats
+        orchestrator.QUEUE_ROOT = queue_root
+        orchestrator.load_config = lambda: {
+            "projects": [{"name": "devmini-orchestrator", "path": str(root / "orchestrator")}],
+            "synthetic_canary": {"enabled": False},
+            "self_repair_issue_max_attempts": 3,
+        }
+        orchestrator.append_event = lambda *args, **kwargs: None
+        orchestrator.append_transition = lambda *args, **kwargs: None
+        try:
+            feature = {
+                "feature_id": scenario["feature_id"],
+                "project": "devmini-orchestrator",
+                "status": "open",
+                "self_repair": {
+                    "enabled": True,
+                    "issues": [
+                        {"issue_key": "legacy-false", "status": "pending"},
+                        {"issue_key": "new-env", "status": "pending", "attempts": 0, "max_attempts": 3},
+                    ],
+                },
+            }
+            orchestrator.write_json_atomic(feats / f"{scenario['feature_id']}.json", feature)
+            queue_out = orchestrator.tick_self_repair_queue()
+            saved = orchestrator.read_json(feats / f"{scenario['feature_id']}.json", {})
+        finally:
+            for key, value in old.items():
+                setattr(orchestrator, key, value)
+        issues = {row["issue_key"]: row for row in saved["self_repair"]["issues"]}
+        return {
+            "scheduled": queue_out.get("scheduled"),
+            "legacy_attempts": issues["legacy-false"].get("attempts"),
+            "legacy_max_attempts": issues["legacy-false"].get("max_attempts"),
+            "legacy_execution_task_ids": issues["legacy-false"].get("execution_task_ids"),
+            "legacy_superseded_task_ids": issues["legacy-false"].get("superseded_task_ids"),
+            "new_attempts": issues["new-env"].get("attempts"),
+            "new_max_attempts": issues["new-env"].get("max_attempts"),
+        }
+
+
 def main(argv):
     if len(argv) != 2:
         raise SystemExit("usage: harness/run_scenario.py <scenario-dir>")
@@ -1029,6 +1085,8 @@ def main(argv):
         actual = _run_qa_contract_scoped(repo_root, scenario)
     elif kind == "qa_contract_full_tick":
         actual = _run_qa_contract_full_tick(repo_root, scenario)
+    elif kind == "self_repair_issue_backfill":
+        actual = _run_self_repair_issue_backfill(repo_root, scenario)
     else:
         raise SystemExit(f"unknown scenario kind: {kind}")
 
