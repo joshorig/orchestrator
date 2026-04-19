@@ -1418,6 +1418,8 @@ def project_environment_blockers(project_name, *, refresh=False):
     for issue in environment_health(refresh=refresh).get("issues", []):
         if issue.get("severity") != "error":
             continue
+        if issue.get("project") is None and issue.get("summary") == "telegram bot token unavailable":
+            continue
         if issue.get("project") in (None, project_name):
             rows.append(issue)
     return rows
