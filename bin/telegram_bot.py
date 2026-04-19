@@ -97,9 +97,9 @@ def workflow_check_fingerprint(body):
 
 
 def build_handlers(cfg):
-    from telegram import Update
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
     from telegram.constants import ParseMode
-    from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+    from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters, ContextTypes
 
     bootstrap_allowed = set(int(x) for x in cfg["allowed_chat_ids"])
 
@@ -119,15 +119,15 @@ def build_handlers(cfg):
             return await handler(update, ctx, text)
         return inner
 
-    async def send_html(update, text):
+    async def send_html(update, text, *, reply_markup=None):
         """reply_text with HTML parse mode + tag-strip fallback on parser errors."""
         try:
-            await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
+            await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
         except Exception as exc:
             log.warning("html reply failed: %s — retrying plain", exc)
             try:
                 plain = re.sub(r"<[^>]+>", "", text)
-                await update.effective_message.reply_text(plain)
+                await update.effective_message.reply_text(plain, reply_markup=reply_markup)
             except Exception as exc2:
                 log.warning("plain retry also failed: %s", exc2)
 
@@ -135,50 +135,126 @@ def build_handlers(cfg):
         """Multi-line structured response: bold header + monospace body."""
         return f"<b>{emoji} {html_escape(title)}</b>\n<pre>{html_escape(body)}</pre>"
 
-    async def send_block_chunked(update, emoji, title, body, body_limit=3000):
-        body = body or ""
-        parts = list(chunks(body, body_limit)) or [""]
-        total = len(parts)
-        for idx, part in enumerate(parts, start=1):
-            chunk_title = title if total == 1 else f"{title} ({idx}/{total})"
-            await send_html(update, block(emoji, chunk_title, part))
+    async def send_to_chat(chat_id, text, *, reply_markup=None):
+        try:
+            await app.bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+        except Exception as exc:
+            log.warning("send failed to %s: %s", chat_id, exc)
 
-    async def cmd_status(update, ctx, text):
-        await send_html(update, block("📊", "status", o.status_text()))
+    def keyboard(rows):
+        return InlineKeyboardMarkup(
+            [[InlineKeyboardButton(label, callback_data=data) for label, data in row] for row in rows if row]
+        )
+
+    async def send_card(update, emoji, title, body, *, buttons=None):
+        await send_html(update, block(emoji, title, body), reply_markup=(keyboard(buttons) if buttons else None))
+
+    async def send_or_reply(update, text, *, buttons=None):
+        if update is not None:
+            await send_html(update, text, reply_markup=(keyboard(buttons) if buttons else None))
+            return
+        for chat_id in sorted(current_allowed()):
+            await send_to_chat(chat_id, text, reply_markup=(keyboard(buttons) if buttons else None))
+
+    def feature_buttons(feature):
+        frontier = (feature.get("frontier") or {}).get("task_id")
+        fid = feature.get("feature_id")
+        first_row = []
+        if frontier:
+            first_row.append(("Force retry", f"action:{frontier}:retry"))
+            first_row.append(("Abandon", f"action:{frontier}:abandon"))
+        rows = [first_row] if first_row else []
+        rows.append([("Open council", f"council:{fid}")])
+        return rows
+
+    async def cmd_health(update, ctx, text):
+        await send_card(update, "🟢", "health", o.health_snapshot(), buttons=[[("Features", "cmd:/features"), ("Queue", "cmd:/queue")]])
+
+    async def cmd_features(update, ctx, text):
+        parts = text.split(maxsplit=1)
+        project = parts[1].strip() if len(parts) > 1 else None
+        body = o.features_brief(project)
+        buttons = None
+        workflows = o.open_feature_workflow_summaries(project_name=project)
+        if workflows:
+            buttons = feature_buttons(workflows[0])
+        await send_card(update, "🧩", "features", body, buttons=buttons)
 
     async def cmd_queue(update, ctx, text):
-        body = o.dispatch_telegram_command("/queue")
-        await send_html(update, block("📋", "queue", body))
-
-    async def cmd_tasks(update, ctx, text):
-        body = o.dispatch_telegram_command("/tasks")
-        await send_html(update, block("🏃", "tasks", body))
-
-    async def cmd_task(update, ctx, text):
-        body = o.dispatch_telegram_command(text)
-        await send_html(update, block("🔎", "task", body))
+        parts = text.split(maxsplit=1)
+        state = parts[1].strip() if len(parts) > 1 else None
+        await send_card(update, "📋", "queue", o.queue_brief(state))
 
     async def cmd_planner(update, ctx, text):
-        o.tick_planner()
-        await send_html(update, "✅ <b>planner</b> tick complete")
+        parts = text.split()
+        if len(parts) == 1:
+            await send_card(update, "🗺️", "planner", o.planner_status_text())
+            return
+        project = parts[1].strip()
+        action = parts[2].strip().lower() if len(parts) > 2 else "status"
+        if action == "status":
+            await send_card(update, "🗺️", "planner", o.planner_status_text(project_filter=project))
+            return
+        if action == "run":
+            o.tick_planner()
+            await send_html(update, f"✅ <b>planner</b> tick queued for <code>{html_escape(project)}</code>")
+            return
+        if action == "on":
+            o.set_planner_disabled(project, False)
+            await send_html(update, f"✅ planner enabled for <code>{html_escape(project)}</code>")
+            return
+        if action == "off":
+            o.set_planner_disabled(project, True, reason="telegram operator request")
+            await send_html(update, f"✅ planner disabled for <code>{html_escape(project)}</code>")
+            return
+        await send_html(update, "❌ usage: <code>/planner &lt;project&gt; [on|off|status|run]</code>")
 
-    async def cmd_reviewer(update, ctx, text):
-        o.tick_reviewer()
-        await send_html(update, "✅ <b>reviewer</b> tick complete")
+    async def cmd_tick(update, ctx, text):
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            await send_html(update, "❌ usage: <code>/tick [worker|reviewer|qa|canary]</code>")
+            return
+        target = parts[1].strip().lower()
+        if target == "worker":
+            out = o._nudge_idle_queued_workers()
+            await send_html(update, block("⚙️", "tick worker", json.dumps(out, sort_keys=True) if out else "no idle workers nudged"))
+            return
+        if target == "reviewer":
+            o.tick_reviewer()
+            await send_html(update, "✅ reviewer tick queued")
+            return
+        if target == "qa":
+            o.tick_qa()
+            await send_html(update, "✅ qa tick queued")
+            return
+        if target == "canary":
+            out = o.tick_canary_workflows(force=True)
+            await send_html(update, block("🧪", "tick canary", json.dumps(out, sort_keys=True)))
+            return
+        await send_html(update, "❌ usage: <code>/tick [worker|reviewer|qa|canary]</code>")
 
-    async def cmd_qa(update, ctx, text):
-        o.tick_qa()
-        await send_html(update, "✅ <b>qa</b> tick complete")
+    def run_action(target_id, verb):
+        found = o.find_task(target_id)
+        if verb == "approve" and target_id.startswith("feature-"):
+            o.tick_self_repair_queue()
+            return f"{target_id}: self-repair queue ticked"
+        if not found:
+            return f"target not found: {target_id}"
+        state, task = found
+        if verb in ("retry", "unblock"):
+            o.reset_task_for_retry(target_id, state, reason=f"telegram {verb}", source="telegram")
+            return f"{target_id}: {state} -> queued"
+        if verb == "abandon":
+            o.move_task(target_id, state, "abandoned", reason="telegram abandon", mutator=lambda t: t.update({"finished_at": o.now_iso(), "abandoned_reason": "telegram abandon"}))
+            return f"{target_id}: {state} -> abandoned"
+        return f"unsupported action: {verb}"
 
-    async def cmd_cleanup(update, ctx, text):
-        checked, cleaned, skipped = o.cleanup_worktrees()
-        await send_html(
-            update,
-            (
-                "✅ <b>cleanup</b> complete\n"
-                f"<pre>checked={checked}\ncleaned={cleaned}\nskipped={skipped}</pre>"
-            ),
-        )
+    async def cmd_action(update, ctx, text):
+        parts = text.split()
+        if len(parts) < 3:
+            await send_html(update, "❌ usage: <code>/action &lt;id&gt; &lt;retry|abandon|unblock|approve&gt;</code>")
+            return
+        await send_html(update, f"✅ <pre>{html_escape(run_action(parts[1], parts[2].lower()))}</pre>")
 
     async def cmd_ask(update, ctx, text):
         parts = text.split(maxsplit=1)
@@ -186,224 +262,106 @@ def build_handlers(cfg):
             await send_html(update, "❌ usage: <code>/ask [claude|codex|both:] &lt;question&gt;</code>")
             return
         body = o.investigate_question(parts[1].strip())
-        await send_block_chunked(update, "🧭", "ask", body, body_limit=2800)
-
-    async def cmd_regression(update, ctx, text):
-        parts = text.split(maxsplit=1)
-        if len(parts) < 2:
-            await send_html(update, "❌ usage: <code>/regression &lt;project&gt;</code>")
-            return
-        project = parts[1].strip()
-        try:
-            o.tick_regression(project)
-            await send_html(
-                update,
-                f"✅ regression queued for <code>{html_escape(project)}</code>",
-            )
-        except SystemExit as exc:
-            await send_html(update, f"❌ <b>error</b>: {html_escape(str(exc))}")
-
-    async def cmd_planner_status(update, ctx, text):
-        parts = text.split(maxsplit=1)
-        project = parts[1].strip() if len(parts) > 1 else None
-        body = o.planner_status_text(project_filter=project)
-        await send_html(update, block("📋", "planner status", body))
-
-    async def cmd_planner_enable(update, ctx, text):
-        parts = text.split(maxsplit=1)
-        if len(parts) < 2:
-            await send_html(update, "❌ usage: <code>/planner_enable &lt;project&gt;</code>")
-            return
-        project = parts[1].strip()
-        cfg_names = {p["name"] for p in o.load_config()["projects"]}
-        if project not in cfg_names:
-            await send_html(update, f"❌ unknown project: <code>{html_escape(project)}</code>")
-            return
-        changed = o.set_planner_disabled(project, False)
-        suffix = "" if changed else " (was already enabled)"
-        await send_html(update, f"✅ planner <b>enabled</b> for <code>{html_escape(project)}</code>{suffix}")
-
-    async def cmd_planner_disable(update, ctx, text):
-        parts = text.split(maxsplit=2)
-        if len(parts) < 2:
-            await send_html(update, "❌ usage: <code>/planner_disable &lt;project&gt; [reason]</code>")
-            return
-        project = parts[1].strip()
-        reason = parts[2].strip() if len(parts) > 2 else ""
-        cfg_names = {p["name"] for p in o.load_config()["projects"]}
-        if project not in cfg_names:
-            await send_html(update, f"❌ unknown project: <code>{html_escape(project)}</code>")
-            return
-        changed = o.set_planner_disabled(project, True, reason=reason)
-        suffix = f" (reason: {html_escape(reason)})" if reason else ""
-        status_word = "disabled" if changed else "already disabled"
-        await send_html(update, f"✅ planner <b>{status_word}</b> for <code>{html_escape(project)}</code>{suffix}")
+        full_token = None
+        if len(body) > o.load_config().get("telegram", {}).get("card_limit", 600):
+            full_token = o.remember_full_message(body)
+        await send_card(
+            update,
+            "🧭",
+            "ask",
+            o._trim_card(body),
+            buttons=[[("Read full", f"readfull:{full_token}")]] if full_token else None,
+        )
 
     async def cmd_report(update, ctx, text):
         parts = text.split(maxsplit=1)
         kind = parts[1].strip() if len(parts) > 1 else "morning"
         out = o.report(kind)
-        await send_html(
-            update,
-            f"✅ {html_escape(kind)} report written: <code>{html_escape(out.name)}</code>",
-        )
-
-    async def cmd_enqueue(update, ctx, text):
-        parts = text.split(maxsplit=1)
-        if len(parts) < 2:
-            await send_html(update, "❌ usage: <code>/enqueue &lt;summary&gt;</code>")
-            return
-        task = o.new_task(
-            role="implementer",
-            engine="codex",
-            project="manual",
-            summary=parts[1].strip(),
-            source="telegram",
-        )
-        o.enqueue_task(task)
-        await send_html(
-            update,
-            f"✅ enqueued: <code>{html_escape(task['task_id'])}</code>",
-        )
-
-    async def cmd_register(update, ctx, text):
-        chat_id = update.effective_chat.id if update.effective_chat else None
-        if chat_id is None:
-            return
-        parts = text.split(maxsplit=1)
-        display_name = parts[1].strip() if len(parts) > 1 else ""
-        out = o.telegram_register_operator(chat_id, display_name)
-        name = html_escape(out.get("name") or display_name or "")
-        await send_html(
-            update,
-            (
-                "✅ <b>registration recorded</b>\n"
-                f"<pre>chat_id={chat_id}\nname={name}\nstatus={out.get('status')}\nseen_count={out.get('seen_count', 1)}</pre>\n"
-                f"Ask an approved operator to run <code>/approve_operator {chat_id} {name}</code>."
-            ),
-        )
-
-    async def cmd_approve_operator(update, ctx, text):
-        chat_id = update.effective_chat.id if update.effective_chat else None
-        if chat_id not in current_allowed():
-            log_reject(chat_id, text, "chat_id_not_allowed")
-            return
-        parts = text.split(maxsplit=2)
-        if len(parts) < 2:
-            await send_html(update, "❌ usage: <code>/approve_operator &lt;chat_id&gt; [name]</code>")
-            return
-        target_chat = int(parts[1].strip())
-        display_name = parts[2].strip() if len(parts) > 2 else ""
-        out = o.telegram_approve_operator(target_chat, approved_by=chat_id, name=display_name)
-        await send_html(update, f"✅ operator approved: <code>{out['chat_id']}</code> ({html_escape(out['name'])})")
-
-    async def cmd_operators(update, ctx, text):
-        body = json.dumps(o.load_operator_allowlist(), indent=2, sort_keys=True)
-        await send_html(update, block("👥", "operators", body))
+        await send_html(update, f"✅ {html_escape(kind)} report written: <code>{html_escape(out.name)}</code>")
 
     async def cmd_unknown(update, ctx):
         chat_id = update.effective_chat.id if update.effective_chat else None
         text = (update.effective_message.text or "") if update.effective_message else ""
-        if chat_id not in current_allowed():
+        if chat_id is None or chat_id not in current_allowed():
             log_reject(chat_id, text, "chat_id_not_allowed")
             return
         log_reject(chat_id, text, "unknown_command")
         help_text = (
-            "/status         orchestrator + queue snapshot\n"
-            "/tasks          running task summary\n"
-            "/task <id>      detail for one task + log tail\n"
-            "/queue          sample tasks per state\n"
-            "/planner        fire planner tick\n"
-            "/planner_status planner state by project\n"
-            "/planner_enable <p> enable planner for project\n"
-            "/planner_disable <p> [reason] disable planner for project\n"
-            "/reviewer       fire reviewer tick\n"
-            "/qa             fire qa smoke tick\n"
-            "/cleanup        run cleanup-worktrees now\n"
-            "/env           refresh environment health\n"
-            "/ask <q>        investigate via claude\n"
-            "/ask codex: <q> investigate via codex\n"
-            "/ask both: <q>  query both then synthesize\n"
-            "/regression <p> queue full regression sweep for project\n"
-            "/report <kind>  write morning|evening status report\n"
-            "/enqueue <sum>  manual codex task with summary\n"
-            "/register [name] request operator access from this chat\n"
-            "/approve_operator <id> [name] approve a pending operator\n"
-            "/operators      show approved and pending operators\n"
-            "/self_repair <summary> | <evidence> open guarded orchestrator repair lane"
+            "start with /health\n\n"
+            "/health\n"
+            "/features [project]\n"
+            "/queue [state]\n"
+            "/planner <project> [on|off|status|run]\n"
+            "/tick [worker|reviewer|qa|canary]\n"
+            "/action <id> <retry|abandon|unblock|approve>\n"
+            "/ask <question>\n"
+            "/report [morning|evening]"
         )
         await send_html(update, block("❓", "unknown command", help_text))
 
-    async def push_reports_job(ctx):
-        if not cfg.get("push_reports", True):
+    async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        if query is None:
             return
-        state = load_pushed_state()
-        pushed = set(state.get("pushed", []))
-        wf_state = state.setdefault("workflow_check", {})
-        latest_workflow_fingerprint = wf_state.get("last_fingerprint")
-        o.REPORT_DIR.mkdir(parents=True, exist_ok=True)
-        new = []
-        for p in sorted(o.REPORT_DIR.glob("*.md")):
-            if p.name in pushed:
-                continue
-            body = p.read_text()
-            if p.name.startswith("workflow-check_"):
-                fingerprint = workflow_check_fingerprint(body)
-                if fingerprint and fingerprint == latest_workflow_fingerprint:
-                    pushed.add(p.name)
-                    new.append(p.name)
-                    continue
-            msg, use_html = format_report_message(p.name, body)
-            for chat_id in sorted(current_allowed()):
-                try:
-                    await ctx.bot.send_message(
-                        chat_id=chat_id,
-                        text=msg,
-                        parse_mode=(ParseMode.HTML if use_html else None),
+        await query.answer()
+        data = query.data or ""
+        chat_id = query.message.chat_id if query.message else None
+        if chat_id not in current_allowed():
+            return
+        if data.startswith("cmd:"):
+            cmd = data.split(":", 1)[1]
+            pseudo = type("Pseudo", (), {"effective_chat": query.message.chat, "effective_message": query.message})
+            if cmd == "/features":
+                return await cmd_features(pseudo, ctx, cmd)
+            if cmd == "/queue":
+                return await cmd_queue(pseudo, ctx, cmd)
+        if data.startswith("readfull:"):
+            token = data.split(":", 1)[1]
+            body = o.load_full_message(token) or "(full response expired)"
+            await query.message.reply_text(body[:6000])
+            return
+        if data.startswith("action:"):
+            _, target_id, verb = data.split(":", 2)
+            await query.message.reply_text(run_action(target_id, verb))
+            return
+        if data.startswith("council:"):
+            feature = o.read_feature(data.split(":", 1)[1]) or {}
+            sr = feature.get("self_repair") or {}
+            body = json.dumps(sr.get("issues") or [], indent=2, sort_keys=True)[:3500] or "(no council state)"
+            await query.message.reply_text(body)
+
+    async def push_alerts_job(ctx):
+        for slot, paused in o.slot_pause_status().items():
+            if paused and o.should_push_alert(f"slot-paused:{slot}:{paused.get('paused_at')}", 3600):
+                await send_or_reply(
+                    None,
+                    block("🚨", "issue", o.issue_card({"project": "global", "code": "slot_paused", "summary": paused.get("reason"), "details": {"detail": paused.get("reason")}})),
+                    buttons=[[("Resume slot", f"readfull:{o.remember_full_message(f'python3 bin/orchestrator.py slots resume --slot {slot}')}" )]],
+                )
+        for wf in o.open_feature_workflow_summaries():
+            frontier = wf.get("frontier") or {}
+            if frontier.get("state") == "blocked" and (frontier.get("age_seconds") or 0) >= 2 * 3600:
+                key = f"feature-blocked:{wf.get('feature_id')}:{frontier.get('task_id')}:{frontier.get('state')}"
+                if o.should_push_alert(key, 1800):
+                    await send_or_reply(
+                        None,
+                        block("⚠️", "feature", o.features_brief(wf.get("project"))),
+                        buttons=feature_buttons(wf),
                     )
-                except Exception as exc:
-                    log.warning("push failed to %s: %s — retrying plain text", chat_id, exc)
-                    try:
-                        fallback, _ = format_report_message(p.name, body, plain=True)
-                        await ctx.bot.send_message(chat_id=chat_id, text=fallback)
-                    except Exception as exc2:
-                        log.warning("push plain retry failed to %s: %s", chat_id, exc2)
-            if p.name.startswith("workflow-check_"):
-                fingerprint = workflow_check_fingerprint(body)
-                if fingerprint:
-                    wf_state["last_fingerprint"] = fingerprint
-                    wf_state["last_report"] = p.name
-                    wf_state["last_sent_at"] = dt.datetime.now().isoformat(timespec="seconds")
-            new.append(p.name)
-        if new:
-            pushed.update(new)
-            state["pushed"] = sorted(pushed)
-            save_pushed_state(state)
 
     app = Application.builder().token(cfg["bot_token"]).build()
-    app.add_handler(CommandHandler("status", gate(cmd_status)))
-    app.add_handler(CommandHandler("tasks", gate(cmd_tasks)))
-    app.add_handler(CommandHandler("task", gate(cmd_task)))
+    app.add_handler(CommandHandler("health", gate(cmd_health)))
+    app.add_handler(CommandHandler("features", gate(cmd_features)))
     app.add_handler(CommandHandler("queue", gate(cmd_queue)))
     app.add_handler(CommandHandler("planner", gate(cmd_planner)))
-    app.add_handler(CommandHandler("planner_status", gate(cmd_planner_status)))
-    app.add_handler(CommandHandler("planner_enable", gate(cmd_planner_enable)))
-    app.add_handler(CommandHandler("planner_disable", gate(cmd_planner_disable)))
-    app.add_handler(CommandHandler("reviewer", gate(cmd_reviewer)))
-    app.add_handler(CommandHandler("qa", gate(cmd_qa)))
-    app.add_handler(CommandHandler("cleanup", gate(cmd_cleanup)))
+    app.add_handler(CommandHandler("tick", gate(cmd_tick)))
+    app.add_handler(CommandHandler("action", gate(cmd_action)))
     app.add_handler(CommandHandler("ask", gate(cmd_ask)))
-    app.add_handler(CommandHandler("regression", gate(cmd_regression)))
     app.add_handler(CommandHandler("report", gate(cmd_report)))
-    app.add_handler(CommandHandler("enqueue", gate(cmd_enqueue)))
-    app.add_handler(CommandHandler("register", cmd_register))
-    app.add_handler(CommandHandler("approve_operator", gate(cmd_approve_operator)))
-    app.add_handler(CommandHandler("operators", gate(cmd_operators)))
-    # Catch-all for anything else.
+    app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.ALL, cmd_unknown))
 
-    # Run push poll every 60s.
-    app.job_queue.run_repeating(push_reports_job, interval=60, first=5)
+    app.job_queue.run_repeating(push_alerts_job, interval=30, first=5)
 
     return app
 
@@ -463,7 +421,7 @@ def main():
         return 0
     app = build_handlers(cfg)
     log.info("devmini telegram bot starting (polling mode, %d allowed chat(s))", len(set(o.telegram_allowed_chat_ids()) | set(cfg["allowed_chat_ids"])))
-    app.run_polling(allowed_updates=["message"], drop_pending_updates=True)
+    app.run_polling(allowed_updates=["message", "callback_query"], drop_pending_updates=True)
     return 0
 
 
