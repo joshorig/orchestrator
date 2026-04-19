@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 import importlib.util
 import json
+import os
 import pathlib
+import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -1314,6 +1317,294 @@ def _run_atomic_claim_concurrency(repo_root, scenario):
         }
 
 
+def _run_kill9_integrity(repo_root, scenario):
+    state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        db_path = root / "orchestrator.db"
+        engine = state_engine.StateEngine(
+            state_engine.StateEngineConfig(
+                root=root,
+                db_path=db_path,
+                migrations_dir=repo_root / "state" / "migrations",
+                mode="mirror",
+            )
+        )
+        engine.initialize()
+        engine.upsert_task_from_fs(
+            {
+                "task_id": "task-38",
+                "engine": "codex",
+                "role": "implementer",
+                "project": "demo",
+                "summary": "kill me mid-transaction",
+                "source": "scenario-38",
+                "state": "queued",
+                "blocker": None,
+                "attempt": 1,
+                "created_at": "2026-04-19T22:10:00",
+                "claimed_at": None,
+                "started_at": None,
+                "finished_at": None,
+            },
+            state="queued",
+        )
+        script = (
+            "import sqlite3, sys, time;"
+            "db = sys.argv[1];"
+            "conn = sqlite3.connect(db, timeout=30);"
+            "conn.execute('BEGIN IMMEDIATE');"
+            "conn.execute(\"UPDATE tasks SET state='claimed', state_updated_at='2026-04-19T22:10:01' WHERE task_id='task-38'\");"
+            "time.sleep(30)"
+        )
+        proc = subprocess.Popen([sys.executable, "-c", script, str(db_path)])
+        try:
+            time_limit = __import__('time').time() + 5
+            while __import__('time').time() < time_limit:
+                state = engine.find_task("task-38")
+                if state and state[0] == "queued":
+                    __import__('time').sleep(0.05)
+                else:
+                    break
+            os.kill(proc.pid, signal.SIGKILL)
+            proc.wait(timeout=5)
+        finally:
+            engine.close()
+        engine = state_engine.StateEngine(
+            state_engine.StateEngineConfig(
+                root=root,
+                db_path=db_path,
+                migrations_dir=repo_root / "state" / "migrations",
+                mode="mirror",
+            )
+        )
+        engine.initialize()
+        found = engine.find_task("task-38")
+        return {
+            "integrity_check": engine.integrity_check(),
+            "task_state": found[0] if found else None,
+        }
+
+
+def _run_orphan_recovery_log(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        queue_root = root / "queue"
+        claims_dir = root / "state" / "runtime" / "claims"
+        for state in orchestrator.STATES:
+            (queue_root / state).mkdir(parents=True, exist_ok=True)
+        claims_dir.mkdir(parents=True, exist_ok=True)
+        old = {
+            "STATE_ROOT": orchestrator.STATE_ROOT,
+            "QUEUE_ROOT": orchestrator.QUEUE_ROOT,
+            "RUNTIME_DIR": orchestrator.RUNTIME_DIR,
+            "CLAIMS_DIR": orchestrator.CLAIMS_DIR,
+            "TRANSITIONS_LOG": orchestrator.TRANSITIONS_LOG,
+            "EVENTS_LOG": orchestrator.EVENTS_LOG,
+            "METRICS_LOG": orchestrator.METRICS_LOG,
+            "STATE_ENGINE_DB_PATH": orchestrator.STATE_ENGINE_DB_PATH,
+            "STATE_MIGRATIONS_DIR": orchestrator.STATE_MIGRATIONS_DIR,
+            "_STATE_ENGINE_CACHE": orchestrator._STATE_ENGINE_CACHE,
+            "_STATE_ENGINE_RECONCILE": orchestrator._STATE_ENGINE_RECONCILE,
+            "now_iso": orchestrator.now_iso,
+            "pid_alive": orchestrator.pid_alive,
+            "_seconds_since_iso": orchestrator._seconds_since_iso,
+        }
+        old_env = {
+            "STATE_ENGINE_MODE": os.environ.get("STATE_ENGINE_MODE"),
+            "STATE_ENGINE_PATH": os.environ.get("STATE_ENGINE_PATH"),
+        }
+        orchestrator.STATE_ROOT = root
+        orchestrator.QUEUE_ROOT = queue_root
+        orchestrator.RUNTIME_DIR = root / "state" / "runtime"
+        orchestrator.CLAIMS_DIR = claims_dir
+        orchestrator.TRANSITIONS_LOG = orchestrator.RUNTIME_DIR / "transitions.log"
+        orchestrator.EVENTS_LOG = orchestrator.RUNTIME_DIR / "events.jsonl"
+        orchestrator.METRICS_LOG = orchestrator.RUNTIME_DIR / "metrics.jsonl"
+        orchestrator.STATE_ENGINE_DB_PATH = orchestrator.RUNTIME_DIR / "orchestrator.db"
+        orchestrator.STATE_MIGRATIONS_DIR = repo_root / "state" / "migrations"
+        orchestrator._STATE_ENGINE_CACHE = {"key": None, "engine": None}
+        orchestrator._STATE_ENGINE_RECONCILE = {"ts": 0.0, "active": False, "last": None}
+        orchestrator.now_iso = lambda: "2026-04-19T22:20:00"
+        orchestrator.pid_alive = lambda pid: False
+        orchestrator._seconds_since_iso = lambda ts: 120
+        os.environ["STATE_ENGINE_MODE"] = "mirror"
+        os.environ["STATE_ENGINE_PATH"] = str(orchestrator.STATE_ENGINE_DB_PATH)
+        try:
+            task = {
+                "task_id": "task-39",
+                "engine": "codex",
+                "role": "implementer",
+                "project": "demo",
+                "summary": "orphan me",
+                "source": "scenario-39",
+                "state": "claimed",
+                "blocker": None,
+                "attempt": 1,
+                "created_at": "2026-04-19T22:15:00",
+                "claimed_at": "2026-04-19T22:18:00",
+                "started_at": None,
+                "finished_at": None,
+            }
+            orchestrator.write_json_atomic(orchestrator.task_path("task-39", "claimed"), task)
+            orchestrator.write_claim_pid("task-39", "codex", worktree="wt-39")
+            # overwrite pid with impossible pid while keeping file shape
+            (claims_dir / "task-39.pid").write_text("999999\ncodex\nwt-39\n")
+            reaped = orchestrator.reap()
+            engine = orchestrator.get_state_engine()
+            rows = engine.read_orphan_recoveries()
+        finally:
+            for key, value in old.items():
+                setattr(orchestrator, key, value)
+            if old_env["STATE_ENGINE_MODE"] is None:
+                os.environ.pop("STATE_ENGINE_MODE", None)
+            else:
+                os.environ["STATE_ENGINE_MODE"] = old_env["STATE_ENGINE_MODE"]
+            if old_env["STATE_ENGINE_PATH"] is None:
+                os.environ.pop("STATE_ENGINE_PATH", None)
+            else:
+                os.environ["STATE_ENGINE_PATH"] = old_env["STATE_ENGINE_PATH"]
+        row = rows[-1]
+        return {
+            "reaped": reaped,
+            "log_rows": len(rows),
+            "task_id": row["task_id"],
+            "from_state": row["from_state"],
+            "age_seconds": row["age_seconds"],
+        }
+
+
+def _run_environment_check_log(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        old = {
+            "STATE_ROOT": orchestrator.STATE_ROOT,
+            "RUNTIME_DIR": orchestrator.RUNTIME_DIR,
+            "STATE_ENGINE_DB_PATH": orchestrator.STATE_ENGINE_DB_PATH,
+            "STATE_MIGRATIONS_DIR": orchestrator.STATE_MIGRATIONS_DIR,
+            "_STATE_ENGINE_CACHE": orchestrator._STATE_ENGINE_CACHE,
+            "_STATE_ENGINE_RECONCILE": orchestrator._STATE_ENGINE_RECONCILE,
+            "environment_health": orchestrator.environment_health,
+            "now_iso": orchestrator.now_iso,
+        }
+        old_env = {
+            "STATE_ENGINE_MODE": os.environ.get("STATE_ENGINE_MODE"),
+            "STATE_ENGINE_PATH": os.environ.get("STATE_ENGINE_PATH"),
+        }
+        orchestrator.STATE_ROOT = root
+        orchestrator.RUNTIME_DIR = root / "state" / "runtime"
+        orchestrator.STATE_ENGINE_DB_PATH = orchestrator.RUNTIME_DIR / "orchestrator.db"
+        orchestrator.STATE_MIGRATIONS_DIR = repo_root / "state" / "migrations"
+        orchestrator._STATE_ENGINE_CACHE = {"key": None, "engine": None}
+        orchestrator._STATE_ENGINE_RECONCILE = {"ts": 0.0, "active": False, "last": None}
+        orchestrator.now_iso = lambda: "2026-04-19T22:30:00"
+        os.environ["STATE_ENGINE_MODE"] = "mirror"
+        os.environ["STATE_ENGINE_PATH"] = str(orchestrator.STATE_ENGINE_DB_PATH)
+        calls = [
+            {"ok": False, "issues": [{"severity": "error", "project": "demo", "code": "project_main_dirty", "summary": "dirty main", "detail": "git status"}]},
+            {"ok": True, "issues": []},
+        ]
+        def fake_environment_health(refresh=False):
+            return calls.pop(0)
+        orchestrator.environment_health = fake_environment_health
+        try:
+            blocked = orchestrator.project_environment_blockers("demo", refresh=True)
+            clear = orchestrator.project_environment_blockers("demo", refresh=True)
+            rows = orchestrator.get_state_engine().read_environment_checks()
+        finally:
+            for key, value in old.items():
+                setattr(orchestrator, key, value)
+            if old_env["STATE_ENGINE_MODE"] is None:
+                os.environ.pop("STATE_ENGINE_MODE", None)
+            else:
+                os.environ["STATE_ENGINE_MODE"] = old_env["STATE_ENGINE_MODE"]
+            if old_env["STATE_ENGINE_PATH"] is None:
+                os.environ.pop("STATE_ENGINE_PATH", None)
+            else:
+                os.environ["STATE_ENGINE_PATH"] = old_env["STATE_ENGINE_PATH"]
+        return {
+            "blocked_count": len(blocked),
+            "clear_count": len(clear),
+            "log_rows": len(rows),
+            "first_result": rows[0]["result"],
+            "first_summary": rows[0]["blocker_summary"],
+            "second_result": rows[1]["result"],
+        }
+
+
+def _run_backup_roundtrip(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        old = {
+            "STATE_ROOT": orchestrator.STATE_ROOT,
+            "QUEUE_ROOT": orchestrator.QUEUE_ROOT,
+            "FEATURES_DIR": orchestrator.FEATURES_DIR,
+            "RUNTIME_DIR": orchestrator.RUNTIME_DIR,
+            "STATE_ENGINE_DB_PATH": orchestrator.STATE_ENGINE_DB_PATH,
+            "STATE_MIGRATIONS_DIR": orchestrator.STATE_MIGRATIONS_DIR,
+            "_STATE_ENGINE_CACHE": orchestrator._STATE_ENGINE_CACHE,
+            "_STATE_ENGINE_RECONCILE": orchestrator._STATE_ENGINE_RECONCILE,
+        }
+        old_env = {
+            "STATE_ENGINE_MODE": os.environ.get("STATE_ENGINE_MODE"),
+            "STATE_ENGINE_PATH": os.environ.get("STATE_ENGINE_PATH"),
+        }
+        orchestrator.STATE_ROOT = root
+        orchestrator.QUEUE_ROOT = root / "queue"
+        orchestrator.FEATURES_DIR = root / "state" / "features"
+        orchestrator.RUNTIME_DIR = root / "state" / "runtime"
+        orchestrator.STATE_ENGINE_DB_PATH = orchestrator.RUNTIME_DIR / "orchestrator.db"
+        orchestrator.STATE_MIGRATIONS_DIR = repo_root / "state" / "migrations"
+        orchestrator._STATE_ENGINE_CACHE = {"key": None, "engine": None}
+        orchestrator._STATE_ENGINE_RECONCILE = {"ts": 0.0, "active": False, "last": None}
+        for state in orchestrator.STATES:
+            orchestrator.queue_dir(state)
+        orchestrator.FEATURES_DIR.mkdir(parents=True, exist_ok=True)
+        os.environ["STATE_ENGINE_MODE"] = "primary"
+        os.environ["STATE_ENGINE_PATH"] = str(orchestrator.STATE_ENGINE_DB_PATH)
+        try:
+            feature = orchestrator.create_feature(project="demo", summary="backup", source="scenario-42")
+            task = orchestrator.new_task(
+                role="implementer",
+                engine="codex",
+                project="demo",
+                summary="backup task",
+                source="scenario-42",
+                feature_id=feature["feature_id"],
+            )
+            orchestrator.enqueue_task(task)
+            backup = orchestrator.state_engine_backup(backup_path=orchestrator.RUNTIME_DIR / "state.backup.db")
+            orchestrator.STATE_ENGINE_DB_PATH.write_text("corrupt", encoding="utf-8")
+            corrupted_marker = orchestrator.STATE_ENGINE_DB_PATH.read_text(encoding="utf-8")
+            orchestrator.STATE_ENGINE_DB_PATH.write_bytes(pathlib.Path(backup["backup_path"]).read_bytes())
+            orchestrator._STATE_ENGINE_CACHE = {"key": None, "engine": None}
+            engine = orchestrator.get_state_engine()
+            status = engine.initialize()
+            found = engine.find_task(task["task_id"])
+            feature_row = engine.read_feature(feature["feature_id"])
+        finally:
+            for key, value in old.items():
+                setattr(orchestrator, key, value)
+            if old_env["STATE_ENGINE_MODE"] is None:
+                os.environ.pop("STATE_ENGINE_MODE", None)
+            else:
+                os.environ["STATE_ENGINE_MODE"] = old_env["STATE_ENGINE_MODE"]
+            if old_env["STATE_ENGINE_PATH"] is None:
+                os.environ.pop("STATE_ENGINE_PATH", None)
+            else:
+                os.environ["STATE_ENGINE_PATH"] = old_env["STATE_ENGINE_PATH"]
+        return {
+            "backup_exists": pathlib.Path(backup["backup_path"]).exists(),
+            "corrupted_marker": corrupted_marker,
+            "integrity_check": status.get("integrity_check"),
+            "task_state": found[0] if found else None,
+            "feature_status": (feature_row or {}).get("status"),
+        }
+
+
 def main(argv):
     if len(argv) != 2:
         raise SystemExit("usage: harness/run_scenario.py <scenario-dir>")
@@ -1358,6 +1649,14 @@ def main(argv):
         actual = _run_fs_to_engine_migration(repo_root, scenario)
     elif kind == "atomic_claim_concurrency":
         actual = _run_atomic_claim_concurrency(repo_root, scenario)
+    elif kind == "kill9_integrity":
+        actual = _run_kill9_integrity(repo_root, scenario)
+    elif kind == "orphan_recovery_log":
+        actual = _run_orphan_recovery_log(repo_root, scenario)
+    elif kind == "environment_check_log":
+        actual = _run_environment_check_log(repo_root, scenario)
+    elif kind == "backup_roundtrip":
+        actual = _run_backup_roundtrip(repo_root, scenario)
     else:
         raise SystemExit(f"unknown scenario kind: {kind}")
 

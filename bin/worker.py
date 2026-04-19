@@ -215,7 +215,7 @@ def _handle_worker_crash(task, slot, exc, tb_text):
     blocker_code, retryable = _classify_worker_crash(exc, tb_text)
     # Best-effort: move through the normal failure path so blocker metadata is persisted.
     for st in ("running", "claimed"):
-        if o.task_path(task["task_id"], st).exists():
+        if o.find_task(task["task_id"], states=(st,)) is not None:
             fail_task(
                 task["task_id"],
                 st,
@@ -291,20 +291,18 @@ def _mark_review_target_for_retry(target_id, reason, *, blocker_code="runtime_pr
 
 
 def _newer_review_feedback_exists(feature_id, target_id, current_task_id, current_created_at):
-    for state in o.STATES:
-        for path in o.queue_dir(state).glob("*.json"):
-            sibling = o.read_json(path, {})
-            if sibling.get("task_id") == current_task_id:
-                continue
-            if sibling.get("feature_id") != feature_id:
-                continue
-            if not str(sibling.get("source") or "").startswith("review-feedback:"):
-                continue
-            sibling_target = ((sibling.get("engine_args") or {}).get("target_task_id") or sibling.get("parent_task_id"))
-            if sibling_target != target_id:
-                continue
-            if (sibling.get("created_at") or "") > (current_created_at or ""):
-                return True
+    for sibling in o.iter_tasks(states=o.STATES):
+        if sibling.get("task_id") == current_task_id:
+            continue
+        if sibling.get("feature_id") != feature_id:
+            continue
+        if not str(sibling.get("source") or "").startswith("review-feedback:"):
+            continue
+        sibling_target = ((sibling.get("engine_args") or {}).get("target_task_id") or sibling.get("parent_task_id"))
+        if sibling_target != target_id:
+            continue
+        if (sibling.get("created_at") or "") > (current_created_at or ""):
+            return True
     return False
 
 
@@ -3680,12 +3678,10 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
         return
 
     # Pick oldest awaiting-review task for this project (FIFO by finished_at).
-    ar_dir = o.queue_dir("awaiting-review")
     candidates = []
-    for p in ar_dir.glob("*.json"):
-        t = o.read_json(p, {})
+    for t in o.iter_tasks(states=("awaiting-review",), project=project_name):
         if t.get("project") == project_name:
-            candidates.append((t.get("finished_at") or p.name, t))
+            candidates.append((t.get("finished_at") or t.get("task_id") or "", t))
     if not candidates:
         def mut_noop(t):
             t["finished_at"] = o.now_iso()
@@ -5654,12 +5650,10 @@ def run_qa_slot(task, cfg):
     target = None
     target_id = None
     if contract_kind == "smoke":
-        ar_dir = o.queue_dir("awaiting-qa")
         candidates = []
-        for p in ar_dir.glob("*.json"):
-            t = o.read_json(p, {})
+        for t in o.iter_tasks(states=("awaiting-qa",), project=project["name"]):
             if t.get("project") == project["name"]:
-                candidates.append((t.get("reviewed_at") or t.get("finished_at") or p.name, t))
+                candidates.append((t.get("reviewed_at") or t.get("finished_at") or t.get("task_id") or "", t))
         if not candidates:
             def mut_noop(t):
                 t["finished_at"] = o.now_iso()
@@ -5812,7 +5806,7 @@ def run_qa_slot(task, cfg):
                 feature = None
                 feature_id = target.get("feature_id")
                 if feature_id:
-                    feature = o.read_json(o.feature_path(feature_id), None)
+                    feature = o.read_feature(feature_id)
                 self_repair_meta = dict((feature or {}).get("self_repair") or {})
                 qa_gate = _run_semantic_qa_gate(
                     project["name"],

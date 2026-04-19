@@ -1,0 +1,7 @@
+{
+  "backup_exists": true,
+  "corrupted_marker": "corrupt",
+  "integrity_check": "ok",
+  "task_state": "queued",
+  "feature_status": "open"
+}

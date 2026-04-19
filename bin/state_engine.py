@@ -132,6 +132,18 @@ class StateEngine:
         conn = conn or self.connect()
         return tuple(conn.execute("PRAGMA wal_checkpoint(RESTART)").fetchone() or ())
 
+    def backup_into(self, backup_path: str | pathlib.Path, *, conn: sqlite3.Connection | None = None) -> str:
+        conn = conn or self.connect()
+        target = pathlib.Path(backup_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            pass
+        escaped = str(target).replace("'", "''")
+        conn.execute(f"VACUUM INTO '{escaped}'")
+        return str(target)
+
     def discover_migrations(self) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         if not self.config.migrations_dir.exists():
@@ -255,6 +267,14 @@ class StateEngine:
                 ),
             )
 
+    def upsert_task(self, task: dict[str, Any], *, state: str | None = None, conn: sqlite3.Connection | None = None) -> None:
+        self.upsert_task_from_fs(task, state=state or task.get("state") or "queued", conn=conn)
+
+    def delete_task(self, task_id: str, *, conn: sqlite3.Connection | None = None) -> None:
+        conn = conn or self.connect()
+        with conn:
+            conn.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
+
     def upsert_feature_from_fs(self, feature: dict[str, Any], *, conn: sqlite3.Connection | None = None) -> None:
         conn = conn or self.connect()
         metadata = dict(feature)
@@ -359,6 +379,9 @@ class StateEngine:
                             deliberation.get("summary") or "",
                         ),
                     )
+
+    def upsert_feature(self, feature: dict[str, Any], *, conn: sqlite3.Connection | None = None) -> None:
+        self.upsert_feature_from_fs(feature, conn=conn)
 
     def record_transition(self, row: dict[str, Any], *, conn: sqlite3.Connection | None = None) -> None:
         conn = conn or self.connect()
@@ -577,6 +600,63 @@ class StateEngine:
             sql += f" LIMIT {int(limit)}"
         rows = conn.execute(sql, params).fetchall()
         return [json.loads(row["metadata_json"]) for row in rows]
+
+    def record_environment_check(self, *, ts: str, project: str | None, result: str, blocker_summary: str | None, conn: sqlite3.Connection | None = None) -> None:
+        conn = conn or self.connect()
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO environment_check_log (ts, ts_epoch, project, result, blocker_summary)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (ts, _iso_to_epoch(ts), project, result, blocker_summary),
+            )
+
+    def record_orphan_recovery(self, *, ts: str, task_id: str, from_state: str, age_seconds: int, conn: sqlite3.Connection | None = None) -> None:
+        conn = conn or self.connect()
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO orphan_recovery_log (ts, ts_epoch, task_id, from_state, age_seconds)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (ts, _iso_to_epoch(ts), task_id, from_state, int(age_seconds)),
+            )
+
+    def count_table(self, table: str, *, conn: sqlite3.Connection | None = None) -> int:
+        conn = conn or self.connect()
+        row = conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()
+        return int(row["n"] if row else 0)
+
+    def read_orphan_recoveries(self, *, conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
+        conn = conn or self.connect()
+        rows = conn.execute(
+            "SELECT ts, task_id, from_state, age_seconds FROM orphan_recovery_log ORDER BY ts_epoch ASC"
+        ).fetchall()
+        return [
+            {
+                "ts": row["ts"],
+                "task_id": row["task_id"],
+                "from_state": row["from_state"],
+                "age_seconds": int(row["age_seconds"]),
+            }
+            for row in rows
+        ]
+
+    def read_environment_checks(self, *, conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
+        conn = conn or self.connect()
+        rows = conn.execute(
+            "SELECT ts, project, result, blocker_summary FROM environment_check_log ORDER BY ts_epoch ASC"
+        ).fetchall()
+        return [
+            {
+                "ts": row["ts"],
+                "project": row["project"],
+                "result": row["result"],
+                "blocker_summary": row["blocker_summary"],
+            }
+            for row in rows
+        ]
 
     def claim_task(self, task_id: str, *, slot_engine: str, claimed_at: str, conn: sqlite3.Connection | None = None) -> dict[str, Any] | None:
         conn = conn or self.connect()

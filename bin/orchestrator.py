@@ -978,7 +978,6 @@ def telegram_approve_operator(chat_id, approved_by, name=""):
 
 
 def append_metric(name, value, *, metric_type="gauge", tags=None, source=None, ts=None):
-    METRICS_LOG.parent.mkdir(parents=True, exist_ok=True)
     row = {
         "ts": ts or now_iso(),
         "name": name,
@@ -987,8 +986,10 @@ def append_metric(name, value, *, metric_type="gauge", tags=None, source=None, t
         "tags": dict(tags or {}),
         "source": source or "runtime",
     }
-    with METRICS_LOG.open("a") as f:
-        f.write(json.dumps(row, sort_keys=True) + "\n")
+    if not _state_engine_read_enabled():
+        METRICS_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with METRICS_LOG.open("a") as f:
+            f.write(json.dumps(row, sort_keys=True) + "\n")
     _mirror_metric_row(row)
     return row
 
@@ -1410,6 +1411,38 @@ def _mirror_metric_row(row, *, cfg=None):
     return True
 
 
+def _record_environment_check(project_name, blockers, *, cfg=None):
+    if not _state_engine_write_enabled(cfg=cfg):
+        return False
+    engine = get_state_engine(cfg=cfg)
+    engine.initialize()
+    summary = "; ".join(
+        f"{issue.get('code')}:{issue.get('summary')}"
+        for issue in (blockers or [])
+    )[:500] or None
+    engine.record_environment_check(
+        ts=now_iso(),
+        project=project_name,
+        result="blocked" if blockers else "ok",
+        blocker_summary=summary,
+    )
+    return True
+
+
+def _record_orphan_recovery(task_id, from_state, age_seconds, *, cfg=None):
+    if not _state_engine_write_enabled(cfg=cfg):
+        return False
+    engine = get_state_engine(cfg=cfg)
+    engine.initialize()
+    engine.record_orphan_recovery(
+        ts=now_iso(),
+        task_id=task_id,
+        from_state=from_state,
+        age_seconds=int(age_seconds),
+    )
+    return True
+
+
 def _fs_queue_state_counts():
     counts = {}
     for state in STATES:
@@ -1471,6 +1504,23 @@ def state_engine_reconcile(*, cfg=None, emit_metrics=True):
         "queue": queue,
         "features": features,
         "integrity_check": status.get("integrity_check"),
+    }
+
+
+def state_engine_backup(*, cfg=None, backup_path=None):
+    cfg = cfg or load_config()
+    engine = get_state_engine(cfg=cfg)
+    status = engine.initialize()
+    if not status.get("enabled"):
+        return {"enabled": False, "mode": status.get("mode"), "backup_path": None}
+    target = pathlib.Path(backup_path or (RUNTIME_DIR / "state.backup.db"))
+    out = engine.backup_into(target)
+    append_event("state-engine", "backup_written", details={"path": out})
+    return {
+        "enabled": True,
+        "mode": status.get("mode"),
+        "backup_path": out,
+        "integrity_check": engine.integrity_check(),
     }
 
 
@@ -2076,6 +2126,7 @@ def project_environment_blockers(project_name, *, refresh=False):
             continue
         if issue.get("project") in (None, project_name):
             rows.append(issue)
+    _record_environment_check(project_name, rows)
     return rows
 
 
@@ -2153,6 +2204,52 @@ def write_json_atomic(path, obj):
     _mirror_fs_write(path, obj)
 
 
+def _write_json_mirror(path, obj):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(obj, indent=2, sort_keys=True))
+    os.rename(tmp, path)
+
+
+def _delete_json_mirror(path):
+    try:
+        pathlib.Path(path).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _write_task_record(task, state=None, *, cfg=None):
+    state = state or task.get("state") or "queued"
+    path = task_path(task["task_id"], state)
+    if _state_engine_mode(cfg=cfg) == "primary":
+        task = dict(task or {})
+        task["state"] = state
+        engine = get_state_engine(cfg=cfg)
+        engine.initialize()
+        engine.upsert_task(task, state=state)
+        _write_json_mirror(path, task)
+        return path
+    write_json_atomic(path, task)
+    return path
+
+
+def _delete_task_record(task_id, state, *, cfg=None):
+    path = task_path(task_id, state)
+    _delete_json_mirror(path)
+
+
+def _write_feature_record(feature, *, cfg=None):
+    path = feature_path(feature["feature_id"])
+    if _state_engine_mode(cfg=cfg) == "primary":
+        engine = get_state_engine(cfg=cfg)
+        engine.initialize()
+        engine.upsert_feature(feature)
+        _write_json_mirror(path, feature)
+        return path
+    write_json_atomic(path, feature)
+    return path
+
+
 def read_json(path, default=None):
     if not path.exists():
         return default
@@ -2160,7 +2257,6 @@ def read_json(path, default=None):
 
 
 def append_transition(task_id, from_state, to_state, reason=""):
-    TRANSITIONS_LOG.parent.mkdir(parents=True, exist_ok=True)
     row = {
         "ts": now_iso(),
         "task_id": task_id,
@@ -2168,10 +2264,12 @@ def append_transition(task_id, from_state, to_state, reason=""):
         "to_state": to_state,
         "reason": reason,
     }
-    with TRANSITIONS_LOG.open("a") as f:
-        f.write(f"{row['ts']}\t{task_id}\t{from_state}\t->\t{to_state}\t{reason}\n")
-        f.flush()
-        os.fsync(f.fileno())
+    if not _state_engine_read_enabled():
+        TRANSITIONS_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with TRANSITIONS_LOG.open("a") as f:
+            f.write(f"{row['ts']}\t{task_id}\t{from_state}\t->\t{to_state}\t{reason}\n")
+            f.flush()
+            os.fsync(f.fileno())
     _mirror_transition_row(row)
 
 
@@ -2318,7 +2416,6 @@ def task_blocker(task):
 
 
 def append_event(role, event, *, task_id=None, feature_id=None, details=None):
-    EVENTS_LOG.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "ts": now_iso(),
         "role": role,
@@ -2327,8 +2424,10 @@ def append_event(role, event, *, task_id=None, feature_id=None, details=None):
         "feature_id": feature_id,
         "details": details or {},
     }
-    with EVENTS_LOG.open("a") as f:
-        f.write(json.dumps(payload, sort_keys=True) + "\n")
+    if not _state_engine_read_enabled():
+        EVENTS_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with EVENTS_LOG.open("a") as f:
+            f.write(json.dumps(payload, sort_keys=True) + "\n")
     _mirror_event_row(payload)
 
 
@@ -2589,15 +2688,11 @@ def _template_owner_project(config, task_type):
 
 
 def _template_regen_in_flight(task_type):
-    for state in ("queued", "claimed", "running"):
-        for path in queue_dir(state).glob("*.json"):
-            task = read_json(path, {})
-            if task.get("engine") != "claude":
-                continue
-            if task.get("braid_template") != task_type:
-                continue
-            if (task.get("engine_args") or {}).get("mode") == "template-gen":
-                return True
+    for task in iter_tasks(states=("queued", "claimed", "running"), engine="claude"):
+        if task.get("braid_template") != task_type:
+            continue
+        if (task.get("engine_args") or {}).get("mode") == "template-gen":
+            return True
     return False
 
 
@@ -2865,8 +2960,7 @@ def new_task(
 
 
 def enqueue_task(task):
-    path = task_path(task["task_id"], "queued")
-    write_json_atomic(path, task)
+    path = _write_task_record(task, "queued")
     append_transition(task["task_id"], "new", "queued", task.get("source", ""))
     append_event(
         task.get("role", "unknown"),
@@ -2940,8 +3034,7 @@ def _nudge_idle_queued_workers():
     """
     active = engine_active_counts()
     queued_by_engine = {"claude": 0, "codex": 0, "qa": 0}
-    for p in queue_dir("queued").glob("*.json"):
-        task = read_json(p, {})
+    for task in iter_tasks(states=("queued",)):
         eng = task.get("engine")
         if eng in queued_by_engine:
             queued_by_engine[eng] += 1
@@ -2961,23 +3054,17 @@ def move_task(task_id, from_state, to_state, reason="", mutator=None):
     If `mutator` is given, it receives the loaded dict, mutates it, and the
     mutated form is written to the destination path (not the source).
     """
-    src = task_path(task_id, from_state)
-    dst = task_path(task_id, to_state)
-    task = read_json(src)
-    if task is None:
+    found = find_task(task_id, states=(from_state,))
+    if not found:
         raise FileNotFoundError(f"no task {task_id} in {from_state}")
+    _, task = found
     if mutator is not None:
         mutator(task)
     task["state"] = to_state
     if to_state not in ("blocked", "failed", "abandoned"):
         clear_task_blocker(task)
-    # Write destination first, then unlink source — if anything crashes mid-way
-    # the transition log lets us tell the task didn't land.
-    write_json_atomic(dst, task)
-    try:
-        src.unlink()
-    except FileNotFoundError:
-        pass
+    _write_task_record(task, to_state)
+    _delete_task_record(task_id, from_state)
     append_transition(task_id, from_state, to_state, reason)
     append_event(
         task.get("role", "unknown"),
@@ -3006,7 +3093,7 @@ def move_task(task_id, from_state, to_state, reason="", mutator=None):
         },
         source=task.get("source") or "runtime",
     )
-    return dst, task
+    return task_path(task_id, to_state), task
 
 
 def _archive_attempt_entry(task, from_state, reason, *, source=None):
@@ -3202,9 +3289,8 @@ def project_hard_stopped(project_name):
         return False
     if project_name in _read_project_hard_stops():
         return True
-    for p in queue_dir("blocked").glob("*.json"):
-        t = read_json(p, {})
-        if t.get("project") == project_name and t.get("topology_error") == "regression-failure":
+    for task in iter_tasks(states=("blocked",), project=project_name):
+        if task.get("topology_error") == "regression-failure":
             return True
     return False
 
@@ -3307,11 +3393,8 @@ def atomic_claim(slot_engine):
             if claimed is None:
                 continue
             task = claimed
-            try:
-                src.unlink()
-            except FileNotFoundError:
-                pass
-            write_json_atomic(dst, task)
+            _delete_task_record(task["task_id"], "queued")
+            _write_task_record(task, "claimed")
         else:
             try:
                 os.rename(src, dst)
@@ -3412,6 +3495,9 @@ def reap():
         for state in ("claimed", "running"):
             src = task_path(task_id, state)
             if src.exists():
+                task = read_json(src, {}) or {}
+                age_seconds = _seconds_since_iso(task.get("started_at") or task.get("claimed_at") or task.get("created_at")) or 0
+                _record_orphan_recovery(task_id, state, age_seconds)
                 reset_task_for_retry(
                     task_id,
                     state,
@@ -3422,8 +3508,7 @@ def reap():
                 break
         pidfile.unlink(missing_ok=True)
     # Also: transition blocked tasks that have a regenerated template back to queued.
-    for src in queue_dir("blocked").glob("*.json"):
-        task = read_json(src, {})
+    for task in iter_tasks(states=("blocked",)):
         if task.get("topology_error") == "template_missing":
             tmpl = task.get("braid_template")
             if tmpl and (BRAID_TEMPLATES / f"{tmpl}.mmd").exists():
@@ -5468,14 +5553,18 @@ def pr_sweep(dry_run=False):
 
 def update_task_in_place(task_file, mutator):
     """Read, mutate, and write a task JSON at its current path. No state transition."""
-    task = read_json(task_file, {})
+    task_file = pathlib.Path(task_file)
+    state = task_file.parent.name
+    task_id = task_file.stem
+    found = find_task(task_id, states=(state,))
+    task = dict((found or (None, {}))[1] or {})
     mutator(task)
-    write_json_atomic(task_file, task)
+    _write_task_record(task, state)
     return task
 
 
 def _task_exists_in_queue(task_id, states=("queued", "claimed", "running")):
-    return any(task_path(task_id, state).exists() for state in states)
+    return find_task(task_id, states=states) is not None
 
 
 def _feature_has_in_flight_branch_repair(feature_id, *, exclude_task_ids=()):
@@ -5501,14 +5590,12 @@ def _feature_has_in_flight_branch_repair(feature_id, *, exclude_task_ids=()):
     (True, False, False)
     """
     exclude = set(exclude_task_ids or ())
-    for state in ("queued", "claimed", "running"):
-        for path in queue_dir(state).glob("*.json"):
-            task = read_json(path, {})
-            if task.get("feature_id") != feature_id:
-                continue
-            if task.get("task_id") in exclude:
-                continue
-            return True
+    for task in iter_tasks(states=("queued", "claimed", "running")):
+        if task.get("feature_id") != feature_id:
+            continue
+        if task.get("task_id") in exclude:
+            continue
+        return True
     return False
 
 
@@ -5798,20 +5885,16 @@ def _feature_all_children_failed_without_retry(feature):
         return False
     all_failed = True
     for child_id in child_ids:
-        if not (
-            task_path(child_id, "failed").exists()
-            or task_path(child_id, "abandoned").exists()
-        ):
+        found = find_task(child_id, states=("failed", "abandoned"))
+        if found is None:
             all_failed = False
             break
     if not all_failed:
         return False
     fid = feature.get("feature_id")
-    for state in ("queued", "claimed", "running"):
-        for p in queue_dir(state).glob("*.json"):
-            task = read_json(p, {})
-            if task.get("feature_id") == fid:
-                return False
+    for task in iter_tasks(states=("queued", "claimed", "running")):
+        if task.get("feature_id") == fid:
+            return False
     return True
 
 
@@ -6130,7 +6213,7 @@ def cleanup_worktrees(dry_run=False):
                     )
                     task["resolved_thread_count"] = resolved_count
                     task["resolve_thread_failures"] = failed_count
-        write_json_atomic(task_file, task)
+        _write_task_record(task, task.get("state") or "done")
         append_transition(task.get("task_id", "?"), "done", "done",
                           reason=f"cleanup: {state}")
         cleaned += 1
@@ -6719,7 +6802,7 @@ def create_feature(*, project, summary, source, roadmap_entry=None, roadmap_entr
         "canary": dict(canary or {}),
         "self_repair": dict(self_repair or {}),
     }
-    write_json_atomic(feature_path(feature_id), feature)
+    _write_feature_record(feature)
     return feature
 
 
@@ -6981,7 +7064,7 @@ def tick_self_repair_resolution():
                     details={"issue_key": issue.get("issue_key"), "execution_task_ids": exec_ids},
                 )
         if mutated:
-            write_json_atomic(feature_path(feature["feature_id"]), feature)
+            _write_feature_record(feature)
             changed_features.append(feature["feature_id"])
     return {"resolved": resolved, "stalled": stalled, "features": changed_features}
 
@@ -7447,12 +7530,11 @@ def reserve_orchestrator_operator_worktree(name, *, allow_with_self_repair=False
 
 def update_feature(feature_id, mutator):
     """Load feature, apply mutator, write atomically. Returns the updated dict."""
-    path = feature_path(feature_id)
-    feature = read_json(path, None)
+    feature = read_feature(feature_id)
     if feature is None:
         raise FileNotFoundError(f"no feature {feature_id}")
     mutator(feature)
-    write_json_atomic(path, feature)
+    _write_feature_record(feature)
     return feature
 
 
@@ -8478,12 +8560,10 @@ def report(kind):
             f"{issue.get('summary')} — {issue.get('detail')}"
         )
     retried = []
-    for state in STATES:
-        for p in queue_dir(state).glob("*.json"):
-            t = read_json(p, {})
-            attempt = int(t.get("attempt", 1) or 1)
-            if attempt > 1:
-                retried.append((state, t))
+    for task in iter_tasks(states=STATES):
+        attempt = int(task.get("attempt", 1) or 1)
+        if attempt > 1:
+            retried.append((task.get("state"), task))
     lines += ["", "## Retries"]
     lines.append(f"- tasks with retries: {len(retried)}")
     for state, task in sorted(retried, key=lambda item: (item[1].get("last_retry_at") or "", item[1].get("task_id") or ""), reverse=True)[:10]:
@@ -8584,32 +8664,18 @@ def report(kind):
 
 
 def has_in_flight_task(*, project, braid_template):
-    for state in ("queued", "claimed", "running"):
-        for p in queue_dir(state).glob("*.json"):
-            t = read_json(p, {})
-            if not t:
-                continue
-            if t.get("project") == project and t.get("braid_template") == braid_template:
-                return True
+    for task in iter_tasks(states=("queued", "claimed", "running"), project=project):
+        if task.get("braid_template") == braid_template:
+            return True
     return False
 
 
 def has_project_task(*, project, engine=None, source=None, role=None, states=("queued", "claimed", "running")):
     """Return True when a matching task already exists for the project."""
-    for state in states:
-        for p in queue_dir(state).glob("*.json"):
-            task = read_json(p, {})
-            if not task:
-                continue
-            if task.get("project") != project:
-                continue
-            if engine and task.get("engine") != engine:
-                continue
-            if source and task.get("source") != source:
-                continue
-            if role and task.get("role") != role:
-                continue
-            return True
+    for task in iter_tasks(states=states, project=project, engine=engine, role=role):
+        if source and task.get("source") != source:
+            continue
+        return True
     return False
 
 
@@ -9022,17 +9088,18 @@ def planner_status_text(project_filter=None):
         return f"error: unknown project {project_filter}"
     rows = []
     workflows = open_feature_workflow_summaries()
+    in_flight_counts = {}
+    for task in iter_tasks(states=("claimed", "running")):
+        project_name = task.get("project")
+        if not project_name:
+            continue
+        in_flight_counts[project_name] = in_flight_counts.get(project_name, 0) + 1
     for project in projects:
         name = project["name"]
         if project_filter is not None and name != project_filter:
             continue
         open_features = sum(1 for wf in workflows if wf.get("project") == name)
-        in_flight = 0
-        for state in ("claimed", "running"):
-            for p in queue_dir(state).glob("*.json"):
-                task = read_json(p, {})
-                if task.get("project") == name:
-                    in_flight += 1
+        in_flight = in_flight_counts.get(name, 0)
         rows.append({
             "project": name,
             "planner": (
@@ -9319,16 +9386,12 @@ def _request_codex_review(repo_path, pr_number, *, reason=None, commit_sha=None)
 def _latest_feature_planner_task(feature_id):
     latest = None
     latest_state = None
-    for state in STATES:
-        for path in queue_dir(state).glob("*.json"):
-            task = read_json(path, None)
-            if not task:
-                continue
-            if task.get("feature_id") != feature_id or task.get("role") != "planner":
-                continue
-            if latest is None or task.get("created_at", "") > latest.get("created_at", ""):
-                latest = task
-                latest_state = state
+    for task in iter_tasks(states=STATES, role="planner"):
+        if task.get("feature_id") != feature_id:
+            continue
+        if latest is None or task.get("created_at", "") > latest.get("created_at", ""):
+            latest = task
+            latest_state = task.get("state")
     if latest is None:
         return None
     return latest_state, latest
@@ -9352,12 +9415,10 @@ def _feature_related_tasks(feature_id):
     tasks = []
     if not feature_id:
         return tasks
-    for state in STATES:
-        for path in queue_dir(state).glob("*.json"):
-            task = read_json(path, {})
-            if task.get("feature_id") != feature_id:
-                continue
-            tasks.append({"task_id": task.get("task_id"), "state": state, "task": task})
+    for task in iter_tasks(states=STATES):
+        if task.get("feature_id") != feature_id:
+            continue
+        tasks.append({"task_id": task.get("task_id"), "state": task.get("state"), "task": task})
     return tasks
 
 
@@ -9831,11 +9892,9 @@ def _enqueue_qa_contract_repair(task):
         return {"enqueued": False, "reason": "missing_task"}
     target_task_id = task.get("task_id")
     source = f"fix-qa-contract:{target_task_id}"
-    for state_name in ("queued", "claimed", "running", "awaiting-review", "awaiting-qa"):
-        for path in queue_dir(state_name).glob("*.json"):
-            existing = read_json(path, {})
-            if existing.get("source") == source:
-                return {"enqueued": False, "reason": "already_exists", "task_id": existing.get("task_id")}
+    for existing in iter_tasks(states=("queued", "claimed", "running", "awaiting-review", "awaiting-qa")):
+        if existing.get("source") == source:
+            return {"enqueued": False, "reason": "already_exists", "task_id": existing.get("task_id")}
     repair_task = new_task(
         role="implementer",
         engine="codex",
@@ -9885,7 +9944,7 @@ def _recover_missing_child_task(task_id):
     task = _synthesize_task_from_transitions(task_id)
     if not task:
         return {"recovered": False, "reason": "transition_log_missing"}
-    write_json_atomic(task_path(task_id, task["state"]), task)
+    _write_task_record(task, task["state"])
     append_event(
         "workflow-check",
         "missing_child_recovered",
@@ -9918,8 +9977,7 @@ def _abandon_feature_missing_child(feature_id, task_id):
 
 
 def _project_green_regression_after(project_name, failed_at):
-    for path in queue_dir("done").glob("*.json"):
-        task = read_json(path, {})
+    for task in iter_tasks(states=("done",), project=project_name, role="qa"):
         if task.get("project") != project_name or task.get("role") != "qa":
             continue
         if (task.get("finished_at") or "") > (failed_at or ""):
@@ -10018,18 +10076,16 @@ def _workflow_policy_matches(policy, issue, task, project):
             return False
         current_id = task.get("task_id")
         current_created = task.get("created_at") or ""
-        for state_name in STATES:
-            for path in queue_dir(state_name).glob("*.json"):
-                sibling = read_json(path, {})
-                if sibling.get("task_id") == current_id:
-                    continue
-                if sibling.get("feature_id") != feature_id:
-                    continue
-                sibling_source = str(sibling.get("source") or "")
-                sibling_target = ((sibling.get("engine_args") or {}).get("target_task_id") or sibling.get("parent_task_id"))
-                if sibling_source.startswith("review-feedback:") and sibling_target == target_id:
-                    if (sibling.get("created_at") or "") > current_created:
-                        return True
+        for sibling in iter_tasks(states=STATES):
+            if sibling.get("task_id") == current_id:
+                continue
+            if sibling.get("feature_id") != feature_id:
+                continue
+            sibling_source = str(sibling.get("source") or "")
+            sibling_target = ((sibling.get("engine_args") or {}).get("target_task_id") or sibling.get("parent_task_id"))
+            if sibling_source.startswith("review-feedback:") and sibling_target == target_id:
+                if (sibling.get("created_at") or "") > current_created:
+                    return True
         return False
     if when == "project_main_clean":
         repo = repo_status(project["path"])
@@ -10951,7 +11007,7 @@ def _build_investigation_context(question):
         sections.append((f"TASK_{task_id}", task_text(task_id)))
 
     if feature_id:
-        feature = read_json(feature_path(feature_id), None)
+        feature = read_feature(feature_id)
         sections.append(
             (
                 f"FEATURE_{feature_id}",
@@ -11349,6 +11405,8 @@ def main(argv=None):
     p_canary.add_argument("--force", action="store_true")
     sub.add_parser("state-engine-status")
     sub.add_parser("state-engine-reconcile")
+    p_state_backup = sub.add_parser("state-engine-backup")
+    p_state_backup.add_argument("--path", default=None)
 
     p_env = sub.add_parser("env-health")
     p_env.add_argument("--refresh", action="store_true")
@@ -11495,6 +11553,8 @@ def main(argv=None):
         print(json.dumps(state_engine_status(), sort_keys=True))
     elif args.cmd == "state-engine-reconcile":
         print(json.dumps(state_engine_reconcile(), sort_keys=True))
+    elif args.cmd == "state-engine-backup":
+        print(json.dumps(state_engine_backup(backup_path=args.path), sort_keys=True))
     elif args.cmd == "env-health":
         print(environment_health_text(refresh=args.refresh))
     elif args.cmd == "repair-environment":
