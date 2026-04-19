@@ -346,7 +346,7 @@ def build_handlers(cfg):
                         buttons=feature_buttons(wf),
                     )
         for path in sorted(o.REPORT_DIR.glob("workflow-check_*.md"))[-3:]:
-            fingerprint = o.workflow_check_fingerprint(path.read_text(errors="replace"))
+            fingerprint = workflow_check_fingerprint(path.read_text(errors="replace"))
             if not fingerprint:
                 continue
             key = f"workflow-check:{fingerprint}"
