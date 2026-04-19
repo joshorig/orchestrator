@@ -3,2137 +3,1167 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>devmini orchestrator — Dashboard</title>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <title>devmini orchestrator dashboard</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
   <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
+    * { box-sizing: border-box; }
     :root {
       --bg: #020617;
-      --surface: rgba(15, 23, 42, 0.5);
-      --surface-solid: #0f172a;
+      --bg-2: #06111f;
+      --surface: rgba(15, 23, 42, 0.78);
+      --surface-2: rgba(15, 23, 42, 0.52);
       --border: #1e293b;
-      --border-hover: #475569;
+      --border-strong: #334155;
       --text: #e2e8f0;
       --muted: #94a3b8;
       --dim: #64748b;
       --cyan: #22d3ee;
       --emerald: #34d399;
-      --violet: #a78bfa;
       --amber: #fbbf24;
-      --rose: #fb7185;
       --orange: #fb923c;
+      --rose: #fb7185;
+      --violet: #a78bfa;
       --slate: #64748b;
     }
     body {
-      font-family: 'JetBrains Mono', monospace;
-      background: var(--bg);
-      color: var(--text);
+      margin: 0;
       min-height: 100vh;
-      padding: 1.25rem;
-      font-size: 0.75rem;
-      line-height: 1.45;
+      padding: 20px;
+      background:
+        radial-gradient(circle at top left, rgba(34, 211, 238, 0.12), transparent 26%),
+        radial-gradient(circle at top right, rgba(167, 139, 250, 0.08), transparent 22%),
+        linear-gradient(180deg, var(--bg-2), var(--bg));
+      color: var(--text);
+      font: 12px/1.5 "JetBrains Mono", monospace;
     }
     a { color: var(--cyan); text-decoration: none; }
-
-    /* ===== Header ===== */
-    .dashboard-header {
-      display: flex;
-      align-items: center;
-      gap: 1rem;
-      flex-wrap: wrap;
-      margin-bottom: 1.25rem;
-    }
-    .title-block { flex: 1 1 280px; min-width: 260px; }
-    .title-row { display: flex; align-items: center; gap: 0.75rem; }
-    .pulse-dot {
-      width: 10px; height: 10px; border-radius: 50%;
-      background: var(--cyan);
-      animation: pulse 2s infinite;
-    }
-    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
-    h1 {
-      font-size: 1.1rem; font-weight: 700; letter-spacing: -0.02em;
-      color: #f1f5f9;
-    }
-    .subtitle { color: var(--muted); font-size: 0.75rem; margin-top: 0.2rem; }
-    .timestamp { color: var(--dim); font-size: 0.7rem; margin-top: 0.15rem; }
-
-    .scorecard { display: flex; gap: 0.6rem; flex-wrap: wrap; }
-    .tile {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 0.5rem;
-      padding: 0.55rem 0.85rem;
-      min-width: 120px;
-      cursor: pointer;
-      transition: border-color 0.15s, transform 0.1s;
-      position: relative;
-    }
-    .tile:hover { border-color: var(--border-hover); transform: translateY(-1px); }
-    .tile.active { border-color: var(--cyan); box-shadow: 0 0 0 1px var(--cyan) inset; }
-    .tile-label {
-      color: var(--muted); font-size: 0.6rem;
-      text-transform: uppercase; letter-spacing: 0.08em;
-      margin-bottom: 0.2rem;
-    }
-    .tile-value {
-      font-size: 1.35rem; font-weight: 700;
-      font-variant-numeric: tabular-nums;
-      display: flex; align-items: center; gap: 0.45rem;
-    }
-    .tile.ok .tile-value { color: var(--emerald); }
-    .tile.warn .tile-value { color: var(--amber); }
-    .tile.crit .tile-value { color: var(--rose); }
-    .tile.crit { animation: alert-pulse 2.2s infinite; border-color: rgba(251, 113, 133, 0.5); }
-    @keyframes alert-pulse {
-      0%, 100% { box-shadow: 0 0 0 1px rgba(251, 113, 133, 0.3) inset; }
-      50%      { box-shadow: 0 0 0 2px rgba(251, 113, 133, 0.6) inset; }
-    }
-    .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-    .dot.ok { background: var(--emerald); }
-    .dot.warn { background: var(--amber); }
-    .dot.crit { background: var(--rose); }
-
-    /* ===== Filter pills ===== */
-    .filter-bar {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.4rem;
-      margin-bottom: 1rem;
-      min-height: 1.6rem;
-    }
-    .pill {
-      display: inline-flex; align-items: center; gap: 0.4rem;
-      background: rgba(34, 211, 238, 0.12);
-      border: 1px solid rgba(34, 211, 238, 0.5);
-      color: var(--cyan);
-      padding: 0.2rem 0.55rem;
-      border-radius: 999px;
-      font-size: 0.68rem;
-    }
-    .pill .x {
-      cursor: pointer;
-      color: var(--muted);
-      font-weight: 700;
-    }
-    .pill .x:hover { color: var(--rose); }
-    .filter-hint { color: var(--dim); font-size: 0.68rem; font-style: italic; }
-
-    /* ===== Grid layout ===== */
-    .grid {
+    h1, h2, h3, p { margin: 0; }
+    code, pre { font-family: inherit; }
+    .header {
       display: grid;
-      grid-template-columns: 210px minmax(0, 1fr) 300px;
-      gap: 1.1rem;
+      grid-template-columns: minmax(280px, 1.5fr) 2fr;
+      gap: 16px;
+      margin-bottom: 16px;
+      align-items: start;
     }
-    @media (max-width: 1100px) {
-      .grid { grid-template-columns: 1fr 300px; }
-      .agent-roster { grid-column: 1 / -1; }
-    }
-    @media (max-width: 760px) {
-      .grid { grid-template-columns: 1fr; }
-      .agent-roster, .right-rail, .pipeline-col { grid-column: 1; }
-    }
-
     .card {
       background: var(--surface);
       border: 1px solid var(--border);
-      border-radius: 0.75rem;
-      padding: 0.95rem;
+      border-radius: 16px;
+      padding: 16px;
+      backdrop-filter: blur(12px);
+      box-shadow: 0 20px 60px rgba(2, 6, 23, 0.28);
     }
-    .card + .card { margin-top: 1.1rem; }
-    .card-header {
+    .title-row {
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      margin-bottom: 0.75rem;
+      gap: 10px;
+      margin-bottom: 8px;
     }
-    .card-title {
-      font-size: 0.7rem;
+    .pulse {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: var(--cyan);
+      box-shadow: 0 0 18px rgba(34, 211, 238, 0.7);
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(0.82); }
+    }
+    .title h1 { font-size: 20px; }
+    .subtitle { color: var(--muted); margin-bottom: 8px; }
+    .timestamp { color: var(--dim); font-size: 11px; }
+    .scorecards {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(130px, 1fr));
+      gap: 12px;
+    }
+    .tile {
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 12px;
+      background: var(--surface-2);
+      cursor: pointer;
+      transition: transform 0.12s ease, border-color 0.12s ease;
+    }
+    .tile:hover { transform: translateY(-1px); border-color: var(--border-strong); }
+    .tile.active { border-color: var(--cyan); box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.4) inset; }
+    .tile-label {
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 10px;
+      margin-bottom: 6px;
+    }
+    .tile-value { font-size: 24px; font-weight: 700; }
+    .tile-sub { color: var(--dim); margin-top: 4px; font-size: 11px; }
+    .ok { color: var(--emerald); }
+    .warn { color: var(--amber); }
+    .crit { color: var(--rose); }
+    .filter-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 0 0 16px;
+      min-height: 28px;
+    }
+    .filter-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid rgba(34, 211, 238, 0.35);
+      border-radius: 999px;
+      padding: 4px 10px;
+      background: rgba(34, 211, 238, 0.08);
+      color: var(--cyan);
+      font-size: 11px;
+    }
+    .filter-pill button {
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      padding: 0;
+      font: inherit;
+    }
+    .filter-hint { color: var(--dim); font-size: 11px; }
+    .layout {
+      display: grid;
+      grid-template-columns: 280px minmax(0, 1fr) 330px;
+      gap: 16px;
+    }
+    .section-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: baseline;
+      margin-bottom: 12px;
+    }
+    .section-title {
+      font-size: 11px;
       text-transform: uppercase;
       letter-spacing: 0.08em;
       color: var(--muted);
-      font-weight: 600;
     }
-    .card-sub { color: var(--dim); font-size: 0.65rem; }
-
-    /* ===== Agent roster ===== */
-    .agent-grid {
-      display: grid;
-      grid-template-columns: 90px repeat(3, 1fr);
-      gap: 0.35rem;
-      font-size: 0.65rem;
-    }
-    .agent-grid .head {
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-      color: var(--dim);
-      font-size: 0.58rem;
-      text-align: center;
-      padding-bottom: 0.2rem;
-    }
-    .agent-grid .head.role { text-align: left; }
-    .agent-cell {
-      background: rgba(15, 23, 42, 0.6);
+    .section-sub { font-size: 11px; color: var(--dim); }
+    .stack { display: grid; gap: 16px; }
+    .agent-list, .feature-list, .mini-list { display: grid; gap: 10px; }
+    .agent-row, .mini-row, .task-row, .event-row {
       border: 1px solid var(--border);
-      border-radius: 0.35rem;
-      padding: 0.35rem 0.4rem;
-      text-align: center;
-      cursor: pointer;
-      font-variant-numeric: tabular-nums;
-      transition: border-color 0.15s;
+      border-radius: 12px;
+      padding: 10px 12px;
+      background: rgba(15, 23, 42, 0.45);
     }
-    .agent-cell:hover { border-color: var(--border-hover); }
-    .agent-cell.active { border-color: var(--cyan); }
-    .agent-cell.empty { color: var(--dim); }
-    .agent-cell.running {
-      background: rgba(6, 78, 59, 0.4);
-      border-color: var(--emerald);
-      color: var(--emerald);
-    }
-    .agent-cell.idle {
-      background: rgba(8, 51, 68, 0.35);
-      border-color: rgba(34, 211, 238, 0.4);
-      color: var(--cyan);
-    }
-    .agent-cell.failed {
-      background: rgba(136, 19, 55, 0.4);
-      border-color: var(--rose);
-      color: var(--rose);
-    }
-    .agent-role { color: var(--text); font-weight: 500; padding-left: 0.2rem; font-size: 0.7rem; }
-
-    /* ===== Feature pipeline ===== */
-    .feature-card {
-      border: 1px solid var(--border);
-      border-radius: 0.6rem;
-      padding: 0.7rem 0.85rem;
-      background: rgba(15, 23, 42, 0.4);
-      transition: border-color 0.15s;
-      cursor: pointer;
-    }
-    .feature-card + .feature-card { margin-top: 0.7rem; }
-    .feature-card:hover { border-color: var(--border-hover); }
-    .feature-card.blocked-frontier { border-left: 3px solid var(--rose); }
-    .feature-card.stale { border-left: 3px solid var(--amber); }
-    .feature-row1 {
+    .agent-row.active { border-color: var(--cyan); }
+    .agent-top, .mini-top {
       display: flex;
       justify-content: space-between;
+      gap: 8px;
       align-items: baseline;
-      gap: 0.8rem;
+      margin-bottom: 6px;
+    }
+    .agent-role { color: var(--text); font-weight: 700; }
+    .status-badge, .state-chip, .tag, .queue-pill {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 10px;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      text-transform: lowercase;
+    }
+    .status-running, .state-running { color: var(--emerald); border-color: rgba(52, 211, 153, 0.45); }
+    .status-idle, .state-queued, .state-claimed, .state-done { color: var(--cyan); border-color: rgba(34, 211, 238, 0.4); }
+    .status-queued, .state-awaiting-review, .state-awaiting-qa { color: var(--amber); border-color: rgba(251, 191, 36, 0.45); }
+    .status-failed, .status-blocked, .state-blocked, .state-failed, .state-abandoned { color: var(--rose); border-color: rgba(251, 113, 133, 0.45); }
+    .status-approve, .state-approve { color: var(--emerald); border-color: rgba(52, 211, 153, 0.45); }
+    .status-reject, .state-reject, .status-request_change, .state-request_change { color: var(--rose); border-color: rgba(251, 113, 133, 0.45); }
+    .status-pending, .state-pending, .status-abstain, .state-abstain { color: var(--amber); border-color: rgba(251, 191, 36, 0.45); }
+    .agent-detail, .mini-detail, .muted { color: var(--muted); }
+    .tiny { color: var(--dim); font-size: 11px; }
+    .feature-card {
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 14px;
+      background: rgba(15, 23, 42, 0.52);
+    }
+    .feature-card.stale { border-left: 4px solid var(--amber); }
+    .feature-card.blocked { border-left: 4px solid var(--rose); }
+    .feature-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
       flex-wrap: wrap;
+      margin-bottom: 8px;
     }
-    .feature-id {
-      font-weight: 600;
-      font-size: 0.78rem;
-      color: #f1f5f9;
-      font-variant-numeric: tabular-nums;
-    }
+    .feature-id { font-size: 14px; font-weight: 700; }
     .feature-project {
       color: var(--amber);
-      font-size: 0.65rem;
+      font-size: 10px;
       text-transform: uppercase;
-      letter-spacing: 0.06em;
-    }
-    .feature-age { color: var(--dim); font-size: 0.68rem; }
-    .feature-row2 {
-      margin-top: 0.5rem;
-      display: flex;
-      align-items: center;
-      gap: 0.35rem;
-      flex-wrap: wrap;
-    }
-    .state-chip {
-      font-size: 0.6rem;
-      padding: 0.15rem 0.45rem;
-      border-radius: 0.25rem;
-      font-variant-numeric: tabular-nums;
-      border: 1px solid transparent;
-    }
-    .state-chip.queued    { background: rgba(76, 29, 149, 0.35); border-color: var(--violet); color: var(--violet); }
-    .state-chip.claimed   { background: rgba(76, 29, 149, 0.2); border-color: rgba(167, 139, 250, 0.5); color: #cbd5e1; }
-    .state-chip.running   { background: rgba(6, 78, 59, 0.4); border-color: var(--emerald); color: var(--emerald); }
-    .state-chip.blocked   { background: rgba(136, 19, 55, 0.4); border-color: var(--rose); color: var(--rose); }
-    .state-chip.awaiting-review { background: rgba(251, 191, 36, 0.15); border-color: var(--amber); color: var(--amber); }
-    .state-chip.awaiting-qa     { background: rgba(251, 146, 60, 0.15); border-color: var(--orange); color: var(--orange); }
-    .state-chip.done      { background: rgba(52, 211, 153, 0.15); border-color: rgba(52, 211, 153, 0.4); color: rgba(52, 211, 153, 0.85); }
-    .state-chip.failed    { background: rgba(251, 113, 133, 0.15); border-color: rgba(251, 113, 133, 0.5); color: rgba(251, 113, 133, 0.9); }
-    .state-chip.abandoned { background: rgba(100, 116, 139, 0.2); border-color: var(--slate); color: var(--muted); }
-    .state-chip.zero { opacity: 0.35; }
-    .state-chip.emphasis { box-shadow: 0 0 0 1px currentColor inset; }
-    .frontier-line {
-      margin-top: 0.55rem;
-      font-size: 0.7rem;
-      color: var(--muted);
-      display: flex;
-      gap: 0.5rem;
-      flex-wrap: wrap;
-    }
-    .frontier-line code {
-      color: var(--cyan);
-      font-size: 0.7rem;
-    }
-    .blocker-tag {
-      background: rgba(251, 113, 133, 0.15);
-      color: var(--rose);
-      padding: 0.1rem 0.4rem;
-      border-radius: 0.25rem;
-      font-size: 0.65rem;
-      border: 1px solid rgba(251, 113, 133, 0.3);
-    }
-    .feature-detail {
-      margin-top: 0.7rem;
-      padding-top: 0.7rem;
-      border-top: 1px dashed var(--border);
-      display: none;
-      font-size: 0.7rem;
-      color: var(--muted);
-    }
-    .feature-card.expanded .feature-detail { display: block; }
-    .feature-detail ul { list-style: none; margin: 0; }
-    .feature-detail li { padding: 0.15rem 0; }
-    .feature-detail .label {
-      display: inline-block; min-width: 110px;
-      color: var(--dim);
-      font-size: 0.62rem;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-    }
-    .feature-detail code { color: var(--cyan); font-size: 0.68rem; }
-    .detail-actions { display: flex; gap: 0.4rem; margin-top: 0.6rem; flex-wrap: wrap; }
-    .btn {
-      background: rgba(34, 211, 238, 0.08);
-      border: 1px solid rgba(34, 211, 238, 0.35);
-      color: var(--cyan);
-      padding: 0.3rem 0.7rem;
-      border-radius: 0.3rem;
-      font-family: inherit;
-      font-size: 0.65rem;
+      letter-spacing: 0.08em;
+      margin-top: 2px;
       cursor: pointer;
-      transition: all 0.12s;
     }
-    .btn:hover { background: rgba(34, 211, 238, 0.18); }
-    .btn.rose { background: rgba(251, 113, 133, 0.08); border-color: rgba(251, 113, 133, 0.35); color: var(--rose); }
-    .btn.rose:hover { background: rgba(251, 113, 133, 0.18); }
-    .btn.amber { background: rgba(251, 191, 36, 0.08); border-color: rgba(251, 191, 36, 0.35); color: var(--amber); }
-
-    /* ===== Queue bar ===== */
+    .feature-summary { color: var(--text); margin-bottom: 10px; }
+    .feature-sections { display: grid; gap: 8px; }
+    .feature-section {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: rgba(2, 6, 23, 0.28);
+      overflow: hidden;
+    }
+    .feature-section[open] { border-color: var(--border-strong); }
+    .feature-section > summary {
+      list-style: none;
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      cursor: pointer;
+      padding: 10px 12px;
+    }
+    .feature-section > summary::-webkit-details-marker { display: none; }
+    .feature-section > summary:hover { background: rgba(15, 23, 42, 0.28); }
+    .summary-label {
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 10px;
+      font-weight: 700;
+    }
+    .summary-value {
+      color: var(--dim);
+      font-size: 11px;
+      text-align: right;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .section-body { padding: 0 10px 10px; }
+    .feature-meta, .feature-frontier, .feature-delivery, .feature-repair {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .meta-box, .frontier-box, .delivery-box, .repair-box, .tasks-box, .events-box {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px;
+      background: rgba(2, 6, 23, 0.28);
+    }
+    .box-k {
+      color: var(--dim);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 10px;
+      margin-bottom: 4px;
+    }
+    .box-v { color: var(--text); }
+    .task-list, .event-list { display: grid; gap: 8px; }
+    .task-row {
+      cursor: pointer;
+      transition: transform 0.12s ease, border-color 0.12s ease;
+    }
+    .task-row:hover { transform: translateY(-1px); border-color: var(--border-strong); }
+    .task-row.frontier { border-color: rgba(251, 113, 133, 0.45); }
+    .task-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 6px;
+      align-items: baseline;
+      flex-wrap: wrap;
+    }
+    .task-id { color: var(--cyan); }
+    .task-summary { color: var(--text); margin-bottom: 6px; }
+    .task-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+    }
+    .tag {
+      border-radius: 8px;
+      text-transform: none;
+      padding: 2px 6px;
+    }
+    .tag.blocker { color: var(--rose); border-color: rgba(251, 113, 133, 0.35); }
+    .tag.review { color: var(--amber); border-color: rgba(251, 191, 36, 0.35); }
+    .event-row {
+      display: grid;
+      grid-template-columns: auto auto 1fr;
+      gap: 8px;
+      align-items: baseline;
+    }
+    .event-role { color: var(--cyan); }
+    .event-name { color: var(--text); }
     .queue-bar {
       display: flex;
-      height: 22px;
-      border-radius: 0.3rem;
+      border-radius: 12px;
       overflow: hidden;
-      background: rgba(30, 41, 59, 0.5);
-      margin-bottom: 0.6rem;
+      background: rgba(15, 23, 42, 0.55);
+      height: 24px;
+      margin-bottom: 12px;
     }
     .queue-seg {
-      height: 100%;
-      cursor: pointer;
-      transition: filter 0.12s;
-      position: relative;
       min-width: 2px;
+      cursor: pointer;
+      transition: filter 0.12s ease;
     }
-    .queue-seg:hover { filter: brightness(1.3); }
-    .queue-seg.active { filter: brightness(1.4); box-shadow: 0 0 0 2px var(--cyan) inset; }
+    .queue-seg:hover { filter: brightness(1.2); }
+    .queue-seg.active { box-shadow: 0 0 0 2px rgba(226, 232, 240, 0.5) inset; }
     .queue-legend {
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 0.3rem 0.6rem;
-      font-size: 0.65rem;
+      gap: 8px;
     }
-    .qleg-row {
+    .queue-item {
       display: flex;
       justify-content: space-between;
-      gap: 0.5rem;
+      gap: 8px;
+      align-items: center;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 8px 10px;
+      background: rgba(15, 23, 42, 0.4);
       cursor: pointer;
-      padding: 0.15rem 0.25rem;
-      border-radius: 0.2rem;
     }
-    .qleg-row:hover { background: rgba(71, 85, 105, 0.25); }
-    .qleg-row.active { background: rgba(34, 211, 238, 0.12); }
-    .qleg-name { display: flex; align-items: center; gap: 0.4rem; color: var(--muted); }
-    .qleg-name .dot { width: 7px; height: 7px; }
-    .qleg-count { color: var(--text); font-variant-numeric: tabular-nums; font-weight: 500; }
-    .qleg-count.zero { color: var(--dim); }
-
-    /* ===== Blocker table ===== */
-    table.blockers {
+    .queue-item.active { border-color: var(--cyan); }
+    .queue-name {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--muted);
+    }
+    .queue-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+    }
+    table {
       width: 100%;
       border-collapse: collapse;
-      font-size: 0.68rem;
+      font-size: 11px;
     }
-    .blockers tr { cursor: pointer; }
-    .blockers tr:hover td { background: rgba(71, 85, 105, 0.2); }
-    .blockers tr.active td { background: rgba(34, 211, 238, 0.1); }
-    .blockers td {
-      padding: 0.4rem 0.4rem;
+    td {
+      padding: 8px 4px;
       border-top: 1px solid var(--border);
     }
-    .blockers td.code {
-      color: var(--rose);
-      font-weight: 500;
+    tr:first-child td { border-top: 0; }
+    tr.active td { background: rgba(34, 211, 238, 0.08); }
+    tr.clickable { cursor: pointer; }
+    td.right { text-align: right; }
+    td.code { color: var(--rose); font-weight: 700; }
+    .empty {
+      color: var(--dim);
+      font-style: italic;
+      text-align: center;
+      padding: 16px 8px;
     }
-    .blockers td.count {
-      text-align: right;
-      font-variant-numeric: tabular-nums;
-      font-weight: 600;
-    }
-    .blockers td.pct {
-      text-align: right;
-      color: var(--muted);
-      font-size: 0.62rem;
-    }
-    .blockers tr.severity-3 td.code { color: #f43f5e; }
-    .blockers tr.severity-3 td.count { color: #f43f5e; }
-    .blockers .blink {
-      width: 6px; height: 6px; border-radius: 50%;
-      background: var(--rose);
-      display: inline-block; margin-right: 0.4rem;
-      animation: blink 1.4s infinite;
-    }
-    @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.2; } }
-
-    /* ===== Transition ticker ===== */
-    .ticker {
-      max-height: 180px;
-      overflow-y: auto;
-      font-size: 0.66rem;
-      border-top: 1px solid var(--border);
-      padding-top: 0.55rem;
-    }
-    .ticker::-webkit-scrollbar { width: 6px; }
-    .ticker::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-    .tick-row {
-      display: grid;
-      grid-template-columns: auto 1fr auto;
-      gap: 0.5rem;
-      padding: 0.2rem 0.25rem;
-      border-radius: 0.2rem;
-      color: var(--muted);
-      font-variant-numeric: tabular-nums;
-      line-height: 1.5;
-    }
-    .tick-row:hover { background: rgba(71, 85, 105, 0.2); }
-    .tick-row.failed { color: var(--rose); background: rgba(251, 113, 133, 0.06); }
-    .tick-ts { color: var(--dim); font-size: 0.6rem; }
-    .tick-trans { color: var(--text); }
-    .tick-arrow { color: var(--dim); padding: 0 0.15rem; }
-    .tick-role {
-      font-size: 0.58rem;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      color: var(--cyan);
-    }
-
-    /* ===== Modal ===== */
     .modal-scrim {
-      position: fixed; inset: 0;
-      background: rgba(2, 6, 23, 0.8);
+      position: fixed;
+      inset: 0;
+      background: rgba(2, 6, 23, 0.78);
       display: none;
       align-items: center;
       justify-content: center;
-      padding: 1rem;
-      z-index: 10;
-      backdrop-filter: blur(3px);
+      padding: 20px;
+      z-index: 50;
     }
     .modal-scrim.open { display: flex; }
     .modal {
-      background: #0f172a;
-      border: 1px solid var(--border);
-      border-radius: 0.75rem;
-      max-width: 720px;
-      width: 100%;
-      max-height: 85vh;
-      overflow-y: auto;
-      padding: 1.25rem;
+      width: min(960px, 100%);
+      max-height: calc(100vh - 40px);
+      overflow: auto;
+      background: #081120;
+      border: 1px solid var(--border-strong);
+      border-radius: 18px;
+      padding: 18px;
+      box-shadow: 0 30px 80px rgba(2, 6, 23, 0.55);
     }
-    .modal h2 { font-size: 0.9rem; color: #f1f5f9; margin-bottom: 0.2rem; }
-    .modal .close { float: right; color: var(--muted); cursor: pointer; font-size: 1.1rem; }
-    .deliberation {
-      background: rgba(15, 23, 42, 0.6);
-      border: 1px solid var(--border);
-      border-radius: 0.45rem;
-      padding: 0.65rem 0.8rem;
-      margin-top: 0.6rem;
-    }
-    .deliberation .stage {
-      color: var(--amber);
-      font-size: 0.65rem;
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-    }
-    .verdict-approve { color: var(--emerald); }
-    .verdict-reject  { color: var(--rose); }
-    .verdict-abstain { color: var(--muted); }
-
-    /* ===== Roadmap entry block (inside expanded feature) ===== */
-    .roadmap-box {
-      margin-top: 0.35rem;
-      padding: 0.6rem 0.75rem;
-      background: rgba(30, 41, 59, 0.4);
-      border: 1px solid var(--border);
-      border-left: 3px solid var(--amber);
-      border-radius: 0.4rem;
-    }
-    .roadmap-head {
-      display: flex; gap: 0.5rem; align-items: baseline;
-      margin-bottom: 0.35rem;
-    }
-    .roadmap-id {
-      color: var(--amber); font-weight: 600; font-size: 0.72rem;
-      letter-spacing: 0.03em;
-    }
-    .roadmap-title { color: var(--text); font-size: 0.72rem; }
-    .roadmap-grid {
-      display: grid; grid-template-columns: 92px 1fr; gap: 0.2rem 0.65rem;
-      font-size: 0.68rem; color: var(--muted); line-height: 1.45;
-    }
-    .rg-label {
-      color: var(--dim); text-transform: uppercase;
-      font-size: 0.58rem; letter-spacing: 0.07em;
-      padding-top: 0.1rem;
-    }
-
-    /* ===== Task row (inside expanded feature) ===== */
-    .task-list { margin-top: 0.7rem; }
-    .task-list-head {
-      font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.08em;
-      color: var(--dim); margin-bottom: 0.35rem;
-    }
-    .task-row {
-      display: grid;
-      grid-template-columns: auto auto 1fr auto;
-      gap: 0.5rem;
-      align-items: center;
-      padding: 0.4rem 0.55rem;
-      border: 1px solid var(--border);
-      border-radius: 0.35rem;
-      background: rgba(15, 23, 42, 0.5);
-      margin-bottom: 0.3rem;
+    .close {
+      float: right;
       cursor: pointer;
-      font-size: 0.67rem;
-      transition: border-color 0.12s;
-    }
-    .task-row:hover { border-color: var(--border-hover); }
-    .task-row.frontier { border-left: 3px solid var(--rose); }
-    .task-row .role-chip {
-      font-size: 0.57rem; text-transform: uppercase; letter-spacing: 0.06em;
-      color: var(--cyan); padding: 0.1rem 0.35rem;
-      border: 1px solid rgba(34,211,238,0.35); border-radius: 0.2rem;
-      background: rgba(34,211,238,0.06);
-    }
-    .task-row .role-chip.planner { color: var(--violet); border-color: rgba(167,139,250,0.35); background: rgba(167,139,250,0.06); }
-    .task-row .role-chip.reviewer { color: var(--amber); border-color: rgba(251,191,36,0.35); background: rgba(251,191,36,0.06); }
-    .task-row .role-chip.qa { color: var(--orange); border-color: rgba(251,146,60,0.35); background: rgba(251,146,60,0.06); }
-    .task-row .tr-summary {
       color: var(--muted);
-      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      font-size: 18px;
+      line-height: 1;
     }
-    .task-row .tr-id { color: var(--cyan); font-variant-numeric: tabular-nums; }
-    .task-row .tr-state { font-size: 0.58rem; padding: 0.08rem 0.35rem; border-radius: 0.2rem; }
-
-    /* ===== Task detail modal ===== */
-    .modal.wide { max-width: 920px; }
-    .task-modal-head {
-      display: flex; justify-content: space-between; align-items: baseline;
-      margin-bottom: 0.4rem; flex-wrap: wrap; gap: 0.5rem;
-    }
-    .task-modal-head h2 { font-size: 0.85rem; color: #f1f5f9; font-family: inherit; }
-    .task-modal-sub { color: var(--muted); font-size: 0.68rem; }
-    .task-modal-meta {
-      display: grid; grid-template-columns: 100px 1fr; gap: 0.2rem 0.75rem;
-      font-size: 0.68rem; margin: 0.5rem 0 1rem;
-    }
-    .task-modal-meta .k {
-      color: var(--dim); text-transform: uppercase; font-size: 0.58rem;
-      letter-spacing: 0.07em; padding-top: 0.1rem;
-    }
-    .task-modal-meta .v { color: var(--text); }
-    .task-modal-meta code { color: var(--cyan); font-size: 0.67rem; }
-
-    .tabs {
-      display: flex; gap: 0.25rem;
-      border-bottom: 1px solid var(--border);
-      margin-bottom: 0.85rem;
+    .close:hover { color: var(--text); }
+    .modal-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: baseline;
       flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+    .modal-head h2 { font-size: 16px; }
+    .modal-sub { color: var(--muted); font-size: 11px; }
+    .modal-grid {
+      display: grid;
+      grid-template-columns: 120px 1fr;
+      gap: 6px 12px;
+      font-size: 11px;
+      margin: 12px 0 16px;
+    }
+    .modal-grid .k, .timeline .k, .kv-grid .k {
+      color: var(--dim);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 10px;
+    }
+    .tabs {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 14px;
     }
     .tab {
-      padding: 0.4rem 0.8rem; cursor: pointer;
-      color: var(--muted); font-size: 0.7rem;
+      padding: 8px 0;
+      color: var(--muted);
       border-bottom: 2px solid transparent;
-      transition: all 0.12s;
+      cursor: pointer;
+      font-size: 11px;
     }
-    .tab:hover { color: var(--text); }
     .tab.active { color: var(--cyan); border-bottom-color: var(--cyan); }
-    .tab .badge {
-      display: inline-block; margin-left: 0.35rem;
-      font-size: 0.55rem; padding: 0.05rem 0.35rem;
-      border-radius: 0.2rem;
-    }
-    .tab .badge.ok   { color: var(--emerald); border: 1px solid var(--emerald); }
-    .tab .badge.warn { color: var(--amber);   border: 1px solid var(--amber); }
-    .tab .badge.crit { color: var(--rose);    border: 1px solid var(--rose); }
-    .tab .badge.dim  { color: var(--dim);     border: 1px solid var(--border); }
     .tab-panel { display: none; }
     .tab-panel.active { display: block; }
-
-    /* Timeline */
     .timeline {
       display: grid;
-      grid-template-columns: 130px 110px 1fr;
-      gap: 0.15rem 0.6rem;
-      font-size: 0.67rem;
-      background: rgba(15,23,42,0.4);
+      grid-template-columns: 120px 160px;
+      gap: 6px 12px;
       border: 1px solid var(--border);
-      border-radius: 0.4rem;
-      padding: 0.55rem 0.65rem;
+      border-radius: 12px;
+      padding: 12px;
+      background: rgba(15, 23, 42, 0.34);
     }
-    .timeline .tl-k { color: var(--dim); text-transform: uppercase; font-size: 0.58rem; letter-spacing: 0.06em; }
-    .timeline .tl-ts { color: var(--cyan); font-variant-numeric: tabular-nums; }
-    .timeline .tl-delta { color: var(--muted); font-size: 0.6rem; }
-
-    /* Files + commits tables */
-    .data-table {
-      width: 100%; border-collapse: collapse; font-size: 0.66rem;
-      margin-top: 0.4rem;
-    }
-    .data-table th {
-      text-align: left; color: var(--dim); font-weight: 500;
-      font-size: 0.58rem; text-transform: uppercase; letter-spacing: 0.07em;
-      padding: 0.3rem 0.35rem; border-bottom: 1px solid var(--border);
-    }
-    .data-table td {
-      padding: 0.3rem 0.35rem;
-      border-bottom: 1px solid rgba(30,41,59,0.5);
-      color: var(--text);
-      font-variant-numeric: tabular-nums;
-    }
-    .data-table td.path { color: var(--cyan); font-size: 0.65rem; }
-    .data-table td.added { color: var(--emerald); text-align: right; }
-    .data-table td.removed { color: var(--rose); text-align: right; }
-    .data-table td.sha { color: var(--amber); font-size: 0.62rem; }
-
-    /* Review gates */
-    .gate-row {
-      display: grid; grid-template-columns: 140px 80px 80px 1fr; gap: 0.5rem;
-      padding: 0.4rem 0.55rem;
-      border: 1px solid var(--border); border-radius: 0.3rem;
-      background: rgba(15,23,42,0.45);
-      margin-bottom: 0.35rem;
-      font-size: 0.67rem;
-    }
-    .gate-row.approve { border-left: 3px solid var(--emerald); }
-    .gate-row.reject  { border-left: 3px solid var(--rose); }
-    .gate-row.abstain { border-left: 3px solid var(--slate); }
-    .gate-row .g-name { color: var(--cyan); }
-    .gate-row .g-owner { color: var(--muted); }
-    .gate-row .g-verdict.approve { color: var(--emerald); }
-    .gate-row .g-verdict.reject  { color: var(--rose); }
-    .gate-row .g-verdict.abstain { color: var(--muted); }
-    .gate-row .g-note { color: var(--muted); }
-
-    /* QA scope box */
-    .scope-box {
+    .timeline .v { color: var(--text); }
+    .kv-grid {
       display: grid;
-      grid-template-columns: auto 1fr;
-      gap: 0.3rem 0.6rem;
-      font-size: 0.67rem;
-      padding: 0.55rem 0.7rem;
-      background: rgba(15,23,42,0.4);
-      border-radius: 0.4rem;
+      grid-template-columns: 140px 1fr;
+      gap: 6px 12px;
       border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      background: rgba(15, 23, 42, 0.34);
     }
-    .scope-box .sc-k { color: var(--dim); text-transform: uppercase; font-size: 0.58rem; letter-spacing: 0.07em; }
-    .scope-chip {
-      display: inline-block; margin: 0.1rem 0.25rem 0.1rem 0;
-      padding: 0.1rem 0.4rem; border-radius: 0.2rem;
-      font-size: 0.6rem;
+    .pill-inline {
+      display: inline-block;
+      margin: 0 6px 6px 0;
+      padding: 3px 8px;
+      border-radius: 999px;
       border: 1px solid var(--border);
       color: var(--muted);
-      font-family: inherit;
+      font-size: 10px;
     }
-    .scope-chip.observed { color: var(--emerald); border-color: rgba(52,211,153,0.4); background: rgba(52,211,153,0.08); }
-    .scope-chip.missing  { color: var(--rose);    border-color: rgba(251,113,133,0.4); background: rgba(251,113,133,0.08); }
-    .scope-verdict.scope_ok        { color: var(--emerald); }
-    .scope-verdict.scope_incomplete{ color: var(--rose); }
-
-    /* Log tail block */
-    .log-tail {
-      background: #0b1220;
+    .gate-list, .finding-list, .evidence-list { display: grid; gap: 8px; }
+    .gate-row, .finding-row, .evidence-row {
       border: 1px solid var(--border);
-      border-radius: 0.4rem;
-      padding: 0.6rem 0.75rem;
-      font-size: 0.62rem;
+      border-radius: 12px;
+      padding: 10px 12px;
+      background: rgba(15, 23, 42, 0.34);
+      font-size: 11px;
+    }
+    .gate-name { color: var(--cyan); margin-bottom: 4px; }
+    .gate-panel { color: var(--muted); }
+    .log-tail {
+      background: #020617;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
       color: #cbd5e1;
-      max-height: 220px; overflow-y: auto;
-      white-space: pre;
-      font-family: 'JetBrains Mono', monospace;
-      margin-top: 0.4rem;
+      font-size: 11px;
+      white-space: pre-wrap;
+      overflow: auto;
+      max-height: 280px;
     }
-    .log-tail::-webkit-scrollbar { width: 6px; }
-    .log-tail::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-
-    /* Delivery table */
-    .delivery-grid {
-      display: grid; grid-template-columns: 130px 1fr; gap: 0.3rem 0.75rem;
-      font-size: 0.68rem;
+    @media (max-width: 1280px) {
+      .layout { grid-template-columns: 1fr; }
+      .header { grid-template-columns: 1fr; }
     }
-    .delivery-grid .dk { color: var(--dim); text-transform: uppercase; font-size: 0.58rem; letter-spacing: 0.07em; }
-    .pr-state-badge {
-      display: inline-block; padding: 0.1rem 0.45rem;
-      font-size: 0.6rem; border-radius: 0.2rem; border: 1px solid;
-    }
-    .pr-state-MERGED  { color: var(--emerald); border-color: rgba(52,211,153,0.5); background: rgba(52,211,153,0.08); }
-    .pr-state-OPEN    { color: var(--cyan);    border-color: rgba(34,211,238,0.5); background: rgba(34,211,238,0.08); }
-    .pr-state-CLOSED  { color: var(--slate);   border-color: rgba(100,116,139,0.5); background: rgba(100,116,139,0.08); }
-
-    .section-title {
-      font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.08em;
-      color: var(--muted); margin: 0.75rem 0 0.4rem;
-    }
-    .muted-text { color: var(--muted); font-size: 0.68rem; font-style: italic; }
-
-    /* Self-repair badge */
-    .sr-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.3rem;
-      padding: 0.1rem 0.4rem;
-      border-radius: 0.25rem;
-      font-size: 0.6rem;
-      border: 1px solid;
-    }
-    .sr-badge.pending    { color: var(--amber); border-color: var(--amber); background: rgba(251, 191, 36, 0.08); }
-    .sr-badge.planned    { color: var(--cyan);  border-color: var(--cyan);  background: rgba(34, 211, 238, 0.08); }
-    .sr-badge.in_progress{ color: var(--emerald); border-color: var(--emerald); background: rgba(52, 211, 153, 0.08); }
-    .sr-badge.stalled    { color: var(--rose); border-color: var(--rose); background: rgba(251, 113, 133, 0.08); }
-    .sr-badge.escalated  { color: var(--orange); border-color: var(--orange); }
-
-    .footer { text-align: center; margin-top: 1.5rem; color: var(--dim); font-size: 0.65rem; }
-
-    /* Utility */
-    .empty-state {
-      color: var(--dim);
-      font-style: italic;
-      padding: 1rem 0.5rem;
-      text-align: center;
-      font-size: 0.7rem;
+    @media (max-width: 900px) {
+      .scorecards { grid-template-columns: repeat(2, minmax(130px, 1fr)); }
+      .feature-meta, .feature-frontier, .feature-delivery, .feature-repair { grid-template-columns: 1fr; }
+      .queue-legend { grid-template-columns: 1fr; }
+      .modal-grid, .timeline, .kv-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
 <body>
-
-  <!-- ============ HEADER ============ -->
-  <header class="dashboard-header">
-    <div class="title-block">
+  <section class="header">
+    <div class="card title">
       <div class="title-row">
-        <span class="pulse-dot"></span>
-        <h1>devmini orchestrator — dashboard</h1>
+        <span class="pulse"></span>
+        <h1>devmini orchestrator</h1>
       </div>
-      <div class="subtitle">workflow state · queue · features · metrics</div>
-      <div class="timestamp" id="ts">—</div>
+      <p class="subtitle">workflow state, feature frontier, queue pressure, blockers, self-repair, and delivery state</p>
+      <p class="timestamp" id="timestamp">loading…</p>
     </div>
-    <div class="scorecard" id="scorecard"></div>
-  </header>
+    <div class="scorecards" id="scorecards"></div>
+  </section>
 
-  <div class="filter-bar" id="filter-bar">
-    <span class="filter-hint">No filters active. Click a tile, agent cell, queue segment, or blocker code to filter.</span>
-  </div>
+  <div class="filter-bar" id="filters"></div>
 
-  <!-- ============ MAIN GRID ============ -->
-  <section class="grid">
-
-    <!-- Left column: agent roster -->
-    <aside class="agent-roster">
+  <section class="layout">
+    <aside class="stack">
       <div class="card">
-        <div class="card-header">
-          <span class="card-title">agent roster</span>
-          <span class="card-sub">role × status</span>
+        <div class="section-head">
+          <span class="section-title">Agent Roster</span>
+          <span class="section-sub" id="agentCount">-</span>
         </div>
-        <div class="agent-grid" id="agent-grid"></div>
+        <div class="agent-list" id="agents"></div>
+      </div>
+      <div class="card">
+        <div class="section-head">
+          <span class="section-title">Dashboard Server</span>
+          <span class="section-sub">live config</span>
+        </div>
+        <div class="mini-list" id="server"></div>
+      </div>
+      <div class="card">
+        <div class="section-head">
+          <span class="section-title">Claude Budget</span>
+          <span class="section-sub">24h hit tail</span>
+        </div>
+        <div class="mini-list" id="budget"></div>
       </div>
     </aside>
 
-    <!-- Middle: feature pipeline -->
-    <main class="pipeline-col">
+    <main class="stack">
       <div class="card">
-        <div class="card-header">
-          <span class="card-title">feature pipeline</span>
-          <span class="card-sub" id="feature-count">— open</span>
+        <div class="section-head">
+          <span class="section-title">Feature Pipeline</span>
+          <span class="section-sub" id="featureCount">-</span>
         </div>
-        <div id="feature-list"></div>
+        <div class="feature-list" id="features"></div>
       </div>
     </main>
 
-    <!-- Right: queue + blockers + ticker -->
-    <aside class="right-rail">
+    <aside class="stack">
       <div class="card">
-        <div class="card-header">
-          <span class="card-title">queue depth</span>
-          <span class="card-sub" id="queue-total">— tasks</span>
+        <div class="section-head">
+          <span class="section-title">Queue Depth</span>
+          <span class="section-sub" id="queueTotal">-</span>
         </div>
-        <div class="queue-bar" id="queue-bar"></div>
-        <div class="queue-legend" id="queue-legend"></div>
+        <div class="queue-bar" id="queueBar"></div>
+        <div class="queue-legend" id="queueLegend"></div>
       </div>
       <div class="card">
-        <div class="card-header">
-          <span class="card-title">blocker codes · 24h</span>
-          <span class="card-sub" id="blocker-count">0 active</span>
+        <div class="section-head">
+          <span class="section-title">Blocker Codes</span>
+          <span class="section-sub" id="blockerCount">-</span>
         </div>
-        <table class="blockers"><tbody id="blocker-tbody"></tbody></table>
+        <table><tbody id="blockers"></tbody></table>
       </div>
       <div class="card">
-        <div class="card-header">
-          <span class="card-title">recent transitions</span>
-          <span class="card-sub">live tail</span>
+        <div class="section-head">
+          <span class="section-title">Recent Transitions</span>
+          <span class="section-sub">tail</span>
         </div>
-        <div class="ticker" id="ticker"></div>
+        <div class="mini-list" id="transitions"></div>
       </div>
     </aside>
-
   </section>
 
-  <p class="footer">devmini orchestrator · prototype dashboard · data refreshes every 5s (mocked in this prototype)</p>
-
-  <!-- Modal -->
-  <div class="modal-scrim" id="modal-scrim" onclick="if(event.target.id==='modal-scrim') closeModal()">
-    <div class="modal" id="modal"></div>
+  <div class="modal-scrim" id="modalScrim" onclick="if (event.target.id === 'modalScrim') closeTaskModal()">
+    <div class="modal" id="taskModal"></div>
   </div>
 
   <script>
-  // ============================================================
-  //  MOCK DATA — replaced at production time by dashboard_feed.py
-  // ============================================================
-  const MOCK = {
-    timestamp: "2026-04-19T01:04:56Z",
-    health: {
-      environment_ok: 1,
-      environment_error_count: 0,
-      workflow_check_issue_count: 3,
-      feature_open_count: 5,
-      feature_frontier_blocked_count: 2,
-    },
-    agents: [
-      { role: "planner",        status: "idle",    last_seen_at: "2026-04-19T00:59:12Z" },
-      { role: "implementer",    status: "running", last_seen_at: "2026-04-19T01:04:40Z", slot: "codex-2" },
-      { role: "implementer",    status: "idle",    last_seen_at: "2026-04-19T01:00:00Z", slot: "codex-1" },
-      { role: "reviewer",       status: "idle",    last_seen_at: "2026-04-19T00:58:30Z" },
-      { role: "qa",             status: "idle",    last_seen_at: "2026-04-19T00:57:45Z" },
-      { role: "workflow-check", status: "running", last_seen_at: "2026-04-19T01:04:22Z" },
-    ],
-    queue: [
-      { state: "queued",           count: 2 },
-      { state: "claimed",          count: 0 },
-      { state: "running",          count: 1 },
-      { state: "blocked",          count: 3 },
-      { state: "awaiting-review",  count: 1 },
-      { state: "awaiting-qa",      count: 0 },
-      { state: "done",             count: 142 },
-      { state: "failed",           count: 8 },
-      { state: "abandoned",        count: 2 },
-    ],
-    features: [
-      {
-        feature_id: "feature-20260418-090733-08150b",
-        project: "devmini-orchestrator",
-        status: "open",
-        created_at: "2026-04-18T09:07:33Z",
-        roadmap_entry: {
-          id: "R-023",
-          title: "jmh baseline comparator lane",
-          goal: "Introduce a stable jmh baseline comparator so alloc-gate regressions are diagnosed automatically instead of requiring a human to open the raw jmh report.",
-          scope: "benchmarks/src/jmh/**, bin/orchestrator.py jmh ingest helper, qa/regression.sh comparator invocation",
-          out_of_scope: "jmh harness changes, Grafana dashboards, human-readable HTML reports",
-          acceptance: "qa/regression.sh exits non-zero on >3% throughput regression vs HEAD~7 baseline; blocker_code=jmh_baseline_regression emitted with per-benchmark diff",
-        },
-        child_task_ids: ["task-20260418-090733-bcee12", "task-20260418-090952-4a6da9", "task-20260416-233109-452e8d"],
-        frontier_task_id: "task-20260416-233109-452e8d",
-        frontier_task_state: "blocked",
-        frontier_blocker_code: "template_refine_exhausted",
-        frontier_blocker_detail: "BRAID_REFINE: CheckJmh: missing baseline comparator",
-        state_counts: { queued: 0, claimed: 0, running: 0, blocked: 1, "awaiting-review": 0, "awaiting-qa": 0, done: 2, failed: 0 },
-        self_repair: {
-          enabled: true, status: "planned",
-          last_attached_issue_key: "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
-          issue_count: 1,
-          last_deliberation_at: "2026-04-19T00:52:34Z",
-          deliberations: [
-            { stage: "pre-exec",       verdict: "approve", panel: "claude+codex", summary: "Plan coherent; proceeds to replan with refined baseline comparator" },
-            { stage: "blocker-verify", verdict: "reject",  panel: "claude+codex", summary: "Proposed fix would mask a real jmh regression; recommend regenerating baseline" },
-          ],
-        },
-      },
-      {
-        feature_id: "feature-20260415-101058-14d56c",
-        project: "lvc-standard",
-        status: "open",
-        created_at: "2026-04-15T10:10:58Z",
-        roadmap_entry: {
-          id: "R-001",
-          title: "Prometheus/OTel metrics exporter module",
-          goal: "New `metrics` module exposes per-key write rate, publish-latency histogram, guaranteed-backlog depth, and journal-segment utilization in Prometheus + OTLP formats.",
-          scope: "com.ull.lvc.metrics package, pluggable MetricsSink, zero-alloc counter/histogram backed by Agrona, adapters for Prometheus text + OTLP gRPC, LvcMetricsRegistry.attach(store).",
-          out_of_scope: "Grafana dashboards, JVM/GC metrics (covered by JMX already), any allocation on publish path.",
-          acceptance: "Alloc gate green with metrics attached; Prometheus scrape returns all four metric families; unit test asserts counters advance on publish.",
-        },
-        child_task_ids: ["task-20260414-045947-0db815", "task-20260416-124111-bf73ca"],
-        frontier_task_id: "task-20260416-124111-bf73ca",
-        frontier_task_state: "failed",
-        frontier_blocker_code: "false_blocker_claim",
-        frontier_blocker_detail: "reviewer asserted dirty worktree, but git diff is empty",
-        state_counts: { queued: 0, claimed: 0, running: 0, blocked: 0, "awaiting-review": 0, "awaiting-qa": 0, done: 1, failed: 1 },
-        self_repair: {
-          enabled: true, status: "pending",
-          last_attached_issue_key: "task:task-20260416-124111-bf73ca:failed:false_blocker_claim",
-          issue_count: 1,
-          last_deliberation_at: "2026-04-19T00:10:00Z",
-          deliberations: [],
-        },
-      },
-      {
-        feature_id: "feature-20260418-161200-aa4d56",
-        project: "trade-research-platform",
-        status: "open",
-        created_at: "2026-04-18T16:12:00Z",
-        roadmap_entry: {
-          id: "R-014",
-          title: "Option chain streaming page",
-          goal: "Render a live option-chain page with bid/ask ladders, IV surface colour, and a WebSocket-backed quote stream.",
-          scope: "ui/src/routes/chain/**, api/src/streams/chain_ws.py, playwright specs for ladder snapshots",
-          out_of_scope: "Greeks computation, historical playback, mobile responsive layout",
-          acceptance: "Playwright snapshot parity with fixture; ws reconnects under network loss within 2s; alloc profile unchanged",
-        },
-        child_task_ids: ["task-20260418-161200-111111", "task-20260418-161221-222222"],
-        frontier_task_id: "task-20260418-161221-222222",
-        frontier_task_state: "running",
-        state_counts: { queued: 0, claimed: 0, running: 1, blocked: 0, "awaiting-review": 0, "awaiting-qa": 0, done: 1, failed: 0 },
-      },
-      {
-        feature_id: "feature-20260419-000245-4d8721",
-        project: "dag-framework",
-        status: "open",
-        created_at: "2026-04-19T00:02:45Z",
-        roadmap_entry: {
-          id: "R-007",
-          title: "Fan-in node cold-start latency",
-          goal: "Cut cold-start latency of fan-in nodes by pre-binding downstream edges during DAG warm-up.",
-          scope: "core/src/main/java/com/ull/dag/FanInNode.java and related warm-up tests.",
-          out_of_scope: "Fan-out, hot-path allocation refactors, new public API.",
-          acceptance: "Warm-up benchmark shows p95 improvement > 20%; existing fan-in tests pass unchanged.",
-        },
-        child_task_ids: ["task-20260419-000248-3a9c10"],
-        frontier_task_id: "task-20260419-000248-3a9c10",
-        frontier_task_state: "awaiting-review",
-        state_counts: { queued: 1, claimed: 0, running: 0, blocked: 0, "awaiting-review": 1, "awaiting-qa": 0, done: 0, failed: 0 },
-      },
-      {
-        feature_id: "feature-20260418-203300-canary",
-        project: "lvc-standard",
-        status: "open",
-        created_at: "2026-04-18T20:33:00Z",
-        roadmap_entry: {
-          id: "R-021-CANARY",
-          title: "Synthetic workflow canary",
-          goal: "Prove the planner → implementer → reviewer → qa → pr-sweep → feature-finalize path still works end-to-end every 6h.",
-          scope: "One bounded implementation slice that fits an existing project template. Prefer a no-op or documentation-safe touch if nothing clearly safe fits.",
-          out_of_scope: "Widening scope or picking a risky refactor.",
-          acceptance: "Feature opens a PR within SLA (2h), feature finalize opens feature→main PR within 24h, no flakes.",
-        },
-        child_task_ids: ["task-20260418-203302-cc01"],
-        frontier_task_id: "task-20260418-203302-cc01",
-        frontier_task_state: "queued",
-        canary: true,
-        state_counts: { queued: 1, claimed: 0, running: 0, blocked: 0, "awaiting-review": 0, "awaiting-qa": 0, done: 0, failed: 0 },
-      },
-    ],
-    tasks: {
-      // Keyed by task_id so the detail modal can look up rich information.
-      "task-20260414-045947-0db815": {
-        task_id: "task-20260414-045947-0db815",
-        feature_id: "feature-20260415-101058-14d56c",
-        parent_task_id: "task-20260414-045850-ae8489",
-        project: "lvc-standard",
-        role: "implementer",
-        engine: "codex",
-        summary: "Implement LvcMetricsRegistry.attach(store): wire counters/histograms into publish hot-path; alloc gate green",
-        braid_template: "lvc-implement-operator",
-        braid_template_hash: "sha256:a513adbfc988…8a7872",
-        state: "done",
-        created_at: "2026-04-14T04:59:47Z",
-        claimed_at:  "2026-04-14T07:27:30Z",
-        started_at: "2026-04-14T07:28:33Z",
-        finished_at: "2026-04-14T08:12:59Z",
-        pushed_at:   "2026-04-14T08:12:57Z",
-        reviewed_at: "2026-04-14T07:55:18Z",
-        qa_passed_at: "2026-04-14T08:12:59Z",
-        pr_created_at: "2026-04-14T08:12:59Z",
-        pr_merged_at:  "2026-04-14T18:48:11Z",
-        cleaned_at:    "2026-04-14T19:55:54Z",
-        worktree: "/Volumes/devssd/worktrees/lvc-standard/task-20260414-045947-0db815",
-        push_branch: "agent/task-20260414-045947-0db815",
-        push_base_branch: "feature/feature-20260415-101058-14d56c",
-        push_commit_count: 4,
-        push_commit_sha: "bea658da",
-        commits: [
-          { sha: "0ad3bd6", message: "qa(smoke): nuke benchmarks/build before jmhSmokeCheck" },
-          { sha: "b4f607e", message: "qa(smoke): pass -Pjmh.smoke=true so jmhSmokeCheck runs the smoke filter" },
-          { sha: "87e7973", message: "agent: Implement LvcMetricsRegistry.attach(store): wire counters/histograms into publish hot-path; alloc gate green" },
-          { sha: "89bca87", message: "agent: Implement LvcMetricsRegistry.attach(store): wire counters/histograms into publish hot-path; alloc gate green" },
-        ],
-        diff_stat: {
-          lines_added: 446, lines_removed: 1,
-          files: [
-            { path: "core/src/main/java/com/joshorig/ull/lvc/metrics/LvcMetricsRegistry.java", added: 278, removed: 0 },
-            { path: "core/src/test/java/com/joshorig/ull/lvc/metrics/LvcMetricsRegistryTest.java", added: 158, removed: 0 },
-            { path: "qa/smoke.sh", added: 10, removed: 1 },
-          ],
-        },
-        review: {
-          verdict: "approve",
-          reviewed_by: "task-20260414-073603-764aec",
-          feedback_rounds: 1,
-          gates: [
-            { gate: "functional",      owner: "codex",  verdict: "approve", note: "invariants preserved; alloc gate green; 3 tests added" },
-            { gate: "adversarial",     owner: "claude", verdict: "approve", note: "no hidden allocations; API surface additive only; docs aligned" },
-            { gate: "security",        owner: "claude", verdict: "approve", note: "no secret patterns; MetricsSink closes cleanly; no unsafe deserialization" },
-            { gate: "architectural-fit", owner: "claude", verdict: "approve", note: "respects DECISIONS.md '2026-02 metrics pluggable sink' invariant" },
-          ],
-        },
-        qa: {
-          smoke_exit: 0,
-          qa_script: "qa/smoke.sh",
-          duration_sec: 370,
-          scope_audit: {
-            expected: ["unit", "integration", "jmh-smoke", "alloc-gate"],
-            observed: ["unit", "integration", "jmh-smoke", "alloc-gate"],
-            missing: [],
-            verdict: "scope_ok",
-          },
-          log_tail: [
-            "> Task :benchmarks:jmhRunBytecodeGenerator",
-            "Processing 36 classes from benchmarks/build/classes/java/jmh with \"reflection\" generator",
-            "> Task :benchmarks:jmhCompileGeneratedClasses",
-            "> Task :benchmarks:jmhJar",
-            "> Task :benchmarks:jmh",
-            "> Task :benchmarks:jmhSmokeCheck",
-            "",
-            "BUILD SUCCESSFUL in 6m 10s",
-            "15 actionable tasks: 6 executed, 9 up-to-date",
-          ],
-          full_log_path: "/Volumes/devssd/orchestrator/logs/task-20260414-080606-bebdd1.log",
-        },
-        delivery: {
-          pr_number: 14,
-          pr_url: "https://github.com/joshorig/lvc-standard/pull/14",
-          pr_final_state: "MERGED",
-          pr_sweep: {
-            feedback_rounds: 1,
-            last_mergeable: "MERGEABLE",
-            last_merge_state: "UNSTABLE",
-            last_feedback_reason: "unresolved_bot_review_threads",
-            unresolved_bot_threads: 1,
-            bot_review_alerted_at: "2026-04-14T08:56:02Z",
-            last_feedback_at: "2026-04-14T19:32:45Z",
-            handled_comment_ids: ["3077731532"],
-          },
-        },
-      },
-      "task-20260416-124111-bf73ca": {
-        task_id: "task-20260416-124111-bf73ca",
-        feature_id: "feature-20260415-101058-14d56c",
-        parent_task_id: null,
-        project: "lvc-standard",
-        role: "qa",
-        engine: "qa",
-        summary: "Run qa/smoke.sh against feature/feature-20260415-101058-14d56c",
-        braid_template: null,
-        state: "failed",
-        created_at: "2026-04-16T12:41:11Z",
-        started_at: "2026-04-16T12:41:18Z",
-        finished_at: "2026-04-16T12:45:58Z",
-        worktree: "/Volumes/devssd/worktrees/lvc-standard/task-20260416-124111-bf73ca",
-        frontier_blocker_code: "false_blocker_claim",
-        frontier_blocker_detail: "reviewer asserted dirty worktree, but git diff is empty (diff-aware gate would have caught this)",
-        review: null,
-        qa: {
-          smoke_exit: 1,
-          qa_script: "qa/smoke.sh",
-          duration_sec: 280,
-          scope_audit: {
-            expected: ["unit", "integration", "jmh-smoke", "alloc-gate"],
-            observed: ["unit", "integration"],
-            missing: ["jmh-smoke", "alloc-gate"],
-            verdict: "scope_incomplete",
-          },
-          log_tail: [
-            "> Task :core:test",
-            "core/test/... LvcMetricsRegistryIT > scrapesAllFour: OK",
-            "BUILD FAILED in 4m 40s",
-            "> Task :benchmarks:jmhSmokeCheck FAILED",
-            "FAILURE: Task failed with exit code 2",
-            "[smoke-audit] expected test-class 'alloc-gate' not observed",
-            "[smoke-audit] expected test-class 'jmh-smoke' not observed",
-          ],
-          full_log_path: "/Volumes/devssd/orchestrator/logs/task-20260416-124111-bf73ca.log",
-        },
-        delivery: null,
-      },
-      "task-20260416-233109-452e8d": {
-        task_id: "task-20260416-233109-452e8d",
-        feature_id: "feature-20260418-090733-08150b",
-        parent_task_id: "task-20260418-090733-bcee12",
-        project: "devmini-orchestrator",
-        role: "implementer",
-        engine: "codex",
-        summary: "Wire baseline comparator into qa/regression.sh; emit jmh_baseline_regression blocker on >3% drop.",
-        braid_template: "lvc-implement-operator",
-        braid_template_hash: "sha256:c772…d0e1",
-        state: "blocked",
-        created_at: "2026-04-16T23:31:09Z",
-        claimed_at:  "2026-04-16T23:35:40Z",
-        started_at: "2026-04-16T23:35:50Z",
-        finished_at: "2026-04-17T00:12:04Z",
-        worktree: "/Volumes/devssd/worktrees/devmini-orchestrator/task-20260416-233109-452e8d",
-        frontier_blocker_code: "template_refine_exhausted",
-        frontier_blocker_detail: "BRAID_REFINE: CheckJmh: missing baseline comparator — 3 refine attempts exhausted",
-        commits: [
-          { sha: "f22a10c", message: "wip(regression): scaffold comparator invocation" },
-          { sha: "b9910a1", message: "wip(regression): add baseline selection by commit depth" },
-        ],
-        diff_stat: {
-          lines_added: 68, lines_removed: 4,
-          files: [
-            { path: "qa/regression.sh", added: 44, removed: 2 },
-            { path: "bin/orchestrator.py", added: 24, removed: 2 },
-          ],
-        },
-        review: null,
-        qa: null,
-        delivery: null,
-      },
-      "task-20260418-090733-bcee12": {
-        task_id: "task-20260418-090733-bcee12",
-        feature_id: "feature-20260418-090733-08150b",
-        project: "devmini-orchestrator",
-        role: "planner",
-        engine: "claude",
-        summary: "Decompose R-023 jmh baseline comparator lane into implementer slices.",
-        braid_template: null,
-        state: "done",
-        created_at: "2026-04-18T09:07:33Z",
-        started_at: "2026-04-18T09:07:34Z",
-        finished_at: "2026-04-18T09:09:52Z",
-      },
-      "task-20260418-090952-4a6da9": {
-        task_id: "task-20260418-090952-4a6da9",
-        feature_id: "feature-20260418-090733-08150b",
-        parent_task_id: "task-20260418-090733-bcee12",
-        project: "devmini-orchestrator",
-        role: "implementer",
-        engine: "codex",
-        summary: "Add baseline resolver: select HEAD~7 unless a tag matching 'baseline-*' is newer.",
-        braid_template: "lvc-implement-operator",
-        braid_template_hash: "sha256:91fe…aa20",
-        state: "done",
-        created_at: "2026-04-18T09:09:52Z",
-        claimed_at:  "2026-04-18T09:11:05Z",
-        started_at:  "2026-04-18T09:11:10Z",
-        finished_at: "2026-04-18T10:01:33Z",
-        pushed_at:   "2026-04-18T10:01:31Z",
-        reviewed_at: "2026-04-18T09:42:18Z",
-        qa_passed_at: "2026-04-18T10:01:33Z",
-        pr_created_at: "2026-04-18T10:01:33Z",
-        pr_merged_at:  "2026-04-18T11:18:04Z",
-        worktree: "/Volumes/devssd/worktrees/devmini-orchestrator/task-20260418-090952-4a6da9",
-        push_branch: "agent/task-20260418-090952-4a6da9",
-        push_base_branch: "feature/feature-20260418-090733-08150b",
-        push_commit_count: 2,
-        push_commit_sha: "a1b40cc",
-        commits: [
-          { sha: "a1b40cc", message: "agent: Add baseline resolver (R-023)" },
-          { sha: "7edfaa1", message: "test: baseline-* tag precedence over depth" },
-        ],
-        diff_stat: {
-          lines_added: 112, lines_removed: 3,
-          files: [
-            { path: "bin/orchestrator.py", added: 62, removed: 2 },
-            { path: "tests/test_baseline_resolver.py", added: 50, removed: 1 },
-          ],
-        },
-        review: {
-          verdict: "approve",
-          reviewed_by: "task-20260418-094158-92bc01",
-          feedback_rounds: 0,
-          gates: [
-            { gate: "functional",        owner: "codex",  verdict: "approve", note: "resolver logic straightforward; tests cover tag precedence" },
-            { gate: "adversarial",       owner: "claude", verdict: "approve", note: "edge case: detached HEAD handled; no unsafe git invocations" },
-            { gate: "security",          owner: "claude", verdict: "approve", note: "no secret patterns; all subprocess args quoted" },
-            { gate: "architectural-fit", owner: "claude", verdict: "approve", note: "respects DECISIONS.md '2026-04-13 feature-branch delivery model' — does not mutate config at runtime" },
-          ],
-        },
-        qa: {
-          smoke_exit: 0,
-          qa_script: "qa/smoke.sh",
-          duration_sec: 42,
-          scope_audit: {
-            expected: ["py-doctest", "py-unit"],
-            observed: ["py-doctest", "py-unit"],
-            missing: [],
-            verdict: "scope_ok",
-          },
-          log_tail: [
-            "running doctests on bin/orchestrator.py…",
-            "14 tests in 6 items.",
-            "All tests pass.",
-            "running tests/test_baseline_resolver.py…",
-            "8 passed in 0.41s",
-          ],
-          full_log_path: "/Volumes/devssd/orchestrator/logs/task-20260418-090952-4a6da9.log",
-        },
-        delivery: {
-          pr_number: 11,
-          pr_url: "https://github.com/joshorig/devmini-orchestrator/pull/11",
-          pr_final_state: "MERGED",
-          pr_sweep: { feedback_rounds: 0, last_mergeable: "MERGEABLE", last_merge_state: "CLEAN", unresolved_bot_threads: 0 },
-        },
-      },
-      "task-20260418-161221-222222": {
-        task_id: "task-20260418-161221-222222",
-        feature_id: "feature-20260418-161200-aa4d56",
-        project: "trade-research-platform",
-        role: "implementer",
-        engine: "codex",
-        summary: "Render option-chain ladder with WebSocket quote stream subscription.",
-        braid_template: "trp-ui-component",
-        braid_template_hash: "sha256:e01a…7cf3",
-        state: "running",
-        created_at: "2026-04-18T16:12:21Z",
-        claimed_at:  "2026-04-18T16:14:02Z",
-        started_at:  "2026-04-18T16:14:08Z",
-        worktree: "/Volumes/devssd/worktrees/trade-research-platform/task-20260418-161221-222222",
-        diff_stat: null,
-        review: null,
-        qa: null,
-        delivery: null,
-      },
-      "task-20260419-000248-3a9c10": {
-        task_id: "task-20260419-000248-3a9c10",
-        feature_id: "feature-20260419-000245-4d8721",
-        project: "dag-framework",
-        role: "implementer",
-        engine: "codex",
-        summary: "Pre-bind downstream edges during fan-in warm-up; guard with a once-only latch.",
-        braid_template: "dag-implement-node",
-        braid_template_hash: "sha256:55c8…11da",
-        state: "awaiting-review",
-        created_at: "2026-04-19T00:02:48Z",
-        claimed_at:  "2026-04-19T00:04:15Z",
-        started_at:  "2026-04-19T00:04:22Z",
-        finished_at: "2026-04-19T00:31:40Z",
-        pushed_at:   "2026-04-19T00:31:38Z",
-        worktree: "/Volumes/devssd/worktrees/dag-framework/task-20260419-000248-3a9c10",
-        push_branch: "agent/task-20260419-000248-3a9c10",
-        push_base_branch: "feature/feature-20260419-000245-4d8721",
-        push_commit_count: 1,
-        push_commit_sha: "3a9c101",
-        commits: [{ sha: "3a9c101", message: "agent: prebind fan-in downstream edges during warm-up (R-007)" }],
-        diff_stat: {
-          lines_added: 84, lines_removed: 12,
-          files: [
-            { path: "core/src/main/java/com/ull/dag/FanInNode.java", added: 56, removed: 10 },
-            { path: "core/src/test/java/com/ull/dag/FanInWarmupTest.java", added: 28, removed: 2 },
-          ],
-        },
-        review: null,
-        qa: null,
-        delivery: null,
-      },
-      "task-20260418-203302-cc01": {
-        task_id: "task-20260418-203302-cc01",
-        feature_id: "feature-20260418-203300-canary",
-        project: "lvc-standard",
-        role: "implementer",
-        engine: "codex",
-        summary: "Synthetic canary: append a one-line dated entry to docs/CANARY.md.",
-        braid_template: "lvc-implement-operator",
-        braid_template_hash: "sha256:a513…7872",
-        state: "queued",
-        created_at: "2026-04-18T20:33:02Z",
-      },
-    },
-    blocker_codes: [
-      { code: "template_refine_exhausted", count: 2, pct_of_blocked: 66.7, sample_task_id: "task-20260416-233109-452e8d" },
-      { code: "false_blocker_claim",       count: 1, pct_of_blocked: 33.3, sample_task_id: "task-20260416-124111-bf73ca" },
-    ],
-    recent_transitions: [
-      { ts: "2026-04-19T01:04:22Z", task_id: "task-20260419-010422-7c11",   from_state: "queued",  to_state: "claimed", role: "workflow-check", engine: "claude", project: "devmini-orchestrator" },
-      { ts: "2026-04-19T00:52:34Z", task_id: "task-20260419-004754-8d0741", from_state: "running", to_state: "done",    role: "planner",        engine: "claude", project: "devmini-orchestrator" },
-      { ts: "2026-04-19T00:47:54Z", task_id: "task-20260418-161121-778655", from_state: "running", to_state: "failed",  role: "implementer",    engine: "claude", project: "trade-research-platform" },
-      { ts: "2026-04-19T00:46:21Z", task_id: "task-20260419-003012-99af88", from_state: "queued",  to_state: "running", role: "implementer",    engine: "codex",  project: "lvc-standard" },
-      { ts: "2026-04-19T00:45:58Z", task_id: "task-20260416-124111-bf73ca", from_state: "blocked", to_state: "failed",  role: "qa",             engine: "qa",     project: "lvc-standard" },
-      { ts: "2026-04-19T00:40:10Z", task_id: "task-20260418-203302-cc01",   from_state: "new",     to_state: "queued",  role: "canary",         engine: "qa",     project: "lvc-standard" },
-      { ts: "2026-04-19T00:28:02Z", task_id: "task-20260418-090952-4a6da9", from_state: "running", to_state: "done",    role: "implementer",    engine: "codex",  project: "devmini-orchestrator" },
-    ],
-  };
-
-  // ============================================================
-  //  STATE + CONSTANTS
-  // ============================================================
-  const DASHBOARD_API_URL = "/api/dashboard";
-  const DASHBOARD_EVENTS_URL = "/api/dashboard/events";
-  const STATE_ORDER = ["queued","claimed","running","blocked","awaiting-review","awaiting-qa","done","failed","abandoned"];
-  const STATE_COLOR = {
-    "queued":          "#a78bfa",
-    "claimed":         "#818cf8",
-    "running":         "#34d399",
-    "blocked":         "#fb7185",
-    "awaiting-review": "#fbbf24",
-    "awaiting-qa":     "#fb923c",
-    "done":            "#065f46",
-    "failed":          "#881337",
-    "abandoned":       "#475569",
-  };
-  const ROLES = ["planner","implementer","reviewer","qa","workflow-check"];
-  const AGENT_STATUSES = ["idle","running","failed"];
-
-  const filters = { role: null, agentStatus: null, queueState: null, blocker: null, healthTile: null };
-  let LIVE = null;
-  let eventSource = null;
-  let reconnectTimer = null;
-  let pollingTimer = null;
-
-  function currentData() {
-    return LIVE || MOCK;
-  }
-
-  function normalizeLiveData(feed) {
-    const tasks = {};
-    const features = (feed.features || []).map(feature => {
-      const stateCounts = Object.fromEntries(STATE_ORDER.map(state => [state, 0]));
-      const childTaskIds = [];
-      (feature.tasks || []).forEach(task => {
-        childTaskIds.push(task.task_id);
-        stateCounts[task.state] = (stateCounts[task.state] || 0) + 1;
-        tasks[task.task_id] = normalizeTask(task, feature);
-      });
-      return {
-        feature_id: feature.feature_id,
-        project: feature.project,
-        status: feature.status || "open",
-        created_at: feature.created_at || feed.timestamp,
-        canary: Boolean(feature.canary && Object.keys(feature.canary).length),
-        frontier_task_id: feature.frontier?.task_id || null,
-        frontier_task_state: feature.frontier?.state || null,
-        frontier_blocker_code: feature.frontier?.blocker?.code || null,
-        state_counts: stateCounts,
-        child_task_ids: childTaskIds,
-        final_pr_number: feature.delivery?.final_pr_number || null,
-        final_pr_url: feature.delivery?.final_pr_url || null,
-        roadmap_entry: {
-          id: feature.roadmap?.id || "—",
-          title: feature.roadmap?.title || feature.summary || "Untitled feature",
-          goal: feature.summary || feature.roadmap?.title || "—",
-          scope: feature.roadmap?.source || feature.branch || "—",
-          out_of_scope: "—",
-          acceptance: feature.frontier?.reason || "—",
-        },
-        self_repair: feature.self_repair?.enabled ? {
-          status: feature.self_repair.status || "pending",
-          issue_count: feature.self_repair.issue_count || 0,
-          last_attached_issue_key: feature.self_repair.issues?.[0]?.issue_key || feature.self_repair.issues?.[0]?.id || "—",
-          last_deliberation_at: feature.self_repair.issues?.[0]?.updated_at || feature.self_repair.issues?.[0]?.created_at || null,
-          deliberations: (feature.self_repair.issues || []).map(issue => ({
-            stage: issue.stage || issue.status || "issue",
-            verdict: issue.verdict || issue.status || "pending",
-            panel: (issue.panel || []).join(", ") || "system",
-            summary: issue.summary || issue.reason || issue.title || "No deliberation summary recorded.",
-          })),
-        } : null,
-      };
-    });
-
-    const transitions = (feed.recent_transitions || []).map(item => ({
-      ...item,
-      role: tasks[item.task_id]?.role || "",
-    }));
-
-    return {
-      ...feed,
-      features,
-      tasks,
-      recent_transitions: transitions,
+    const DASHBOARD_API_URL = "/api/dashboard";
+    const DASHBOARD_EVENTS_URL = "/api/dashboard/events";
+    const FILTERS = {
+      project: null,
+      frontierState: null,
+      blockerCode: null,
+      agentStatus: null,
     };
-  }
-
-  function normalizeTask(task, feature) {
-    const reviewVerdict = task.review_verdict || null;
-    const review = reviewVerdict || (task.review_gates || []).length ? {
-      verdict: reviewVerdict || "pending",
-      reviewed_by: task.reviewed_by || null,
-      feedback_rounds: task.review_feedback_rounds || 0,
-      gates: (task.review_gates || []).map(gate => ({
-        gate,
-        owner: (task.review_gate_panels?.[gate] || []).join(", ") || "system",
-        verdict: reviewVerdict === "approve" ? "approve" : reviewVerdict ? "reject" : "abstain",
-        note: gate === "functional-review" && (task.policy_review_findings || []).length
-          ? task.policy_review_findings[0]
-          : "",
-      })),
-    } : null;
-
-    const qa = (
-      task.qa_gate_output ||
-      task.qa_passed_at ||
-      task.qa_failure ||
-      (task.log_tail || []).length ||
-      task.log_path
-    ) ? {
-      smoke_exit: task.qa_failure ? 1 : (task.qa_passed_at ? 0 : null),
-      qa_script: null,
-      duration_sec: null,
-      scope_audit: task.qa_gate_output ? {
-        verdict: task.qa_failure || task.blocker?.code === "qa_scope_inadequate" ? "scope_incomplete" : "scope_ok",
-        expected: [],
-        observed: [],
-        missing: [],
-      } : null,
-      gate_output: task.qa_gate_output || null,
-      log_tail: task.log_tail || [],
-      full_log_path: task.log_path || null,
-    } : null;
-
-    const delivery = (
-      task.pr_number ||
-      task.pr_url ||
-      task.push_commit_sha ||
-      task.pr_body_path ||
-      task.review_request_error ||
-      Object.keys(task.pr_sweep || {}).length
-    ) ? {
-      pr_url: task.pr_url || null,
-      pr_number: task.pr_number || null,
-      pr_final_state: task.state === "done" && task.pr_number ? "OPEN" : null,
-      pr_sweep: task.pr_sweep || {},
-    } : null;
-
-    return {
-      task_id: task.task_id,
-      state: task.state,
-      role: task.role,
-      engine: task.engine,
-      summary: task.summary,
-      project: task.project,
-      feature_id: task.feature_id || feature.feature_id,
-      parent_task_id: task.parent_task_id || null,
-      worktree: task.worktree || null,
-      push_branch: task.push_branch || null,
-      push_base_branch: task.push_base_branch || task.base_branch || null,
-      created_at: task.created_at || null,
-      claimed_at: task.claimed_at || null,
-      started_at: task.started_at || null,
-      reviewed_at: task.reviewed_at || null,
-      qa_passed_at: task.qa_passed_at || null,
-      pushed_at: task.pushed_at || null,
-      pr_created_at: task.pr_created_at || null,
-      pr_merged_at: null,
-      finished_at: task.finished_at || null,
-      cleaned_at: null,
-      push_commit_sha: task.push_commit_sha || null,
-      push_commit_count: task.push_commit_count || 0,
-      frontier_blocker_code: task.blocker?.code || null,
-      frontier_blocker_detail: task.blocker?.detail || task.blocker?.summary || null,
-      review,
-      qa,
-      delivery,
+    const QUEUE_COLORS = {
+      queued: "#22d3ee",
+      claimed: "#0ea5e9",
+      running: "#34d399",
+      blocked: "#fb7185",
+      "awaiting-review": "#fbbf24",
+      "awaiting-qa": "#fb923c",
+      done: "#64748b",
+      failed: "#f43f5e",
+      abandoned: "#94a3b8",
+      approve: "#34d399",
+      reject: "#fb7185",
+      pending: "#fbbf24",
+      abstain: "#94a3b8",
     };
-  }
+    let latestData = null;
+    let taskIndex = {};
+    let eventSource = null;
+    let reconnectTimer = null;
+    let pollingTimer = null;
 
-  // ============================================================
-  //  RENDERERS
-  // ============================================================
-  function renderHeader(data) {
-    document.getElementById("ts").textContent =
-      "last snapshot " + formatTs(data.timestamp) + " · updates every 5s";
-
-    const h = data.health;
-    const sc = document.getElementById("scorecard");
-    const envSev = h.environment_ok === 1 && h.environment_error_count === 0 ? "ok" : "crit";
-    const issueSev = h.workflow_check_issue_count > 10 ? "crit" : h.workflow_check_issue_count > 5 ? "warn" : h.workflow_check_issue_count > 0 ? "warn" : "ok";
-    const frontierSev = h.feature_frontier_blocked_count >= 3 ? "crit" : h.feature_frontier_blocked_count > 0 ? "warn" : "ok";
-
-    sc.innerHTML = `
-      <div class="tile ${envSev}" data-filter="health:env">
-        <div class="tile-label">environment</div>
-        <div class="tile-value"><span class="dot ${envSev}"></span>${h.environment_ok === 1 ? "ok" : "err"}</div>
-      </div>
-      <div class="tile ${issueSev}" data-filter="health:issues">
-        <div class="tile-label">workflow issues</div>
-        <div class="tile-value">${h.workflow_check_issue_count}</div>
-      </div>
-      <div class="tile ${frontierSev}" data-filter="health:blocked">
-        <div class="tile-label">frontier blocked</div>
-        <div class="tile-value">${h.feature_frontier_blocked_count} / ${h.feature_open_count}</div>
-      </div>`;
-    sc.querySelectorAll(".tile").forEach(t => {
-      t.addEventListener("click", () => toggleHealthTile(t.dataset.filter));
-    });
-    updateActiveTile();
-  }
-
-  function renderAgents(data) {
-    const g = document.getElementById("agent-grid");
-    const counts = {};
-    ROLES.forEach(r => { counts[r] = { idle: 0, running: 0, failed: 0 }; });
-    data.agents.forEach(a => {
-      if (counts[a.role]) counts[a.role][a.status] = (counts[a.role][a.status]||0) + 1;
-    });
-
-    let html = `<div class="head role">role</div>`;
-    AGENT_STATUSES.forEach(s => html += `<div class="head">${s}</div>`);
-
-    ROLES.forEach(role => {
-      html += `<div class="agent-role">${role}</div>`;
-      AGENT_STATUSES.forEach(status => {
-        const n = counts[role][status] || 0;
-        const cls = n === 0 ? "empty" : status;
-        const active = (filters.role === role && filters.agentStatus === status) ? "active" : "";
-        html += `<div class="agent-cell ${cls} ${active}" data-role="${role}" data-status="${status}">${n}</div>`;
-      });
-    });
-    g.innerHTML = html;
-    g.querySelectorAll(".agent-cell").forEach(c => {
-      c.addEventListener("click", () => {
-        toggleAgentFilter(c.dataset.role, c.dataset.status);
-      });
-    });
-  }
-
-  function renderQueue(data) {
-    const bar = document.getElementById("queue-bar");
-    const legend = document.getElementById("queue-legend");
-    const total = data.queue.reduce((a, q) => a + q.count, 0);
-    const visibleTotal = data.queue.filter(q => q.state !== "done" && q.state !== "abandoned").reduce((a, q) => a + q.count, 0);
-
-    document.getElementById("queue-total").textContent = total + " tasks tracked (" + visibleTotal + " live)";
-
-    // Bar (only live states)
-    const liveStates = STATE_ORDER.filter(s => s !== "done" && s !== "abandoned");
-    const liveSum = liveStates.reduce((a, s) => {
-      const q = data.queue.find(q => q.state === s); return a + (q ? q.count : 0);
-    }, 0);
-    bar.innerHTML = "";
-    if (liveSum === 0) {
-      bar.innerHTML = `<div class="queue-seg" style="width:100%;background:var(--border)"></div>`;
-    } else {
-      liveStates.forEach(s => {
-        const q = data.queue.find(x => x.state === s);
-        const n = q ? q.count : 0;
-        if (n === 0) return;
-        const pct = (n / liveSum) * 100;
-        const active = filters.queueState === s ? "active" : "";
-        bar.innerHTML += `<div class="queue-seg ${active}" title="${s}: ${n}" style="width:${pct}%; background:${STATE_COLOR[s]}" data-state="${s}"></div>`;
-      });
+    function esc(value) {
+      return String(value ?? "").replace(/[&<>"]/g, ch => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        "\"": "&quot;"
+      }[ch]));
     }
-    bar.querySelectorAll(".queue-seg").forEach(seg => {
-      seg.addEventListener("click", () => toggleQueueFilter(seg.dataset.state));
-    });
 
-    // Legend
-    legend.innerHTML = STATE_ORDER.map(s => {
-      const q = data.queue.find(x => x.state === s); const n = q ? q.count : 0;
-      const active = filters.queueState === s ? "active" : "";
-      const zero = n === 0 ? "zero" : "";
-      return `<div class="qleg-row ${active}" data-state="${s}">
-        <span class="qleg-name"><span class="dot" style="background:${STATE_COLOR[s]}"></span>${s}</span>
-        <span class="qleg-count ${zero}">${n}</span>
-      </div>`;
-    }).join("");
-    legend.querySelectorAll(".qleg-row").forEach(row => {
-      row.addEventListener("click", () => toggleQueueFilter(row.dataset.state));
-    });
-  }
+    function escAttr(value) {
+      return esc(value).replace(/'/g, "&#39;");
+    }
 
-  function renderFeatures(data) {
-    const dataModel = currentData();
-    const list = document.getElementById("feature-list");
-    const countEl = document.getElementById("feature-count");
-    const openFeatures = data.features.filter(f => f.status === "open");
+    function nl2br(value) {
+      return esc(value || "").replace(/\n/g, "<br>");
+    }
 
-    // Apply filters
-    let shown = openFeatures.filter(f => {
-      if (filters.healthTile === "health:blocked" && !(f.frontier_task_state === "blocked" || f.frontier_task_state === "failed")) return false;
-      if (filters.queueState) {
-        if (!f.state_counts || (f.state_counts[filters.queueState] || 0) === 0) return false;
+    function metricTone(ok, warn) {
+      if (ok) return "ok";
+      if (warn) return "warn";
+      return "crit";
+    }
+
+    function queueColor(state) {
+      return QUEUE_COLORS[state] || "#64748b";
+    }
+
+    function formatTs(ts) {
+      if (!ts) return "-";
+      return ts.replace("T", " ").replace("Z", "");
+    }
+
+    function activeFilters() {
+      return Object.entries(FILTERS).filter(([, value]) => value);
+    }
+
+    function setFilter(key, value) {
+      FILTERS[key] = FILTERS[key] === value ? null : value;
+      render(latestData);
+    }
+
+    function clearFilter(key) {
+      FILTERS[key] = null;
+      render(latestData);
+    }
+
+    function renderFilters() {
+      const rows = activeFilters();
+      const host = document.getElementById("filters");
+      if (!rows.length) {
+        host.innerHTML = `<span class="filter-hint">No filters active. Click a scorecard, queue state, blocker code, project tag, or agent status to focus the view.</span>`;
+        return;
       }
-      if (filters.blocker && f.frontier_blocker_code !== filters.blocker) return false;
-      if (filters.role) {
-        // crude: match feature whose frontier task role is likely the filter
-        // we lack role info per feature in the mock so we skip when role is set
-      }
+      host.innerHTML = rows.map(([key, value]) => `
+        <span class="filter-pill">
+          <span>${esc(key)}=${esc(value)}</span>
+          <button type="button" onclick="clearFilter('${escAttr(key)}')">x</button>
+        </span>
+      `).join("");
+    }
+
+    function featureMatches(feature) {
+      if (FILTERS.project && feature.project !== FILTERS.project) return false;
+      if (FILTERS.frontierState && (feature.frontier?.state || "") !== FILTERS.frontierState) return false;
+      if (FILTERS.blockerCode && ((feature.frontier?.blocker?.code || "") !== FILTERS.blockerCode)) return false;
       return true;
-    });
-
-    countEl.textContent = shown.length + " of " + openFeatures.length + " open";
-
-    if (!shown.length) {
-      list.innerHTML = `<div class="empty-state">No features match the current filters.</div>`;
-      return;
     }
 
-    list.innerHTML = shown.map(f => featureCardHtml(f)).join("");
-    list.querySelectorAll(".feature-card").forEach(card => {
-      card.addEventListener("click", e => {
-        if (e.target.closest("button") || e.target.closest(".task-row") || e.target.closest("a")) return;
-        card.classList.toggle("expanded");
-      });
-      card.querySelectorAll("button[data-sr]").forEach(b => {
-        b.addEventListener("click", e => {
-          e.stopPropagation();
-          showSelfRepairModal(card.dataset.fid);
+    function renderScorecards(data) {
+      const envOk = Number(data.health.environment_ok) === 1 && Number(data.health.environment_error_count) === 0;
+      const issues = Number(data.health.workflow_check_issue_count || 0);
+      const blocked = Number(data.health.feature_frontier_blocked_count || 0);
+      const open = Number(data.health.feature_open_count || 0);
+      const running = (data.queue || []).find(row => row.state === "running")?.count || 0;
+      const tiles = [
+        {
+          key: "environment",
+          label: "Environment",
+          value: envOk ? "OK" : `${data.health.environment_error_count}`,
+          sub: envOk ? "runtime healthy" : "blocking errors",
+          tone: metricTone(envOk, !envOk && Number(data.health.environment_error_count) < 3),
+          onClick: ""
+        },
+        {
+          key: "workflow",
+          label: "Workflow Issues",
+          value: issues,
+          sub: "workflow-check findings",
+          tone: metricTone(issues === 0, issues < 3),
+          onClick: ""
+        },
+        {
+          key: "blocked",
+          label: "Frontier Blocked",
+          value: `${blocked}/${open}`,
+          sub: "open features",
+          tone: metricTone(blocked === 0, blocked < 3),
+          onClick: "setFilter('frontierState','blocked')"
+        },
+        {
+          key: "running",
+          label: "Running Tasks",
+          value: running,
+          sub: "active queue",
+          tone: metricTone(running > 0, running === 0),
+          onClick: "setFilter('frontierState','running')"
+        }
+      ];
+      document.getElementById("scorecards").innerHTML = tiles.map(tile => `
+        <div class="tile ${FILTERS.frontierState && tile.key === FILTERS.frontierState ? "active" : ""}" ${tile.onClick ? `onclick="${tile.onClick}"` : ""}>
+          <div class="tile-label">${esc(tile.label)}</div>
+          <div class="tile-value ${tile.tone}">${esc(tile.value)}</div>
+          <div class="tile-sub">${esc(tile.sub)}</div>
+        </div>
+      `).join("");
+    }
+
+    function renderAgents(data) {
+      const rows = (data.agents || []).filter(row => !FILTERS.agentStatus || row.status === FILTERS.agentStatus);
+      document.getElementById("agentCount").textContent = `${rows.length}/${data.agents.length} visible`;
+      document.getElementById("agents").innerHTML = rows.length ? rows.map(row => `
+        <div class="agent-row ${FILTERS.agentStatus === row.status ? "active" : ""}">
+          <div class="agent-top">
+            <span class="agent-role">${esc(row.role)}</span>
+            <span class="status-badge status-${esc(row.status)}" onclick="event.stopPropagation(); setFilter('agentStatus','${escAttr(row.status)}')">${esc(row.status)}</span>
+          </div>
+          <div class="agent-detail">${esc(row.detail || "No detail.")}</div>
+          <div class="tiny">updated ${esc(formatTs(row.updated_at))}</div>
+        </div>
+      `).join("") : `<div class="empty">No agents match the active filter.</div>`;
+    }
+
+    function renderServer(data) {
+      const server = data.dashboard_server || {};
+      document.getElementById("server").innerHTML = `
+        <div class="mini-row">
+          <div class="mini-top"><strong>URL</strong><span class="tiny">dashboard</span></div>
+          <div><a href="${esc(server.dashboard_url || "#")}">${esc(server.dashboard_url || "-")}</a></div>
+        </div>
+        <div class="mini-row">
+          <div class="mini-top"><strong>Bind</strong><span class="tiny">listener</span></div>
+          <div class="mini-detail">${esc(server.host || "-")}:${esc(server.port || "-")}</div>
+        </div>
+        <div class="mini-row">
+          <div class="mini-top"><strong>Allowed CIDRs</strong><span class="tiny">${esc((server.allowed_cidrs || []).length)} entries</span></div>
+          <div class="mini-detail">${esc((server.allowed_cidrs || []).join(", "))}</div>
+        </div>
+      `;
+    }
+
+    function renderBudget(data) {
+      const budget = data.claude_budget || {};
+      const configured = budget.configured || {};
+      const recent = budget.recent_hits || [];
+      const lanes = Object.keys(configured);
+      const laneRows = lanes.map(name => `
+        <div class="mini-row">
+          <div class="mini-top"><strong>${esc(name)}</strong><span class="tiny">$${Number(configured[name] || 0).toFixed(2)}</span></div>
+          <div class="mini-detail">24h cap hits: ${esc((budget.hits_24h || {})[name] || 0)}</div>
+        </div>
+      `).join("");
+      const recentRows = recent.length ? recent.slice(-4).reverse().map(hit => `
+        <div class="mini-row">
+          <div class="mini-top"><strong>${esc(hit.lane)}</strong><span class="tiny">${esc(formatTs(hit.ts))}</span></div>
+          <div class="mini-detail">${esc(hit.project || hit.role || "-")}</div>
+        </div>
+      `).join("") : `<div class="empty">No cap hits in the last 24h.</div>`;
+      document.getElementById("budget").innerHTML = laneRows + recentRows;
+    }
+
+    function renderQueue(data) {
+      const queue = data.queue || [];
+      const total = queue.reduce((sum, row) => sum + Number(row.count || 0), 0);
+      document.getElementById("queueTotal").textContent = `${total} tasks`;
+      document.getElementById("queueBar").innerHTML = queue.map(row => {
+        const count = Number(row.count || 0);
+        const width = total ? Math.max((count / total) * 100, count > 0 ? 1.5 : 0) : 0;
+        return `<div class="queue-seg ${FILTERS.frontierState === row.state ? "active" : ""}" onclick="setFilter('frontierState','${escAttr(row.state)}')" style="width:${width}%;background:${queueColor(row.state)}" title="${esc(row.state)} ${count}"></div>`;
+      }).join("");
+      document.getElementById("queueLegend").innerHTML = queue.map(row => `
+        <div class="queue-item ${FILTERS.frontierState === row.state ? "active" : ""}" onclick="setFilter('frontierState','${escAttr(row.state)}')">
+          <span class="queue-name"><span class="queue-dot" style="background:${queueColor(row.state)}"></span>${esc(row.state)}</span>
+          <span class="queue-pill">${esc(row.count)}</span>
+        </div>
+      `).join("");
+    }
+
+    function renderBlockers(data) {
+      const blockers = data.blocker_codes || [];
+      document.getElementById("blockerCount").textContent = blockers.length ? `${blockers.length} active codes` : "0 active";
+      document.getElementById("blockers").innerHTML = blockers.length ? blockers.map(row => `
+        <tr class="clickable ${FILTERS.blockerCode === row.code ? "active" : ""}" onclick="setFilter('blockerCode','${escAttr(row.code)}')">
+          <td class="code">${esc(row.code)}</td>
+          <td class="right">${esc(row.count)}</td>
+          <td class="right tiny">${esc(row.pct_of_blocked)}%</td>
+        </tr>
+      `).join("") : `<tr><td colspan="3" class="empty">No blocked tasks.</td></tr>`;
+    }
+
+    function renderTransitions(data) {
+      const rows = data.recent_transitions || [];
+      document.getElementById("transitions").innerHTML = rows.length ? rows.slice(-10).reverse().map(row => `
+        <div class="mini-row">
+          <div class="mini-top"><strong>${esc(row.task_id)}</strong><span class="tiny">${esc(formatTs(row.ts))}</span></div>
+          <div class="mini-detail">${esc(row.from_state)} → ${esc(row.to_state)}</div>
+          <div class="tiny">${esc(row.reason || "")}</div>
+        </div>
+      `).join("") : `<div class="empty">No recent transitions.</div>`;
+    }
+
+    function indexTasks(data) {
+      taskIndex = {};
+      (data.features || []).forEach((feature) => {
+        (feature.tasks || []).forEach((task) => {
+          taskIndex[task.task_id] = { ...task, featureSummary: feature.summary };
         });
       });
-      card.querySelectorAll(".task-row").forEach(row => {
-        row.addEventListener("click", e => {
-          e.stopPropagation();
-          showTaskDetailModal(row.dataset.tid);
-        });
-      });
-    });
-  }
-
-  function taskRowHtml(taskId, isFrontier) {
-    const t = currentData().tasks[taskId];
-    if (!t) {
-      return `<div class="task-row ${isFrontier ? 'frontier' : ''}" data-tid="${taskId}">
-        <span class="role-chip">?</span>
-        <span class="tr-id">${shortId(taskId)}</span>
-        <span class="tr-summary">(no detail)</span>
-        <span></span>
-      </div>`;
-    }
-    const stateClass = (t.state || "queued").replace(/_/g, "-");
-    const stateColor = STATE_COLOR[stateClass] || "var(--muted)";
-    const roleCls = (t.role || "").replace(/[^a-z]/gi, "");
-    return `<div class="task-row ${isFrontier ? 'frontier' : ''}" data-tid="${taskId}">
-      <span class="role-chip ${roleCls}">${t.role || "task"}</span>
-      <span class="tr-id">${shortId(taskId)}</span>
-      <span class="tr-summary" title="${escapeHtml(t.summary || '')}">${escapeHtml(t.summary || '—')}</span>
-      <span class="tr-state" style="color:${stateColor};border:1px solid ${stateColor};background:${stateColor}22">${t.state}</span>
-    </div>`;
-  }
-
-  function featureCardHtml(f) {
-    const blockedFrontier = (f.frontier_task_state === "blocked" || f.frontier_task_state === "failed");
-    const stale = ageHours(f.created_at) > 24 && !blockedFrontier;
-    const cls = blockedFrontier ? "blocked-frontier" : (stale ? "stale" : "");
-    const stateChips = STATE_ORDER.filter(s => s !== "abandoned").map(s => {
-      const n = (f.state_counts && f.state_counts[s]) || 0;
-      const emp = s === f.frontier_task_state ? "emphasis" : "";
-      const zero = n === 0 ? "zero" : "";
-      return `<span class="state-chip ${s} ${emp} ${zero}">${s}:${n}</span>`;
-    }).join("");
-    const canary = f.canary ? ` <span style="color:var(--amber);font-size:0.6rem;text-transform:uppercase;letter-spacing:0.08em">[canary]</span>` : "";
-
-    let frontierLine = "";
-    if (f.frontier_task_id) {
-      const blocker = f.frontier_blocker_code ? `<span class="blocker-tag">${f.frontier_blocker_code}</span>` : "";
-      frontierLine = `
-        <div class="frontier-line">
-          <span>frontier: <code>${shortId(f.frontier_task_id)}</code></span>
-          <span>state: <strong style="color:${STATE_COLOR[f.frontier_task_state] || '#94a3b8'}">${f.frontier_task_state}</strong></span>
-          ${blocker}
-          ${f.self_repair ? `<span class="sr-badge ${f.self_repair.status}">self-repair · ${f.self_repair.status}</span>` : ""}
-        </div>`;
     }
 
-    return `
-      <div class="feature-card ${cls}" data-fid="${f.feature_id}">
-        <div class="feature-row1">
+    function featureSection(title, summary, body, open = false) {
+      return `
+        <details class="feature-section" ${open ? "open" : ""}>
+          <summary>
+            <span class="summary-label">${esc(title)}</span>
+            <span class="summary-value">${summary}</span>
+          </summary>
+          <div class="section-body">${body}</div>
+        </details>
+      `;
+    }
+
+    function renderFeature(feature) {
+      const tasks = feature.tasks || [];
+      const events = feature.recent_events || [];
+      const delivery = feature.delivery || {};
+      const repair = feature.self_repair || {};
+      const stale = Number(feature.frontier?.age_seconds || 0) > 3600;
+      const blocked = feature.frontier?.state === "blocked" || Boolean(feature.frontier?.blocker?.code);
+      const childStates = Object.entries(feature.child_states || {});
+      const followUpStates = Object.entries(feature.follow_up_states || {});
+      return `
+        <div class="feature-card ${stale ? "stale" : ""} ${blocked ? "blocked" : ""}">
+          <div class="feature-top">
+            <div>
+              <div class="feature-id">${esc(feature.feature_id)}</div>
+              <div class="feature-project" onclick="setFilter('project','${escAttr(feature.project)}')">${esc(feature.project)}</div>
+            </div>
+            <div>
+              <span class="state-chip state-${esc(feature.status || "open")}">${esc(feature.status || "open")}</span>
+            </div>
+          </div>
+
+          <div class="feature-summary">${esc(feature.summary || "")}</div>
+
+          <div class="feature-sections">
+            ${featureSection("Frontier", `${esc(feature.frontier?.state || "-")} ${feature.frontier?.task_id ? `· ${esc(feature.frontier.task_id)}` : ""}`, `
+              <div class="feature-frontier">
+                <div class="frontier-box">
+                  <div class="box-k">Frontier</div>
+                  <div class="box-v">
+                    <span class="state-chip state-${esc(feature.frontier?.state || "queued")}" onclick="setFilter('frontierState','${escAttr(feature.frontier?.state || "queued")}')">${esc(feature.frontier?.state || "-")}</span>
+                    ${feature.frontier?.task_id ? `<code>${esc(feature.frontier.task_id)}</code>` : ""}
+                  </div>
+                  <div class="tiny">age ${esc(feature.frontier?.age_text || "-")} · attempt ${esc(feature.frontier?.attempt || "-")}</div>
+                  <div class="mini-detail">${esc(feature.frontier?.reason || "")}</div>
+                </div>
+                <div class="frontier-box">
+                  <div class="box-k">Blocker</div>
+                  <div class="box-v">${feature.frontier?.blocker?.code ? `<span class="tag blocker" onclick="setFilter('blockerCode','${escAttr(feature.frontier.blocker.code)}')">${esc(feature.frontier.blocker.code)}</span>` : "none"}</div>
+                  <div class="mini-detail">${esc(feature.frontier?.blocker?.detail || feature.frontier?.blocker?.summary || "")}</div>
+                </div>
+              </div>
+            `, true)}
+            ${featureSection("Roadmap", `${esc(feature.roadmap?.id || "-")} ${feature.branch ? `· ${esc(feature.branch)}` : ""}`, `
+              <div class="feature-meta">
+                <div class="meta-box">
+                  <div class="box-k">Roadmap</div>
+                  <div class="box-v">${esc(feature.roadmap?.id || "-")} ${feature.roadmap?.title ? `· ${esc(feature.roadmap.title)}` : ""}</div>
+                  <div class="tiny">${esc(feature.roadmap?.source || feature.branch || "")}</div>
+                </div>
+                <div class="meta-box">
+                  <div class="box-k">Created</div>
+                  <div class="box-v">${esc(formatTs(feature.created_at))}</div>
+                  <div class="tiny">${esc(feature.branch || "")}</div>
+                </div>
+              </div>
+            `)}
+            ${featureSection("Delivery", delivery.final_pr_number ? `PR #${esc(delivery.final_pr_number)}` : "no final PR", `
+              <div class="feature-delivery">
+                <div class="delivery-box">
+                  <div class="box-k">Delivery</div>
+                  <div class="box-v">${delivery.final_pr_url ? `<a href="${esc(delivery.final_pr_url)}">PR #${esc(delivery.final_pr_number || "-")}</a>` : "no final PR"}</div>
+                  <div class="tiny">finalized ${esc(formatTs(delivery.finalized_at))} · merged ${esc(formatTs(delivery.merged_at))}</div>
+                </div>
+                <div class="delivery-box">
+                  <div class="box-k">PR Sweep</div>
+                  <div class="box-v">feedback rounds ${esc((delivery.final_pr_sweep || {}).feedback_rounds || 0)}</div>
+                  <div class="tiny">unresolved bot threads ${esc((delivery.final_pr_sweep || {}).unresolved_bot_threads || 0)} · mergeable ${esc((delivery.final_pr_sweep || {}).last_mergeable || "-")}</div>
+                </div>
+              </div>
+            `)}
+            ${featureSection("Repair", `${repair.enabled ? esc(repair.status || "enabled") : "disabled"} · ${esc(repair.issue_count || 0)} issues`, `
+              <div class="feature-repair">
+                <div class="repair-box">
+                  <div class="box-k">Self Repair</div>
+                  <div class="box-v">${repair.enabled ? esc(repair.status || "enabled") : "disabled"}</div>
+                  <div class="tiny">${esc(repair.issue_count || 0)} attached issues</div>
+                </div>
+                <div class="repair-box">
+                  <div class="box-k">Task Spread</div>
+                  <div class="box-v">${childStates.length} child · ${followUpStates.length} follow-up</div>
+                  <div class="tiny">${childStates.map(([, state]) => state).join(", ") || "no child tasks recorded"}</div>
+                </div>
+              </div>
+            `)}
+            ${featureSection("Tasks", `${tasks.length} task${tasks.length === 1 ? "" : "s"}`, `
+              <div class="tasks-box">
+                <div class="box-k">Tasks</div>
+                <div class="task-list">
+                  ${tasks.length ? tasks.map(task => `
+                    <div class="task-row ${task.is_frontier ? "frontier" : ""}" onclick="showTaskModal('${escAttr(task.task_id)}')">
+                      <div class="task-head">
+                        <div>
+                          <div class="task-id">${esc(task.task_id)}</div>
+                          <div class="tiny">${esc(task.kind)} · ${esc(task.role || "-")} · ${esc(task.engine || "-")}</div>
+                        </div>
+                        <div>
+                          <span class="state-chip state-${esc(task.state || "queued")}">${esc(task.state || "-")}</span>
+                        </div>
+                      </div>
+                      <div class="task-summary">${esc(task.summary || "")}</div>
+                      <div class="task-meta">
+                        <span class="tag">attempt ${esc(task.attempt || 1)}</span>
+                        ${task.blocker?.code ? `<span class="tag blocker">${esc(task.blocker.code)}</span>` : ""}
+                        ${task.review_verdict ? `<span class="tag review">review ${esc(task.review_verdict)}</span>` : ""}
+                        ${task.review_feedback_rounds ? `<span class="tag review">feedback ${esc(task.review_feedback_rounds)}</span>` : ""}
+                        ${task.resolve_thread_failures ? `<span class="tag blocker">thread failures ${esc(task.resolve_thread_failures)}</span>` : ""}
+                        ${task.artifacts_count ? `<span class="tag">artifacts ${esc(task.artifacts_count)}</span>` : ""}
+                      </div>
+                      <div class="tiny">created ${esc(formatTs(task.created_at))} · started ${esc(formatTs(task.started_at))} · finished ${esc(formatTs(task.finished_at))}</div>
+                    </div>
+                  `).join("") : `<div class="empty">No task detail exported for this feature.</div>`}
+                </div>
+              </div>
+            `)}
+            ${featureSection("Events", `${events.length} recent event${events.length === 1 ? "" : "s"}`, `
+              <div class="events-box">
+                <div class="box-k">Recent Workflow Events</div>
+                <div class="event-list">
+                  ${events.length ? events.map(event => `
+                    <div class="event-row">
+                      <span class="tiny">${esc(formatTs(event.ts))}</span>
+                      <span class="event-role">${esc(event.role || "-")}</span>
+                      <span><span class="event-name">${esc(event.event || "-")}</span> <span class="tiny">${esc(event.task_id || "")}</span></span>
+                    </div>
+                  `).join("") : `<div class="empty">No recent feature events.</div>`}
+                </div>
+              </div>
+            `)}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderFeatures(data) {
+      const rows = (data.features || []).filter(featureMatches);
+      document.getElementById("featureCount").textContent = `${rows.length}/${data.features.length} visible`;
+      document.getElementById("features").innerHTML = rows.length ? rows.map(renderFeature).join("") : `<div class="empty">No features match the active filters.</div>`;
+    }
+
+    function timelineRow(label, ts) {
+      if (!ts) return "";
+      return `<div class="k">${esc(label)}</div><div class="v">${esc(formatTs(ts))}</div>`;
+    }
+
+    function showTaskModal(taskId) {
+      const task = taskIndex[taskId];
+      const modal = document.getElementById("taskModal");
+      if (!task) {
+        modal.innerHTML = `<span class="close" onclick="closeTaskModal()">✕</span><div class="empty">No detail found for ${esc(taskId)}.</div>`;
+        document.getElementById("modalScrim").classList.add("open");
+        return;
+      }
+      const gates = (task.review_gates || []).map((gate) => {
+        const panel = task.review_gate_panels?.[gate] || [];
+        return `
+          <div class="gate-row">
+            <div class="gate-name">${esc(gate)}</div>
+            <div>${task.review_verdict ? `<span class="state-chip state-${esc(task.review_verdict)}">${esc(task.review_verdict)}</span>` : `<span class="tiny">pending</span>`}</div>
+            ${panel.length ? `<div class="gate-panel">${panel.map(item => `<span class="pill-inline">${esc(item)}</span>`).join("")}</div>` : ""}
+          </div>
+        `;
+      }).join("");
+      const findings = (task.policy_review_findings || []).map((item) => `<div class="finding-row">${esc(item)}</div>`).join("");
+      const evidence = (task.resolved_thread_evidence || []).map((item) => `
+        <div class="evidence-row">
+          <div>${esc(item.path || item.thread_id || "thread")}</div>
+          <div class="tiny">${esc(item.evidence || item.comment_id || "")}</div>
+        </div>
+      `).join("");
+      const deliveryRows = [
+        ["PR", task.pr_url ? `<a href="${esc(task.pr_url)}">#${esc(task.pr_number || "-")}</a>` : (task.pr_number ? `#${esc(task.pr_number)}` : "not opened")],
+        ["Commit", task.push_commit_sha ? `<code>${esc(task.push_commit_sha)}</code> · ${esc(task.push_commit_count || 0)} commit(s)` : "not pushed"],
+        ["PR body", task.pr_body_path ? `<code>${esc(task.pr_body_path)}</code>` : "-"],
+        ["Review request", task.review_request_error ? esc(task.review_request_error) : (task.review_requested_at ? `requested at ${esc(formatTs(task.review_requested_at))}` : "none")],
+        ["PR sweep", Object.keys(task.pr_sweep || {}).length ? nl2br(JSON.stringify(task.pr_sweep, null, 2)) : "<span class='tiny'>No PR sweep data.</span>"],
+        ["Local deploy", Object.keys(task.local_deploy || {}).length ? nl2br(JSON.stringify(task.local_deploy, null, 2)) : "<span class='tiny'>No local deploy data.</span>"],
+      ];
+      modal.innerHTML = `
+        <span class="close" onclick="closeTaskModal()">✕</span>
+        <div class="modal-head">
           <div>
-            <span class="feature-id">${f.feature_id}</span>
-            <span class="feature-project">${f.project}</span>
-            ${canary}
+            <h2>${esc(task.summary || task.task_id)}</h2>
+            <div class="modal-sub">${esc(task.role || "-")} · ${esc(task.engine || "-")} · <code>${esc(task.task_id)}</code>${task.feature_id ? ` · <code>${esc(task.feature_id)}</code>` : ""}</div>
           </div>
-          <span class="feature-age">${ageString(f.created_at)}</span>
-        </div>
-        <div class="feature-row2">${stateChips}</div>
-        ${frontierLine}
-        <div class="feature-detail">
-          ${f.roadmap_entry ? `
-            <div class="roadmap-box">
-              <div class="roadmap-head">
-                <span class="roadmap-id">${f.roadmap_entry.id}</span>
-                <span class="roadmap-title">${escapeHtml(f.roadmap_entry.title)}</span>
-              </div>
-              <div class="roadmap-grid">
-                <div class="rg-label">goal</div><div>${escapeHtml(f.roadmap_entry.goal)}</div>
-                <div class="rg-label">scope</div><div>${escapeHtml(f.roadmap_entry.scope)}</div>
-                <div class="rg-label">out of scope</div><div>${escapeHtml(f.roadmap_entry.out_of_scope)}</div>
-                <div class="rg-label">acceptance</div><div>${escapeHtml(f.roadmap_entry.acceptance)}</div>
-              </div>
-            </div>` : ""}
-          <div class="task-list">
-            <div class="task-list-head">child tasks (${f.child_task_ids.length})</div>
-            ${f.child_task_ids.map(tid => taskRowHtml(tid, tid === f.frontier_task_id)).join("")}
-          </div>
-          ${f.final_pr_number ? `<div style="margin-top:0.55rem;font-size:0.7rem"><span class="label">feature PR</span> <a href="${f.final_pr_url}" target="_blank">#${f.final_pr_number}</a></div>` : ""}
-          ${f.self_repair ? `<div style="margin-top:0.35rem;font-size:0.7rem"><span class="label">issue key</span> <code>${f.self_repair.last_attached_issue_key}</code></div>` : ""}
-          <div class="detail-actions">
-            ${blockedFrontier ? `<button class="btn rose">force retry</button>` : ""}
-            ${blockedFrontier ? `<button class="btn amber">abandon</button>` : ""}
-            ${f.self_repair ? `<button class="btn" data-sr="1">open council</button>` : ""}
-            <button class="btn">view JSON</button>
-          </div>
-        </div>
-      </div>`;
-  }
-
-  function renderBlockers(data) {
-    const tbody = document.getElementById("blocker-tbody");
-    const countEl = document.getElementById("blocker-count");
-    const rows = data.blocker_codes || [];
-    countEl.textContent = rows.length + " active";
-    if (!rows.length) {
-      tbody.innerHTML = `<tr><td colspan="3" class="empty-state">No active blockers</td></tr>`;
-      return;
-    }
-    tbody.innerHTML = rows.map(r => {
-      const sev = r.count >= 3 ? 3 : (r.count === 2 ? 2 : 1);
-      const active = filters.blocker === r.code ? "active" : "";
-      const blink = sev === 3 ? `<span class="blink"></span>` : "";
-      return `<tr class="severity-${sev} ${active}" data-code="${r.code}">
-        <td class="code">${blink}${r.code}</td>
-        <td class="count">${r.count}</td>
-        <td class="pct">${r.pct_of_blocked.toFixed(0)}%</td>
-      </tr>`;
-    }).join("");
-    tbody.querySelectorAll("tr[data-code]").forEach(row => {
-      row.addEventListener("click", () => toggleBlockerFilter(row.dataset.code));
-    });
-  }
-
-  function renderTicker(data) {
-    const t = document.getElementById("ticker");
-    if (!data.recent_transitions || !data.recent_transitions.length) {
-      t.innerHTML = `<div class="empty-state">No transitions yet</div>`;
-      return;
-    }
-    t.innerHTML = data.recent_transitions.map(tr => {
-      const failed = tr.to_state === "failed" || tr.to_state === "blocked";
-      return `<div class="tick-row ${failed ? 'failed' : ''}" title='${escapeHtml(JSON.stringify(tr))}'>
-        <span class="tick-ts">${tr.ts.substring(11, 19)}</span>
-        <span class="tick-trans">${shortId(tr.task_id)} <span class="tick-arrow">${tr.from_state}→${tr.to_state}</span></span>
-        <span class="tick-role">${tr.role || ""}</span>
-      </div>`;
-    }).join("");
-  }
-
-  function renderFilters() {
-    const bar = document.getElementById("filter-bar");
-    const pills = [];
-    if (filters.healthTile) pills.push(pillHtml("health", filters.healthTile.split(":")[1], "healthTile"));
-    if (filters.role) pills.push(pillHtml("role", filters.role, "role"));
-    if (filters.agentStatus) pills.push(pillHtml("status", filters.agentStatus, "agentStatus"));
-    if (filters.queueState) pills.push(pillHtml("queue", filters.queueState, "queueState"));
-    if (filters.blocker) pills.push(pillHtml("blocker", filters.blocker, "blocker"));
-    if (!pills.length) {
-      bar.innerHTML = `<span class="filter-hint">No filters active. Click a tile, agent cell, queue segment, or blocker code to filter.</span>`;
-    } else {
-      bar.innerHTML = pills.join("") + `<span class="pill" style="background:transparent;border-color:var(--border);color:var(--muted);cursor:pointer" onclick="clearAll()">clear all</span>`;
-    }
-  }
-
-  function pillHtml(label, value, key) {
-    return `<span class="pill">${label}: ${value}<span class="x" onclick="clearFilter('${key}')">×</span></span>`;
-  }
-
-  // ============================================================
-  //  FILTERING
-  // ============================================================
-  function toggleHealthTile(k) {
-    filters.healthTile = filters.healthTile === k ? null : k;
-    render();
-  }
-  function toggleAgentFilter(role, status) {
-    if (filters.role === role && filters.agentStatus === status) {
-      filters.role = null; filters.agentStatus = null;
-    } else {
-      filters.role = role; filters.agentStatus = status;
-    }
-    render();
-  }
-  function toggleQueueFilter(state) {
-    filters.queueState = filters.queueState === state ? null : state;
-    render();
-  }
-  function toggleBlockerFilter(code) {
-    filters.blocker = filters.blocker === code ? null : code;
-    render();
-  }
-  window.clearFilter = key => { filters[key] = null; render(); };
-  window.clearAll    = ()  => { Object.keys(filters).forEach(k => filters[k] = null); render(); };
-
-  function updateActiveTile() {
-    document.querySelectorAll(".tile").forEach(t => {
-      t.classList.toggle("active", filters.healthTile === t.dataset.filter);
-    });
-  }
-
-  // ============================================================
-  //  MODAL — self-repair council
-  // ============================================================
-  function showSelfRepairModal(featureId) {
-    const f = currentData().features.find(f => f.feature_id === featureId);
-    if (!f || !f.self_repair) return;
-    const sr = f.self_repair;
-    const modal = document.getElementById("modal");
-    modal.classList.remove("wide");
-    modal.innerHTML = `
-      <span class="close" onclick="closeModal()">✕</span>
-      <h2>self-repair council · ${f.feature_id}</h2>
-      <div class="card-sub" style="margin-bottom:0.75rem">${f.project}</div>
-      <div style="display:grid;grid-template-columns:110px 1fr;gap:0.25rem 0.7rem;font-size:0.7rem;color:var(--muted)">
-        <div style="color:var(--dim);text-transform:uppercase;font-size:0.6rem;letter-spacing:0.06em">status</div>
-        <div><span class="sr-badge ${sr.status}">${sr.status}</span></div>
-        <div style="color:var(--dim);text-transform:uppercase;font-size:0.6rem;letter-spacing:0.06em">issue key</div>
-        <div><code style="color:var(--cyan);font-size:0.66rem">${sr.last_attached_issue_key}</code></div>
-        <div style="color:var(--dim);text-transform:uppercase;font-size:0.6rem;letter-spacing:0.06em">issue count</div>
-        <div>${sr.issue_count}</div>
-        <div style="color:var(--dim);text-transform:uppercase;font-size:0.6rem;letter-spacing:0.06em">last deliberation</div>
-        <div>${sr.last_deliberation_at ? formatTs(sr.last_deliberation_at) : "—"}</div>
-      </div>
-
-      <div style="margin-top:1rem;font-size:0.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.07em">deliberations</div>
-      ${(sr.deliberations || []).length
-        ? sr.deliberations.map(d => `
-            <div class="deliberation">
-              <div style="display:flex;justify-content:space-between;align-items:baseline">
-                <span class="stage">${d.stage}</span>
-                <span class="verdict-${d.verdict}">${d.verdict}</span>
-              </div>
-              <div style="color:var(--dim);font-size:0.62rem;margin:0.2rem 0">panel: ${d.panel}</div>
-              <div style="color:var(--text);font-size:0.7rem">${escapeHtml(d.summary)}</div>
-            </div>`).join("")
-        : `<div class="empty-state">No deliberations yet</div>`}
-
-      <div class="detail-actions" style="margin-top:1rem">
-        <button class="btn">force replan</button>
-        <button class="btn rose">escalate</button>
-        <button class="btn amber">mark wontfix</button>
-      </div>`;
-    document.getElementById("modal-scrim").classList.add("open");
-  }
-  window.closeModal = () => document.getElementById("modal-scrim").classList.remove("open");
-
-  // ============================================================
-  //  MODAL — task detail (Plan / Execution / Review / QA / Delivery)
-  // ============================================================
-  function showTaskDetailModal(taskId) {
-    const t = currentData().tasks[taskId];
-    const modal = document.getElementById("modal");
-    modal.classList.add("wide");
-    if (!t) {
-      modal.innerHTML = `<span class="close" onclick="closeModal()">✕</span>
-        <h2>${escapeHtml(taskId)}</h2>
-        <div class="muted-text">No cached detail for this task. The dashboard_feed.py producer must emit its task body from queue/*.json.</div>`;
-      document.getElementById("modal-scrim").classList.add("open");
-      return;
-    }
-
-    // Badges
-    const roleCls = (t.role || "").replace(/[^a-z]/gi, "");
-    const feature = currentData().features.find(f => f.feature_id === t.feature_id);
-    const reviewBadge = t.review ? (t.review.verdict === "approve" ? `<span class="badge ok">approve</span>` : `<span class="badge crit">${t.review.verdict}</span>`) : `<span class="badge dim">—</span>`;
-    const qaBadge = t.qa ? (t.qa.smoke_exit === 0 ? `<span class="badge ok">pass</span>` : (t.qa.smoke_exit == null ? `<span class="badge warn">gate</span>` : `<span class="badge crit">exit ${t.qa.smoke_exit}</span>`)) : `<span class="badge dim">—</span>`;
-    const deliveryBadge = t.delivery && t.delivery.pr_final_state ? `<span class="badge ok">${t.delivery.pr_final_state}</span>` : (t.delivery && t.delivery.pr_number ? `<span class="badge warn">OPEN</span>` : `<span class="badge dim">—</span>`);
-
-    modal.innerHTML = `
-      <span class="close" onclick="closeModal()">✕</span>
-      <div class="task-modal-head">
-        <div>
-          <h2>${escapeHtml(t.summary || t.task_id)}</h2>
-          <div class="task-modal-sub">
-            <span class="role-chip ${roleCls}" style="display:inline-block;vertical-align:middle">${t.role || "task"}</span>
-            &nbsp;<code>${t.task_id}</code>
-            ${t.feature_id ? `&nbsp;·&nbsp;feature <code>${shortId(t.feature_id)}</code>` : ""}
-            ${t.project ? `&nbsp;·&nbsp;<span style="color:var(--amber);text-transform:uppercase;letter-spacing:0.05em;font-size:0.62rem">${t.project}</span>` : ""}
-          </div>
-        </div>
-        <div>
-          <span class="state-chip ${(t.state||'').replace(/_/g,'-')} emphasis">${t.state}</span>
-        </div>
-      </div>
-
-      <div class="task-modal-meta">
-        <div class="k">engine</div><div class="v">${t.engine || '—'}</div>
-        ${t.braid_template ? `<div class="k">BRAID template</div><div class="v"><code>${t.braid_template}</code> ${t.braid_template_hash ? `<span style="color:var(--dim);font-size:0.6rem"> (${t.braid_template_hash})</span>` : ''}</div>` : ''}
-        ${t.parent_task_id ? `<div class="k">parent task</div><div class="v"><code>${t.parent_task_id}</code></div>` : ''}
-        ${t.worktree ? `<div class="k">worktree</div><div class="v" style="font-size:0.62rem;color:var(--muted)">${t.worktree}</div>` : ''}
-        ${t.push_branch ? `<div class="k">branch</div><div class="v"><code>${t.push_branch}</code> → <code>${t.push_base_branch}</code></div>` : ''}
-      </div>
-
-      <div class="tabs" id="task-tabs">
-        <div class="tab active" data-tab="plan">Plan</div>
-        <div class="tab" data-tab="exec">Execution ${t.diff_stat ? `<span class="badge dim">+${t.diff_stat.lines_added}/-${t.diff_stat.lines_removed}</span>` : ''}</div>
-        <div class="tab" data-tab="review">Review ${reviewBadge}</div>
-        <div class="tab" data-tab="qa">QA ${qaBadge}</div>
-        <div class="tab" data-tab="delivery">Delivery ${deliveryBadge}</div>
-      </div>
-
-      <div class="tab-panel active" data-panel="plan">
-        ${feature && feature.roadmap_entry ? `
-          <div class="section-title">roadmap entry</div>
-          <div class="roadmap-box">
-            <div class="roadmap-head">
-              <span class="roadmap-id">${feature.roadmap_entry.id}</span>
-              <span class="roadmap-title">${escapeHtml(feature.roadmap_entry.title)}</span>
-            </div>
-            <div class="roadmap-grid">
-              <div class="rg-label">goal</div><div>${escapeHtml(feature.roadmap_entry.goal)}</div>
-              <div class="rg-label">scope</div><div>${escapeHtml(feature.roadmap_entry.scope)}</div>
-              <div class="rg-label">out of scope</div><div>${escapeHtml(feature.roadmap_entry.out_of_scope)}</div>
-              <div class="rg-label">acceptance</div><div>${escapeHtml(feature.roadmap_entry.acceptance)}</div>
-            </div>
-          </div>` : '<div class="muted-text">No roadmap entry linked to this task.</div>'}
-
-        <div class="section-title">planner summary (task body)</div>
-        <div style="padding:0.6rem 0.75rem;background:rgba(15,23,42,0.4);border:1px solid var(--border);border-radius:0.4rem;font-size:0.7rem;color:var(--text)">
-          ${escapeHtml(t.summary || '—')}
+          <span class="state-chip state-${esc(task.state || "queued")}">${esc(task.state || "-")}</span>
         </div>
 
-        ${t.frontier_blocker_code ? `
-          <div class="section-title">blocker</div>
-          <div style="padding:0.6rem 0.75rem;border:1px solid rgba(251,113,133,0.45);background:rgba(251,113,133,0.08);border-radius:0.4rem;font-size:0.7rem">
-            <div><span class="blocker-tag">${t.frontier_blocker_code}</span></div>
-            <div style="color:var(--muted);margin-top:0.35rem">${escapeHtml(t.frontier_blocker_detail || '')}</div>
-          </div>` : ''}
-      </div>
-
-      <div class="tab-panel" data-panel="exec">
-        <div class="section-title">timeline</div>
-        <div class="timeline">
-          ${timelineRow('created',  t.created_at)}
-          ${timelineRow('claimed',  t.claimed_at, t.created_at)}
-          ${timelineRow('started',  t.started_at, t.claimed_at || t.created_at)}
-          ${timelineRow('reviewed', t.reviewed_at, t.started_at)}
-          ${timelineRow('qa pass',  t.qa_passed_at, t.reviewed_at || t.started_at)}
-          ${timelineRow('pushed',   t.pushed_at, t.qa_passed_at || t.started_at)}
-          ${timelineRow('PR open',  t.pr_created_at, t.pushed_at)}
-          ${timelineRow('PR merged',t.pr_merged_at, t.pr_created_at)}
-          ${timelineRow('finished', t.finished_at, t.started_at)}
-          ${timelineRow('cleaned',  t.cleaned_at, t.pr_merged_at)}
+        <div class="modal-grid">
+          <div class="k">project</div><div>${esc(task.project || "-")}</div>
+          <div class="k">kind</div><div>${esc(task.kind || "-")}</div>
+          <div class="k">attempt</div><div>${esc(task.attempt || 1)}</div>
+          <div class="k">worktree</div><div>${esc(task.worktree || "-")}</div>
+          <div class="k">branch</div><div>${esc(task.push_branch || task.base_branch || "-")}${task.push_base_branch ? ` → ${esc(task.push_base_branch)}` : ""}</div>
         </div>
 
-        ${t.diff_stat ? `
-          <div class="section-title">diff stat · +${t.diff_stat.lines_added} / −${t.diff_stat.lines_removed}</div>
-          <table class="data-table">
-            <thead><tr><th>file</th><th style="text-align:right">+</th><th style="text-align:right">−</th></tr></thead>
-            <tbody>
-              ${t.diff_stat.files.map(f => `<tr>
-                <td class="path">${escapeHtml(f.path)}</td>
-                <td class="added">+${f.added}</td>
-                <td class="removed">−${f.removed}</td>
-              </tr>`).join('')}
-            </tbody>
-          </table>` : '<div class="muted-text">No diff yet.</div>'}
+        <div class="tabs">
+          <div class="tab active" data-tab="timeline">Timeline</div>
+          <div class="tab" data-tab="review">Review</div>
+          <div class="tab" data-tab="qa">QA Scope</div>
+          <div class="tab" data-tab="delivery">Delivery</div>
+        </div>
 
-        ${t.commits ? `
-          <div class="section-title">commits (${t.commits.length})</div>
-          <table class="data-table">
-            <tbody>
-              ${t.commits.map(c => `<tr>
-                <td class="sha">${c.sha}</td>
-                <td>${escapeHtml(c.message)}</td>
-              </tr>`).join('')}
-            </tbody>
-          </table>` : ''}
-      </div>
-
-      <div class="tab-panel" data-panel="review">
-        ${t.review ? `
-          <div class="section-title">verdict</div>
-          <div style="display:flex;gap:0.6rem;align-items:center;font-size:0.75rem">
-            <span class="verdict-${t.review.verdict}" style="font-weight:600;text-transform:uppercase;letter-spacing:0.06em">${t.review.verdict}</span>
-            <span style="color:var(--muted);font-size:0.68rem">by <code>${t.review.reviewed_by}</code> · ${t.review.feedback_rounds} feedback round${t.review.feedback_rounds===1?'':'s'}</span>
+        <div class="tab-panel active" data-panel="timeline">
+          <div class="timeline">
+            ${timelineRow("created", task.created_at)}
+            ${timelineRow("claimed", task.claimed_at)}
+            ${timelineRow("started", task.started_at)}
+            ${timelineRow("reviewed", task.reviewed_at)}
+            ${timelineRow("qa passed", task.qa_passed_at)}
+            ${timelineRow("pushed", task.pushed_at)}
+            ${timelineRow("pr opened", task.pr_created_at)}
+            ${timelineRow("review req", task.review_requested_at)}
+            ${timelineRow("finished", task.finished_at)}
           </div>
+          ${task.blocker?.code ? `<div class="finding-row" style="margin-top:12px"><strong>${esc(task.blocker.code)}</strong><div class="tiny">${esc(task.blocker.detail || task.blocker.summary || "")}</div></div>` : ""}
+          ${task.failure || task.qa_failure || task.push_failure || task.deploy_failure ? `<div class="finding-row" style="margin-top:12px">${esc(task.failure || task.qa_failure || task.push_failure || task.deploy_failure)}</div>` : ""}
+        </div>
 
-          <div class="section-title">gates</div>
-          ${t.review.gates.map(g => `<div class="gate-row ${g.verdict}">
-            <span class="g-name">${g.gate}</span>
-            <span class="g-owner">${g.owner}</span>
-            <span class="g-verdict ${g.verdict}">${g.verdict}</span>
-            <span class="g-note">${escapeHtml(g.note)}</span>
-          </div>`).join('')}` : '<div class="muted-text">No review ran yet. Tasks enter review after smoke; blocked/failed tasks may skip this phase.</div>'}
-      </div>
-
-      <div class="tab-panel" data-panel="qa">
-        ${t.qa ? `
-          <div class="section-title">smoke result</div>
-          <div style="display:flex;gap:0.8rem;flex-wrap:wrap;font-size:0.7rem;align-items:baseline">
-            <span>exit: <strong style="color:${t.qa.smoke_exit===0?'var(--emerald)':'var(--rose)'}">${t.qa.smoke_exit}</strong></span>
-            <span>script: <code>${t.qa.qa_script || "—"}</code></span>
-            <span>duration: ${t.qa.duration_sec == null ? "—" : `${t.qa.duration_sec}s`}</span>
+        <div class="tab-panel" data-panel="review">
+          <div class="kv-grid">
+            <div class="k">verdict</div><div>${task.review_verdict ? esc(task.review_verdict) : "pending"}</div>
+            <div class="k">reviewed by</div><div>${esc(task.reviewed_by || "-")}</div>
+            <div class="k">rounds</div><div>${esc(task.review_feedback_rounds || 0)}</div>
+            <div class="k">council</div><div>${(task.review_council_panel || []).length ? task.review_council_panel.map(item => `<span class="pill-inline">${esc(item)}</span>`).join("") : "<span class='tiny'>none recorded</span>"}</div>
           </div>
+          <div class="section-title" style="margin-top:12px">Review Gates</div>
+          <div class="gate-list">${gates || `<div class="empty">No review gates recorded.</div>`}</div>
+          <div class="section-title" style="margin-top:12px">Policy Findings</div>
+          <div class="finding-list">${findings || `<div class="empty">No policy findings recorded.</div>`}</div>
+        </div>
 
-          ${t.qa.scope_audit ? `
-            <div class="section-title">scope audit · <span class="scope-verdict ${t.qa.scope_audit.verdict}">${t.qa.scope_audit.verdict.replace('_',' ')}</span></div>
-            <div class="scope-box">
-              <div class="sc-k">expected</div>
-              <div>${t.qa.scope_audit.expected.length ? t.qa.scope_audit.expected.map(s => `<span class="scope-chip">${s}</span>`).join('') : '<span class="muted-text">not exported</span>'}</div>
-              <div class="sc-k">observed</div>
-              <div>${t.qa.scope_audit.observed.length ? t.qa.scope_audit.observed.map(s => `<span class="scope-chip observed">${s}</span>`).join('') : '<span class="muted-text">see semantic gate output below</span>'}</div>
-              ${t.qa.scope_audit.missing && t.qa.scope_audit.missing.length ? `
-                <div class="sc-k">missing</div>
-                <div>${t.qa.scope_audit.missing.map(s => `<span class="scope-chip missing">${s}</span>`).join('')}</div>` : ''}
-            </div>` : ''}
-
-          ${t.qa.gate_output ? `
-            <div class="section-title">semantic gate</div>
-            <div class="log-tail">${escapeHtml(t.qa.gate_output)}</div>
-          ` : ''}
-
-          <div class="section-title">log tail</div>
-          <div class="log-tail">${t.qa.log_tail.map(l => escapeHtml(l)).join('\n')}</div>
-          ${t.qa.full_log_path ? `<div style="font-size:0.6rem;color:var(--dim);margin-top:0.3rem">full log: <code>${t.qa.full_log_path}</code></div>` : ''}
-          ` : '<div class="muted-text">QA has not run for this task yet.</div>'}
-      </div>
-
-      <div class="tab-panel" data-panel="delivery">
-        ${t.delivery ? `
-          <div class="delivery-grid">
-            <div class="dk">PR</div><div><a href="${t.delivery.pr_url}" target="_blank">#${t.delivery.pr_number}</a> <span class="pr-state-badge pr-state-${t.delivery.pr_final_state || 'OPEN'}">${t.delivery.pr_final_state || 'OPEN'}</span></div>
-            ${t.push_commit_sha ? `<div class="dk">commit</div><div><code>${t.push_commit_sha}</code> · ${t.push_commit_count} commit${t.push_commit_count===1?'':'s'}</div>` : ''}
-            ${t.delivery.pr_sweep ? `
-              <div class="dk">pr-sweep</div>
-              <div>
-                feedback rounds: <strong>${t.delivery.pr_sweep.feedback_rounds}</strong>
-                ${t.delivery.pr_sweep.last_mergeable ? `· mergeable: <strong>${t.delivery.pr_sweep.last_mergeable}</strong>` : ''}
-                ${t.delivery.pr_sweep.last_merge_state ? `· state: <strong style="color:${t.delivery.pr_sweep.last_merge_state==='CLEAN'?'var(--emerald)':'var(--amber)'}">${t.delivery.pr_sweep.last_merge_state}</strong>` : ''}
-                ${t.delivery.pr_sweep.unresolved_bot_threads ? `<div style="margin-top:0.2rem;color:var(--rose)">${t.delivery.pr_sweep.unresolved_bot_threads} unresolved bot thread${t.delivery.pr_sweep.unresolved_bot_threads===1?'':'s'}</div>` : ''}
-                ${t.delivery.pr_sweep.last_feedback_reason ? `<div style="margin-top:0.2rem;color:var(--muted);font-size:0.62rem">last feedback: ${escapeHtml(t.delivery.pr_sweep.last_feedback_reason)}</div>` : ''}
-              </div>` : ''}
+        <div class="tab-panel" data-panel="qa">
+          <div class="kv-grid">
+            <div class="k">qa verdict</div><div>${task.qa_passed_at ? "passed" : (task.qa_failure ? esc(task.qa_failure) : "pending")}</div>
+            <div class="k">gate output</div><div>${task.qa_gate_output ? nl2br(task.qa_gate_output) : "<span class='tiny'>No semantic QA gate output recorded.</span>"}</div>
+            <div class="k">log path</div><div>${task.log_path ? `<code>${esc(task.log_path)}</code>` : "<span class='tiny'>No task log found.</span>"}</div>
+            <div class="k">artifacts</div><div>${esc(task.artifacts_count || 0)}</div>
           </div>
-          <div class="detail-actions" style="margin-top:0.9rem">
-            <button class="btn" onclick="window.open('${t.delivery.pr_url}', '_blank')">open on GitHub</button>
-            ${t.delivery.pr_final_state !== 'MERGED' ? `<button class="btn amber">re-run pr-sweep</button>` : ''}
-          </div>` : '<div class="muted-text">No PR opened yet. Delivery happens after QA pass + push.</div>'}
-      </div>`;
+          <div class="section-title" style="margin-top:12px">Log Tail</div>
+          <div class="log-tail">${task.log_tail && task.log_tail.length ? esc(task.log_tail.join("\n")) : "No log output captured."}</div>
+        </div>
 
-    // wire tab switching
-    modal.querySelectorAll(".tab").forEach(t => {
-      t.addEventListener("click", () => {
-        modal.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
-        modal.querySelectorAll(".tab-panel").forEach(x => x.classList.remove("active"));
-        t.classList.add("active");
-        modal.querySelector(`.tab-panel[data-panel="${t.dataset.tab}"]`).classList.add("active");
+        <div class="tab-panel" data-panel="delivery">
+          <div class="kv-grid">
+            ${deliveryRows.map(([k, v]) => `<div class="k">${k}</div><div>${v}</div>`).join("")}
+          </div>
+          ${evidence ? `<div class="section-title" style="margin-top:12px">Resolved Thread Evidence</div><div class="evidence-list">${evidence}</div>` : ""}
+        </div>
+      `;
+      modal.querySelectorAll(".tab").forEach((tab) => {
+        tab.addEventListener("click", () => {
+          modal.querySelectorAll(".tab").forEach((item) => item.classList.remove("active"));
+          modal.querySelectorAll(".tab-panel").forEach((item) => item.classList.remove("active"));
+          tab.classList.add("active");
+          modal.querySelector(`.tab-panel[data-panel="${tab.dataset.tab}"]`).classList.add("active");
+        });
       });
-    });
-
-    document.getElementById("modal-scrim").classList.add("open");
-  }
-
-  function timelineRow(label, ts, prev) {
-    if (!ts) return `<div class="tl-k">${label}</div><div class="tl-ts" style="color:var(--dim)">—</div><div class="tl-delta"></div>`;
-    let delta = "";
-    if (prev) {
-      const ms = new Date(ts) - new Date(prev);
-      if (ms >= 0 && ms < 1000*60*60*48) {
-        const mins = Math.round(ms / 60000);
-        delta = mins < 60 ? `+${mins}m` : `+${(mins/60).toFixed(1)}h`;
-      }
+      document.getElementById("modalScrim").classList.add("open");
     }
-    return `<div class="tl-k">${label}</div><div class="tl-ts">${ts.replace('T',' ').replace('Z','')}</div><div class="tl-delta">${delta}</div>`;
-  }
 
-  // ============================================================
-  //  HELPERS
-  // ============================================================
-  function shortId(id) {
-    if (!id) return "—";
-    const m = id.match(/^(task|feature)-\d{8}-\d{6}-(\w+)$/);
-    if (m) return m[1] + "…" + m[2];
-    return id;
-  }
-  function ageHours(ts) {
-    const now = new Date("2026-04-19T01:05:00Z");
-    return (now - new Date(ts)) / 36e5;
-  }
-  function ageString(ts) {
-    const h = ageHours(ts);
-    if (h < 1) return Math.round(h * 60) + "m ago";
-    if (h < 48) return h.toFixed(1) + "h ago";
-    return (h/24).toFixed(1) + "d ago";
-  }
-  function formatTs(ts) { return ts.replace("T", " ").replace("Z", " UTC"); }
-  function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
-
-  // ============================================================
-  //  MAIN
-  // ============================================================
-  function render() {
-    const data = currentData();
-    renderHeader(data);
-    renderAgents(data);
-    renderQueue(data);
-    renderFeatures(data);
-    renderBlockers(data);
-    renderTicker(data);
-    renderFilters();
-    updateActiveTile();
-  }
-
-  render();
-
-  async function refreshFromApi() {
-    const response = await fetch(DASHBOARD_API_URL, { cache: "no-store" });
-    LIVE = normalizeLiveData(await response.json());
-    render();
-  }
-
-  function startPolling() {
-    if (pollingTimer) return;
-    pollingTimer = setInterval(() => {
-      refreshFromApi().catch(() => {});
-    }, 5000);
-  }
-
-  function stopPolling() {
-    if (!pollingTimer) return;
-    clearInterval(pollingTimer);
-    pollingTimer = null;
-  }
-
-  function scheduleReconnect() {
-    if (reconnectTimer) return;
-    reconnectTimer = setTimeout(() => {
-      reconnectTimer = null;
-      connectEvents();
-    }, 3000);
-  }
-
-  function connectEvents() {
-    if (!window.EventSource) {
-      startPolling();
-      return;
+    function closeTaskModal() {
+      document.getElementById("modalScrim").classList.remove("open");
     }
-    if (eventSource) eventSource.close();
-    eventSource = new EventSource(DASHBOARD_EVENTS_URL);
-    eventSource.addEventListener("dashboard", event => {
-      LIVE = normalizeLiveData(JSON.parse(event.data));
-      stopPolling();
-      render();
-    });
-    eventSource.onerror = () => {
-      if (eventSource) {
-        eventSource.close();
-        eventSource = null;
-      }
-      startPolling();
-      scheduleReconnect();
-    };
-  }
 
-  refreshFromApi().catch(() => {});
-  connectEvents();
+    function render(data) {
+      if (!data) return;
+      latestData = data;
+      indexTasks(data);
+      document.getElementById("timestamp").textContent = `updated ${formatTs(data.timestamp)}`;
+      renderFilters();
+      renderScorecards(data);
+      renderAgents(data);
+      renderServer(data);
+      renderBudget(data);
+      renderQueue(data);
+      renderBlockers(data);
+      renderTransitions(data);
+      renderFeatures(data);
+    }
+
+    async function refresh() {
+      const response = await fetch(DASHBOARD_API_URL, { cache: "no-store" });
+      const data = await response.json();
+      render(data);
+    }
+
+    function startPolling() {
+      if (pollingTimer) return;
+      pollingTimer = setInterval(() => {
+        refresh().catch(() => {});
+      }, 5000);
+    }
+
+    function stopPolling() {
+      if (!pollingTimer) return;
+      clearInterval(pollingTimer);
+      pollingTimer = null;
+    }
+
+    function scheduleReconnect() {
+      if (reconnectTimer) return;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        connectEvents();
+      }, 3000);
+    }
+
+    function connectEvents() {
+      if (!window.EventSource) {
+        startPolling();
+        return;
+      }
+      if (eventSource) eventSource.close();
+      eventSource = new EventSource(DASHBOARD_EVENTS_URL);
+      eventSource.addEventListener("dashboard", (event) => {
+        stopPolling();
+        render(JSON.parse(event.data));
+      });
+      eventSource.onerror = () => {
+        if (eventSource) {
+          eventSource.close();
+          eventSource = null;
+        }
+        startPolling();
+        scheduleReconnect();
+      };
+    }
+
+    refresh().catch(() => {});
+    connectEvents();
   </script>
 </body>
 </html>

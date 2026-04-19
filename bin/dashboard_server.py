@@ -7,7 +7,6 @@ import argparse
 import http.server
 import json
 import os
-import pathlib
 import socketserver
 import sys
 import threading
@@ -18,10 +17,6 @@ from urllib.parse import urlparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import orchestrator as o  # noqa: E402
 import dashboard_feed  # noqa: E402
-
-REFERENCE_DASHBOARD_HTML = pathlib.Path(
-    "/Volumes/devssd/repos/skills/engineering-memory/skills/architecture-diagram-generator/orchestrator-dashboard.html"
-)
 
 
 def _content_type(path):
@@ -47,7 +42,7 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
         request_path = urlparse(self.path).path
 
         if request_path in ("/", "/index.html", "/orchestrator-dashboard.html"):
-            self._send_file(_dashboard_html_path())
+            self._send_file(o.DASHBOARD_HTML_PATH)
             return
         if request_path in ("/state/runtime/dashboard-feed.json", "/dashboard-feed.json", "/api/dashboard"):
             self._send_dashboard_json()
@@ -176,10 +171,6 @@ class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
         host, port = self.server_address[:2]
         self.server_name = str(host)
         self.server_port = port
-
-
-def _dashboard_html_path():
-    return REFERENCE_DASHBOARD_HTML if REFERENCE_DASHBOARD_HTML.exists() else o.DASHBOARD_HTML_PATH
 
 
 def main():
