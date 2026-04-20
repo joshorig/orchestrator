@@ -217,6 +217,38 @@
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 10px;
     }
+    .heartbeat-progress {
+      margin-top: 12px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 12px;
+      background: rgba(15, 23, 42, 0.34);
+    }
+    .progress-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: baseline;
+      margin-bottom: 8px;
+    }
+    .progress-track {
+      width: 100%;
+      height: 10px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: rgba(15, 23, 42, 0.9);
+      border: 1px solid var(--border);
+    }
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--cyan), var(--emerald));
+      border-radius: 999px;
+    }
+    .progress-note {
+      color: var(--dim);
+      font-size: 11px;
+      margin-top: 6px;
+    }
     .heartbeat-stat, .review-stat, .review-gate-row, .memory-row, .observation-row {
       border: 1px solid var(--border);
       border-radius: 12px;
@@ -257,6 +289,72 @@
       grid-template-columns: 1fr 1fr;
       gap: 8px;
       margin-top: 10px;
+    }
+    .cost-hero {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .cost-stat-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .cost-stat {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 12px;
+      background: rgba(15, 23, 42, 0.34);
+    }
+    .cost-stat .lbl {
+      color: var(--dim);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 10px;
+      margin-bottom: 4px;
+    }
+    .cost-stat .val {
+      color: var(--text);
+      font-size: 17px;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+    }
+    .cost-bar {
+      display: flex;
+      width: 100%;
+      height: 18px;
+      overflow: hidden;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: rgba(15, 23, 42, 0.9);
+      margin: 8px 0 10px;
+    }
+    .cost-seg {
+      min-width: 2px;
+      cursor: default;
+    }
+    .cost-legend {
+      display: grid;
+      gap: 6px;
+    }
+    .cost-legend-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: center;
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .legend-name {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .legend-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
     }
     .cost-table {
       width: 100%;
@@ -331,6 +429,22 @@
       cursor: pointer;
     }
     .feature-summary { color: var(--text); margin-bottom: 10px; }
+    .feature-row2 {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 8px;
+      align-items: center;
+    }
+    .frontier-line {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 10px;
+      color: var(--muted);
+      font-size: 11px;
+      align-items: center;
+    }
     .feature-sections { display: grid; gap: 8px; }
     .feature-section {
       border: 1px solid var(--border);
@@ -416,6 +530,7 @@
     }
     .tag.blocker { color: var(--rose); border-color: rgba(251, 113, 133, 0.35); }
     .tag.review { color: var(--amber); border-color: rgba(251, 191, 36, 0.35); }
+    .tag.success { color: var(--emerald); border-color: rgba(52, 211, 153, 0.35); }
     .event-row {
       display: grid;
       grid-template-columns: auto auto 1fr;
@@ -481,6 +596,31 @@
     tr.clickable { cursor: pointer; }
     td.right { text-align: right; }
     td.code { color: var(--rose); font-weight: 700; }
+    .blocker-cards {
+      display: grid;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .blocker-card {
+      border: 1px solid var(--border);
+      border-left: 4px solid var(--rose);
+      border-radius: 12px;
+      padding: 10px 12px;
+      background: rgba(15, 23, 42, 0.34);
+      cursor: pointer;
+    }
+    .blocker-card.active {
+      border-color: rgba(251, 113, 133, 0.55);
+      box-shadow: 0 0 0 1px rgba(251, 113, 133, 0.28) inset;
+    }
+    .blocker-card.warn { border-left-color: var(--amber); }
+    .blocker-card .count {
+      color: var(--rose);
+      font-size: 18px;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+    }
+    .blocker-card.warn .count { color: var(--amber); }
     .empty {
       color: var(--dim);
       font-style: italic;
@@ -721,7 +861,7 @@
           <span class="section-title">Frontier Blockers</span>
           <span class="section-sub" id="blockerCount">-</span>
         </div>
-        <table><tbody id="blockers"></tbody></table>
+        <div id="blockers"></div>
       </div>
       <div class="card">
         <div class="section-head">
@@ -751,8 +891,6 @@
       project: null,
       frontierState: null,
       blockerCode: null,
-      agentStatus: null,
-      agentRole: null,
       featureStatus: null,
     };
     let OBS_MODE = false;
@@ -771,6 +909,7 @@
       pending: "#fbbf24",
       abstain: "#94a3b8",
     };
+    const COST_COLORS = ["#22d3ee", "#34d399", "#a78bfa", "#fb923c", "#fbbf24", "#fb7185", "#64748b"];
     let latestData = null;
     let taskIndex = {};
     let eventSource = null;
@@ -830,6 +969,13 @@
       return "bad";
     }
 
+    function pct(value, total) {
+      const n = Number(value || 0);
+      const d = Number(total || 0);
+      if (!d || !Number.isFinite(n) || !Number.isFinite(d)) return 0;
+      return (n / d) * 100;
+    }
+
     function activeFilters() {
       return Object.entries(FILTERS).filter(([, value]) => value);
     }
@@ -868,7 +1014,7 @@
       const rows = activeFilters();
       const host = document.getElementById("filters");
       if (!rows.length) {
-        host.innerHTML = `<span class="filter-hint">No filters active. Click a scorecard, queue state, blocker code, project tag, or agent status to focus the view.</span>`;
+        host.innerHTML = `<span class="filter-hint">No filters active. Click a scorecard, queue state, blocker code, project tag, or feature state to focus the view.</span>`;
         return;
       }
       host.innerHTML = rows.map(([key, value]) => `
@@ -949,93 +1095,6 @@
       `).join("");
     }
 
-    function renderAgents(data) {
-      const rows = (data.agents || []).filter(row => !FILTERS.agentStatus || row.status === FILTERS.agentStatus);
-      document.getElementById("agentCount").textContent = `${rows.length}/${data.agents.length} visible`;
-      document.getElementById("agents").innerHTML = rows.length ? rows.map(row => `
-        <div class="agent-row ${(FILTERS.agentStatus === row.status || FILTERS.agentRole === row.role) ? "active" : ""}" onclick="setFilter('agentRole','${escAttr(row.role)}')">
-          <div class="agent-top">
-            <span class="agent-role">${esc(row.role)}</span>
-            <span class="status-badge status-${esc(row.status)}" onclick="event.stopPropagation(); setFilter('agentStatus','${escAttr(row.status)}')">${esc(row.status)}</span>
-          </div>
-          <div class="agent-detail">${esc(row.detail || "No detail.")}</div>
-          <div class="tiny">updated ${esc(formatTs(row.updated_at))}</div>
-        </div>
-      `).join("") : `<div class="empty">No agents match the active filter.</div>`;
-    }
-
-    function renderAgentTasks() {
-      const host = document.getElementById("agentTasks");
-      const count = document.getElementById("agentTaskCount");
-      if (!FILTERS.agentRole) {
-        count.textContent = "select an agent";
-        host.innerHTML = `<div class="empty">Click an agent row to see tasks for that role.</div>`;
-        return;
-      }
-      const rows = Object.values(taskIndex)
-        .filter((task) => task.role === FILTERS.agentRole && (task.state === "running" || task.finished_at))
-        .sort((a, b) => {
-          if (a.state === "running" && b.state !== "running") return -1;
-          if (a.state !== "running" && b.state === "running") return 1;
-          return String(b.finished_at || b.started_at || b.created_at || "").localeCompare(String(a.finished_at || a.started_at || a.created_at || ""));
-        });
-      count.textContent = `${rows.length} task${rows.length === 1 ? "" : "s"}`;
-      host.innerHTML = rows.length ? rows.map((task) => `
-        <div class="mini-row agent-task-row" onclick="showTaskModal('${escAttr(task.task_id)}')">
-          <div class="mini-top">
-            <strong>${esc(task.task_id)}</strong>
-            <span class="state-chip state-${esc(task.state || "queued")}">${esc(task.state || "-")}</span>
-          </div>
-          <div class="mini-detail">${esc(task.summary || "")}</div>
-          <div class="tiny">${esc(task.project || "-")} · ${esc(formatTs(task.finished_at || task.started_at || task.created_at))}</div>
-        </div>
-      `).join("") : `<div class="empty">No running or completed tasks for ${esc(FILTERS.agentRole)}.</div>`;
-    }
-
-    function renderServer(data) {
-      const server = data.dashboard_server || {};
-      const engine = server.state_engine || {};
-      document.getElementById("server").innerHTML = `
-        <div class="mini-row">
-          <div class="mini-top"><strong>URL</strong><span class="tiny">dashboard</span></div>
-          <div><a href="${esc(server.dashboard_url || "#")}">${esc(server.dashboard_url || "-")}</a></div>
-        </div>
-        <div class="mini-row">
-          <div class="mini-top"><strong>Bind</strong><span class="tiny">listener</span></div>
-          <div class="mini-detail">${esc(server.host || "-")}:${esc(server.port || "-")}</div>
-        </div>
-        <div class="mini-row">
-          <div class="mini-top"><strong>Allowed CIDRs</strong><span class="tiny">${esc((server.allowed_cidrs || []).length)} entries</span></div>
-          <div class="mini-detail">${esc((server.allowed_cidrs || []).join(", "))}</div>
-        </div>
-        <div class="mini-row">
-          <div class="mini-top"><strong>State Engine</strong><span class="tiny">${esc(engine.mode || "off")}</span></div>
-          <div class="mini-detail">${esc(engine.integrity_check || "-")}</div>
-          <div class="tiny">${esc(engine.db_path || "")}</div>
-        </div>
-      `;
-    }
-
-    function renderBudget(data) {
-      const budget = data.claude_budget || {};
-      const configured = budget.configured || {};
-      const recent = budget.recent_hits || [];
-      const lanes = Object.keys(configured);
-      const laneRows = lanes.map(name => `
-        <div class="mini-row">
-          <div class="mini-top"><strong>${esc(name)}</strong><span class="tiny">$${Number(configured[name] || 0).toFixed(2)}</span></div>
-          <div class="mini-detail">24h cap hits: ${esc((budget.hits_24h || {})[name] || 0)}</div>
-        </div>
-      `).join("");
-      const recentRows = recent.length ? recent.slice(-4).reverse().map(hit => `
-        <div class="mini-row">
-          <div class="mini-top"><strong>${esc(hit.lane)}</strong><span class="tiny">${esc(formatTs(hit.ts))}</span></div>
-          <div class="mini-detail">${esc(hit.project || hit.role || "-")}</div>
-        </div>
-      `).join("") : `<div class="empty">No cap hits in the last 24h.</div>`;
-      document.getElementById("budget").innerHTML = laneRows + recentRows;
-    }
-
     function renderCosts(data) {
       const costs = data.task_costs || {};
       const summary = costs.summary || {};
@@ -1044,6 +1103,22 @@
       const templates = costs.by_template || [];
       const success = new Map((costs.template_success || []).map(row => [row.braid_template, row]));
       const recent = costs.recent || [];
+      const totalCost = Number(summary.cost_usd || 0);
+      const totalTasks = Number(summary.task_count || 0);
+      const modelBar = engines.slice(0, 6).map((row, index) => {
+        const width = totalCost > 0 ? Math.max(pct(row.cost_usd, totalCost), 2) : 0;
+        return `<div class="cost-seg" style="width:${width}%;background:${COST_COLORS[index % COST_COLORS.length]}" title="${esc(row.engine || "unknown")} $${Number(row.cost_usd || 0).toFixed(4)}"></div>`;
+      }).join("");
+      const modelLegend = engines.slice(0, 6).map((row, index) => `
+        <div class="cost-legend-row">
+          <span class="legend-name"><span class="legend-dot" style="background:${COST_COLORS[index % COST_COLORS.length]}"></span>${esc(row.engine || "unknown")}</span>
+          <span>$${esc(Number(row.cost_usd || 0).toFixed(4))} · ${esc(Number(row.task_count || 0))}t</span>
+        </div>
+      `).join("");
+      const oneShotRows = costs.template_success || [];
+      const finishedCount = oneShotRows.reduce((sum, row) => sum + Number(row.finished_count || 0), 0);
+      const oneShotSuccesses = oneShotRows.reduce((sum, row) => sum + Number(row.one_shot_successes || 0), 0);
+      const overallOneShot = finishedCount > 0 ? (oneShotSuccesses / finishedCount) * 100 : 0;
       const top = `
         <div class="mini-row">
           <div class="mini-top"><strong>24h spend</strong><span class="tiny">${esc(summary.task_count || 0)} tasks</span></div>
@@ -1051,13 +1126,6 @@
           <div class="tiny">in ${esc(summary.input_tokens || 0)} / out ${esc(summary.output_tokens || 0)} / cache ${esc(summary.cache_tokens || 0)} / search ${esc(summary.search_tokens || 0)}</div>
         </div>
       `;
-      const engineRows = engines.slice(0, 4).map(row => `
-        <div class="mini-row">
-          <div class="mini-top"><strong>${esc(row.engine || "unknown")}</strong><span class="tiny">${esc(row.task_count || 0)} tasks</span></div>
-          <div class="mini-detail">$${esc(Number(row.cost_usd || 0).toFixed(4))}</div>
-          <div class="tiny">in ${esc(row.input_tokens || 0)} / out ${esc(row.output_tokens || 0)}</div>
-        </div>
-      `).join("");
       const recentRows = recent.slice(0, 4).map(row => `
         <div class="mini-row">
           <div class="mini-top"><strong>${esc(row.task_id || "-")}</strong><span class="tiny">${esc(row.engine || "-")}</span></div>
@@ -1080,11 +1148,37 @@
             <td>${esc(row.braid_template || "untemplated")}</td>
             <td>${esc(row.task_count || 0)}</td>
             <td>$${esc(Number(row.cost_usd || 0).toFixed(4))}</td>
+            <td>$${esc((Number(row.task_count || 0) > 0 ? Number(row.cost_usd || 0) / Number(row.task_count || 0) : 0).toFixed(4))}</td>
             <td class="pct ${toneForRate(rate)}">${esc(rate.toFixed ? rate.toFixed(1) : rate)}%</td>
           </tr>
         `;
-      }).join("") || `<tr><td colspan="4" class="tiny">No template costs yet.</td></tr>`;
-      document.getElementById("costs").innerHTML = top + engineRows + `
+      }).join("") || `<tr><td colspan="5" class="tiny">No template costs yet.</td></tr>`;
+      document.getElementById("costs").innerHTML = top + `
+        <div class="cost-hero">
+          <div class="mini-row">
+            <div class="mini-top"><strong>Model split</strong><span class="tiny">24h burn</span></div>
+            <div class="cost-bar">${modelBar || `<div class="cost-seg" style="width:100%;background:${COST_COLORS[6]}"></div>`}</div>
+            <div class="cost-legend">${modelLegend || `<div class="tiny">No model costs yet.</div>`}</div>
+          </div>
+          <div class="cost-stat-grid">
+            <div class="cost-stat">
+              <div class="lbl">$/task</div>
+              <div class="val">$${(totalTasks > 0 ? totalCost / totalTasks : 0).toFixed(4)}</div>
+            </div>
+            <div class="cost-stat">
+              <div class="lbl">one-shot</div>
+              <div class="val ${toneForRate(overallOneShot)}">${overallOneShot.toFixed(1)}%</div>
+            </div>
+            <div class="cost-stat">
+              <div class="lbl">projects</div>
+              <div class="val">${projects.length}</div>
+            </div>
+            <div class="cost-stat">
+              <div class="lbl">templates</div>
+              <div class="val">${templates.length}</div>
+            </div>
+          </div>
+        </div>
         <div class="cost-breakdown">
           <div class="mini-row">
             <div class="mini-top"><strong>By project</strong><span class="tiny">24h</span></div>
@@ -1096,7 +1190,7 @@
           <div class="mini-row">
             <div class="mini-top"><strong>By BRAID template</strong><span class="tiny">one-shot rate</span></div>
             <table class="cost-table">
-              <thead><tr><th>template</th><th>tasks</th><th>cost</th><th>1-shot</th></tr></thead>
+              <thead><tr><th>template</th><th>tasks</th><th>cost</th><th>$/task</th><th>1-shot</th></tr></thead>
               <tbody>${templateRows}</tbody>
             </table>
           </div>
@@ -1124,54 +1218,43 @@
     function renderBlockers(data) {
       const blockers = data.blocker_codes || [];
       document.getElementById("blockerCount").textContent = blockers.length ? `${blockers.length} active codes` : "0 active";
-      document.getElementById("blockers").innerHTML = blockers.length ? blockers.map(row => `
+      const blockedFeatures = (data.features || []).filter(feature => feature.frontier?.blocker?.code).slice(0, 3);
+      const cards = blockers.slice(0, 3).map((row, index) => `
+        <div class="blocker-card ${index > 0 ? "warn" : ""} ${FILTERS.blockerCode === row.code ? "active" : ""}" onclick="setFilter('blockerCode','${escAttr(row.code)}')">
+          <div class="row-head">
+            <span class="row-title">${esc(row.code)}</span>
+            <span class="count">${esc(row.count)}</span>
+          </div>
+          <div class="tiny">${esc(row.pct_of_blocked)}% of blocked tasks</div>
+        </div>
+      `).join("");
+      document.getElementById("blockers").innerHTML = blockers.length ? `
+        <div class="blocker-cards">${cards}</div>
+        <table><tbody>${blockers.map(row => `
         <tr class="clickable ${FILTERS.blockerCode === row.code ? "active" : ""}" onclick="setFilter('blockerCode','${escAttr(row.code)}')">
           <td class="code">${esc(row.code)}</td>
           <td class="right">${esc(row.count)}</td>
           <td class="right tiny">${esc(row.pct_of_blocked)}%</td>
         </tr>
-      `).join("") : `<tr><td colspan="3" class="empty">No blocked tasks.</td></tr>`;
-    }
-
-    function renderTransitions(data) {
-      const rows = data.recent_transitions || [];
-      document.getElementById("transitions").innerHTML = rows.length ? rows.slice(-10).reverse().map(row => `
-        <div class="mini-row">
-          <div class="mini-top"><strong>${esc(row.task_id)}</strong><span class="tiny">${esc(formatTs(row.ts))}</span></div>
-          <div class="mini-detail">${esc(row.from_state)} → ${esc(row.to_state)}</div>
-          <div class="tiny">${esc(row.reason || "")}</div>
+      `).join("")}</tbody></table>
+      ${blockedFeatures.length ? `
+        <div class="mini-list" style="margin-top:10px">
+          ${blockedFeatures.map(feature => `
+            <div class="mini-row" onclick="setFilter('project','${escAttr(feature.project)}')">
+              <div class="mini-top"><strong>${esc(feature.feature_id)}</strong><span class="tiny">${esc(feature.project)}</span></div>
+              <div class="mini-detail">${esc(feature.frontier?.blocker?.detail || feature.frontier?.blocker?.summary || feature.frontier?.reason || "")}</div>
+              <div class="tiny">${esc(feature.frontier?.task_id || "-")} · ${esc(feature.frontier?.state || "-")}</div>
+            </div>
+          `).join("")}
         </div>
-      `).join("") : `<div class="empty">No recent transitions.</div>`;
-    }
-
-    function renderRuntimeAudit(data) {
-      const audit = data.runtime_audit || {};
-      const envRows = (audit.environment_checks || []).slice(-4).reverse().map(row => `
-        <div class="mini-row">
-          <div class="mini-top"><strong>${esc(row.project || "global")}</strong><span class="status-badge status-${esc(row.result === "ok" ? "approve" : "failed")}">${esc(row.result)}</span></div>
-          <div class="mini-detail">${esc(row.blocker_summary || "no blockers")}</div>
-          <div class="tiny">${esc(formatTs(row.ts))}</div>
-        </div>
-      `).join("");
-      const bypassRows = (audit.task_bypasses || []).slice(-4).reverse().map(row => `
-        <div class="mini-row">
-          <div class="mini-top"><strong>${esc(row.task_id || "-")}</strong><span class="tiny">${esc(row.gate || "-")}</span></div>
-          <div class="mini-detail">${esc(row.reason || "-")}</div>
-          <div class="tiny">${esc(formatTs(row.ts))}</div>
-        </div>
-      `).join("");
-      const orphanRows = (audit.orphan_recoveries || []).slice(-4).reverse().map(row => `
-        <div class="mini-row">
-          <div class="mini-top"><strong>${esc(row.task_id || "-")}</strong><span class="tiny">${esc(row.from_state || "-")}</span></div>
-          <div class="mini-detail">reaped after ${esc(row.age_seconds || 0)}s</div>
-          <div class="tiny">${esc(formatTs(row.ts))}</div>
-        </div>
-      `).join("");
-      document.getElementById("runtimeAudit").innerHTML = envRows + bypassRows + orphanRows || `<div class="empty">No runtime audit rows yet.</div>`;
+      ` : ""}
+      ` : `<div class="empty">No blocked tasks.</div>`;
     }
 
     function renderHeartbeat(data) {
       const heartbeat = data.heartbeat || {};
+      const obs = (data.observation_window || {}).issues || [];
+      const progressPct = Math.max(0, Math.min(100, ((Number(heartbeat.observation_window_days_complete || 0) || 0) / Math.max(Number(heartbeat.observation_window_days_target || 7) || 7, 1)) * 100));
       const rows = [
         { label: "DB-first streak", value: formatHours(heartbeat.fs_fallback_streak_hours), sub: `${heartbeat.fs_fallback_events || 0} fallback events`, tone: heartbeat.fs_fallback_events ? "warn" : "ok" },
         { label: "Workflow issues", value: heartbeat.workflow_issues || 0, sub: "workflow-check active", tone: Number(heartbeat.workflow_issues || 0) === 0 ? "ok" : "warn" },
@@ -1182,13 +1265,37 @@
         { label: "Bypasses", value: heartbeat.task_bypasses_24h || 0, sub: "env gate bypasses", tone: Number(heartbeat.task_bypasses_24h || 0) === 0 ? "ok" : "warn" },
         { label: "Observations", value: heartbeat.observation_windows || 0, sub: "NEW-6 active", tone: Number(heartbeat.observation_windows || 0) === 0 ? "ok" : "warn" },
       ];
-      document.getElementById("heartbeat").innerHTML = rows.map(row => `
+      const statGrid = rows.map(row => `
         <div class="heartbeat-stat ${row.tone}">
           <div class="lbl">${esc(row.label)}</div>
           <div class="val">${esc(row.value)}</div>
           <div class="sub">${esc(row.sub)}</div>
         </div>
       `).join("");
+      const obsRows = OBS_MODE && obs.length ? `
+        <div class="observation-list" style="margin-top:10px">
+          ${obs.slice(0, 4).map(row => `
+            <div class="observation-row">
+              <div class="row-head">
+                <span class="row-title">${esc(row.feature_id || "-")}</span>
+                <span class="countdown">${esc(formatRemaining(row.remaining_seconds))}</span>
+              </div>
+              <div class="mini-detail">${esc(row.blocker_code || "-")} · ${esc(row.task_id || "-")}</div>
+              <div class="tiny">due ${esc(formatTs(row.observation_due_at))}</div>
+            </div>
+          `).join("")}
+        </div>
+      ` : "";
+      document.getElementById("heartbeat").innerHTML = `${statGrid}
+      <div class="heartbeat-progress">
+        <div class="progress-head">
+          <span class="row-title">7-day observation window</span>
+          <span class="row-meta">${esc(heartbeat.observation_window_days_complete || 0)}/${esc(heartbeat.observation_window_days_target || 7)} days</span>
+        </div>
+        <div class="progress-track"><div class="progress-fill" style="width:${progressPct}%"></div></div>
+        <div class="progress-note">fs_fallback streak ${esc(formatHours(heartbeat.fs_fallback_streak_hours))} · ${esc(heartbeat.observation_windows || 0)} active NEW-6 windows</div>
+      </div>
+      ${obsRows}`;
     }
 
     function renderReviewGates(data) {
@@ -1398,8 +1505,25 @@
       const observationActive = (repair.issues || []).some(issue => issue.observation_due_at);
       const stale = Number(feature.frontier?.age_seconds || 0) > 3600;
       const blocked = feature.frontier?.state === "blocked" || Boolean(feature.frontier?.blocker?.code);
+      const stateCounts = Object.entries(feature.child_states || {}).reduce((acc, [, state]) => {
+        acc[state] = (acc[state] || 0) + 1;
+        return acc;
+      }, {});
       const childStates = Object.entries(feature.child_states || {});
       const followUpStates = Object.entries(feature.follow_up_states || {});
+      const stateChips = ["queued", "claimed", "running", "blocked", "awaiting-review", "awaiting-qa", "done", "failed"].map((state) => {
+        const count = Number(stateCounts[state] || 0);
+        return `<span class="tag ${feature.frontier?.state === state ? "review" : ""}">${esc(state)}:${count}</span>`;
+      }).join("");
+      const frontierLine = feature.frontier?.task_id ? `
+        <div class="frontier-line">
+          <span>frontier <code>${esc(feature.frontier.task_id)}</code></span>
+          <span class="state-chip state-${esc(feature.frontier?.state || "queued")}">${esc(feature.frontier?.state || "-")}</span>
+          ${feature.frontier?.blocker?.code ? `<span class="tag blocker" onclick="setFilter('blockerCode','${escAttr(feature.frontier.blocker.code)}')">${esc(feature.frontier.blocker.code)}</span>` : ""}
+          ${repair.enabled ? `<span class="tag ${repair.status === "executing" ? "success" : "review"}">SR ${esc(repair.status || "enabled")}</span>` : ""}
+          ${feature.canary?.enabled ? `<span class="tag review">canary ${esc(feature.canary.sla_hours || "-")}h</span>` : ""}
+        </div>
+      ` : "";
       return `
         <div class="feature-card ${stale ? "stale" : ""} ${blocked ? "blocked" : ""} ${observationActive ? "observation-active" : ""}" data-feature-id="${escAttr(feature.feature_id)}">
           <div class="feature-top">
@@ -1413,6 +1537,8 @@
           </div>
 
           <div class="feature-summary">${esc(feature.summary || "")}</div>
+          <div class="feature-row2">${stateChips}</div>
+          ${frontierLine}
 
           <div class="feature-sections">
             ${featureSection("Frontier", `${esc(feature.frontier?.state || "-")} ${feature.frontier?.task_id ? `· ${esc(feature.frontier.task_id)}` : ""}`, `
@@ -1430,6 +1556,7 @@
                   <div class="box-k">Blocker</div>
                   <div class="box-v">${feature.frontier?.blocker?.code ? `<span class="tag blocker" onclick="setFilter('blockerCode','${escAttr(feature.frontier.blocker.code)}')">${esc(feature.frontier.blocker.code)}</span>` : "none"}</div>
                   <div class="mini-detail">${esc(feature.frontier?.blocker?.detail || feature.frontier?.blocker?.summary || "")}</div>
+                  <div class="tiny">${esc(feature.frontier?.reason || "")}</div>
                 </div>
               </div>
             `, sectionIsOpen(feature.feature_id, "Frontier", true))}
@@ -1448,7 +1575,7 @@
                 <div class="meta-box">
                   <div class="box-k">Planner</div>
                   <div class="box-v">${feature.planner?.task_id ? `<code>${esc(feature.planner.task_id)}</code>` : "no planner"}</div>
-                  <div class="tiny">${esc(feature.planner?.state || "-")} ${feature.planner?.model ? `· ${esc(feature.planner.model)}` : ""}</div>
+                  <div class="tiny">${esc(feature.planner?.state || "-")} ${feature.planner?.model ? `· ${esc(feature.planner.model)}` : ""}${feature.planner?.last_tick ? ` · ${esc(formatTs(feature.planner.last_tick))}` : ""}</div>
                 </div>
                 <div class="meta-box">
                   <div class="box-k">Workflow / Canary</div>
@@ -1486,7 +1613,7 @@
                 <div class="repair-box">
                   <div class="box-k">Task Spread</div>
                   <div class="box-v">${childStates.length} child · ${followUpStates.length} follow-up</div>
-                  <div class="tiny">${childStates.map(([, state]) => state).join(", ") || "no child tasks recorded"}</div>
+                  <div class="tiny">${Object.entries(stateCounts).filter(([, count]) => Number(count) > 0).map(([state, count]) => `${state}:${count}`).join(" · ") || "no child tasks recorded"}</div>
                 </div>
                 <div class="repair-box">
                   <div class="box-k">Observation</div>
@@ -1507,7 +1634,7 @@
                       <div><span class="state-chip state-${esc(item.verdict || "pending")}">${esc(item.verdict || "-")}</span></div>
                     </div>
                     <div class="task-summary">${esc(item.summary || "")}</div>
-                    <div class="tiny">${esc(formatTs(item.ts || item.created_at))} · ${((item.panel || []).join(", "))}</div>
+                    <div class="tiny">${esc(formatTs(item.ts || item.created_at))} · ${((item.panel || []).join(", "))}${item.evidence ? ` · ${esc(item.evidence)}` : ""}</div>
                   </div>
                 `).join("") || `<div class="empty">No self-repair deliberations recorded.</div>`}
               </div>
