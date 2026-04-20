@@ -42,6 +42,9 @@
       --rose: #e11d48;
       --violet: #7c3aed;
       --slate: #64748b;
+      --panel-ghost: rgba(255, 255, 255, 0.92);
+      --panel-ghost-2: rgba(241, 245, 249, 0.92);
+      --panel-shadow-strong: 0 16px 40px rgba(15, 23, 42, 0.08);
     }
     body {
       margin: 0;
@@ -239,14 +242,14 @@
     .agent-row.active { border-color: var(--cyan); }
     .heartbeat-grid, .review-grid {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
       gap: 10px;
     }
     .heartbeat-progress {
-      margin-top: 12px;
+      margin-top: 10px;
       border: 1px solid var(--border);
       border-radius: 12px;
-      padding: 10px 12px;
+      padding: 8px 10px;
       background: rgba(15, 23, 42, 0.34);
     }
     .progress-head {
@@ -277,7 +280,7 @@
     .heartbeat-stat, .review-stat, .review-gate-row, .memory-row, .observation-row {
       border: 1px solid var(--border);
       border-radius: 12px;
-      padding: 10px 12px;
+      padding: 8px 10px;
       background: rgba(15, 23, 42, 0.45);
     }
     .heartbeat-stat { border-left: 3px solid var(--border-strong); }
@@ -292,11 +295,11 @@
       margin-bottom: 4px;
     }
     .heartbeat-stat .val, .review-stat .val {
-      font-size: 18px;
+      font-size: 16px;
       font-weight: 700;
       font-variant-numeric: tabular-nums;
     }
-    .heartbeat-stat .sub { color: var(--dim); font-size: 11px; margin-top: 4px; }
+    .heartbeat-stat .sub { color: var(--dim); font-size: 10px; margin-top: 3px; }
     .review-gates, .memory-list, .observation-list { display: grid; gap: 8px; }
     .row-head {
       display: flex;
@@ -391,6 +394,14 @@
       border-bottom: 1px solid var(--border);
       text-align: left;
       font-variant-numeric: tabular-nums;
+    }
+    .cost-table td {
+      color: var(--text);
+    }
+    .cost-table td:first-child {
+      color: var(--cyan);
+      font-size: 10px;
+      word-break: break-word;
     }
     .cost-table th {
       color: var(--dim);
@@ -748,6 +759,64 @@
       padding: 1px 8px;
       color: var(--cyan);
       background: var(--surface-2);
+    }
+    :root[data-theme="light"] body {
+      background:
+        radial-gradient(circle at top left, rgba(8, 145, 178, 0.09), transparent 28%),
+        radial-gradient(circle at top right, rgba(124, 58, 237, 0.07), transparent 22%),
+        linear-gradient(180deg, var(--bg-2), var(--bg));
+    }
+    :root[data-theme="light"] .card,
+    :root[data-theme="light"] .mini-row,
+    :root[data-theme="light"] .task-row,
+    :root[data-theme="light"] .event-row,
+    :root[data-theme="light"] .heartbeat-stat,
+    :root[data-theme="light"] .review-stat,
+    :root[data-theme="light"] .review-gate-row,
+    :root[data-theme="light"] .memory-row,
+    :root[data-theme="light"] .observation-row,
+    :root[data-theme="light"] .cost-stat,
+    :root[data-theme="light"] .blocker-card,
+    :root[data-theme="light"] .ticker-row,
+    :root[data-theme="light"] .selfrepair-stat,
+    :root[data-theme="light"] .harness-stat,
+    :root[data-theme="light"] .meta-box,
+    :root[data-theme="light"] .frontier-box,
+    :root[data-theme="light"] .delivery-box,
+    :root[data-theme="light"] .repair-box,
+    :root[data-theme="light"] .tasks-box,
+    :root[data-theme="light"] .events-box,
+    :root[data-theme="light"] .feature-section,
+    :root[data-theme="light"] .timeline,
+    :root[data-theme="light"] .kv-grid,
+    :root[data-theme="light"] .gate-row,
+    :root[data-theme="light"] .finding-row,
+    :root[data-theme="light"] .evidence-row,
+    :root[data-theme="light"] .help-overlay {
+      background: var(--panel-ghost);
+      box-shadow: var(--panel-shadow-strong);
+    }
+    :root[data-theme="light"] .feature-card,
+    :root[data-theme="light"] .queue-item,
+    :root[data-theme="light"] .top-toggle,
+    :root[data-theme="light"] .tile,
+    :root[data-theme="light"] .fs-badge,
+    :root[data-theme="light"] .heartbeat-progress {
+      background: var(--panel-ghost-2);
+    }
+    :root[data-theme="light"] .log-tail {
+      background: #f1f5f9;
+      color: #0f172a;
+    }
+    :root[data-theme="light"] .queue-bar,
+    :root[data-theme="light"] .progress-track,
+    :root[data-theme="light"] .cost-bar {
+      background: #e2e8f0;
+    }
+    :root[data-theme="light"] .feature-section > summary:hover,
+    :root[data-theme="light"] .queue-item:hover,
+    :root[data-theme="light"] .ticker-row:hover {
+      background: rgba(8, 145, 178, 0.06);
     }
     .empty {
       color: var(--dim);
@@ -1461,14 +1530,14 @@
         </div>
       ` : "";
       document.getElementById("heartbeat").innerHTML = `${statGrid}
-      <div class="heartbeat-progress">
-        <div class="progress-head">
-          <span class="row-title">7-day observation window</span>
-          <span class="row-meta">${esc(heartbeat.observation_window_days_complete || 0)}/${esc(heartbeat.observation_window_days_target || 7)} days</span>
+        <div class="heartbeat-progress">
+          <div class="progress-head">
+            <span class="row-title">7-day window</span>
+            <span class="row-meta">${esc(heartbeat.observation_window_days_complete || 0)}/${esc(heartbeat.observation_window_days_target || 7)} days · ${progressPct.toFixed(0)}%</span>
+          </div>
+          <div class="progress-track"><div class="progress-fill" style="width:${progressPct}%"></div></div>
+          <div class="progress-note">DB-first ${esc(formatHours(heartbeat.fs_fallback_streak_hours))} · escalated ${esc(heartbeat.escalated_issues || 0)} · NEW-6 ${esc(heartbeat.observation_windows || 0)}</div>
         </div>
-        <div class="progress-track"><div class="progress-fill" style="width:${progressPct}%"></div></div>
-        <div class="progress-note">fs_fallback streak ${esc(formatHours(heartbeat.fs_fallback_streak_hours))} · ${esc(heartbeat.observation_windows || 0)} active NEW-6 windows</div>
-      </div>
       ${obsRows}`;
     }
 
