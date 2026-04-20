@@ -288,7 +288,14 @@ def _run_fix2_reopen(repo_root, scenario):
             "append_feature_child": orchestrator.append_feature_child,
             "append_event": orchestrator.append_event,
         }
+        old_env = {
+            "STATE_ENGINE_MODE": os.environ.get("STATE_ENGINE_MODE"),
+            "STATE_ENGINE_PATH": os.environ.get("STATE_ENGINE_PATH"),
+        }
         captured = {}
+        os.environ["STATE_ENGINE_MODE"] = "off"
+        os.environ["STATE_ENGINE_PATH"] = str(root / "runtime" / "scenario.db")
+        orchestrator._STATE_ENGINE_CACHE = {"key": None, "engine": None}
         orchestrator.FEATURES_DIR = feats
         orchestrator.QUEUE_ROOT = queue_root
         orchestrator.new_task = lambda **kwargs: {"task_id": scenario["new_task_id"], **kwargs}
@@ -338,6 +345,15 @@ def _run_fix2_reopen(repo_root, scenario):
             orchestrator.enqueue_task = old["enqueue_task"]
             orchestrator.append_feature_child = old["append_feature_child"]
             orchestrator.append_event = old["append_event"]
+            orchestrator._STATE_ENGINE_CACHE = {"key": None, "engine": None}
+            if old_env["STATE_ENGINE_MODE"] is None:
+                os.environ.pop("STATE_ENGINE_MODE", None)
+            else:
+                os.environ["STATE_ENGINE_MODE"] = old_env["STATE_ENGINE_MODE"]
+            if old_env["STATE_ENGINE_PATH"] is None:
+                os.environ.pop("STATE_ENGINE_PATH", None)
+            else:
+                os.environ["STATE_ENGINE_PATH"] = old_env["STATE_ENGINE_PATH"]
 
         issue = saved["self_repair"]["issues"][0]
         return {
@@ -449,8 +465,15 @@ def _run_self_repair_resolution(repo_root, scenario):
             "append_event": orchestrator.append_event,
             "append_transition": orchestrator.append_transition,
         }
+        old_env = {
+            "STATE_ENGINE_MODE": os.environ.get("STATE_ENGINE_MODE"),
+            "STATE_ENGINE_PATH": os.environ.get("STATE_ENGINE_PATH"),
+        }
         events = []
         transitions = []
+        os.environ["STATE_ENGINE_MODE"] = "off"
+        os.environ["STATE_ENGINE_PATH"] = str(root / "runtime" / "scenario.db")
+        orchestrator._STATE_ENGINE_CACHE = {"key": None, "engine": None}
         orchestrator.FEATURES_DIR = feats
         orchestrator.QUEUE_ROOT = queue_root
         orchestrator.append_event = lambda *args, **kwargs: events.append({"args": args, "kwargs": kwargs})
@@ -479,6 +502,15 @@ def _run_self_repair_resolution(repo_root, scenario):
             orchestrator.QUEUE_ROOT = old["QUEUE_ROOT"]
             orchestrator.append_event = old["append_event"]
             orchestrator.append_transition = old["append_transition"]
+            orchestrator._STATE_ENGINE_CACHE = {"key": None, "engine": None}
+            if old_env["STATE_ENGINE_MODE"] is None:
+                os.environ.pop("STATE_ENGINE_MODE", None)
+            else:
+                os.environ["STATE_ENGINE_MODE"] = old_env["STATE_ENGINE_MODE"]
+            if old_env["STATE_ENGINE_PATH"] is None:
+                os.environ.pop("STATE_ENGINE_PATH", None)
+            else:
+                os.environ["STATE_ENGINE_PATH"] = old_env["STATE_ENGINE_PATH"]
         issue = saved["self_repair"]["issues"][0]
         return {
             "tick": out,
@@ -570,8 +602,15 @@ def _run_issue_replan_cap(repo_root, scenario):
             "append_feature_child": orchestrator.append_feature_child,
             "_write_workflow_alert": orchestrator._write_workflow_alert,
         }
+        old_env = {
+            "STATE_ENGINE_MODE": os.environ.get("STATE_ENGINE_MODE"),
+            "STATE_ENGINE_PATH": os.environ.get("STATE_ENGINE_PATH"),
+        }
         alerts = []
         enqueued = []
+        os.environ["STATE_ENGINE_MODE"] = "off"
+        os.environ["STATE_ENGINE_PATH"] = str(root / "runtime" / "scenario.db")
+        orchestrator._STATE_ENGINE_CACHE = {"key": None, "engine": None}
         orchestrator.FEATURES_DIR = feats
         orchestrator.QUEUE_ROOT = queue_root
         orchestrator.new_task = lambda **kwargs: {"task_id": "unexpected-task", **kwargs}
@@ -601,6 +640,15 @@ def _run_issue_replan_cap(repo_root, scenario):
             orchestrator.enqueue_task = old["enqueue_task"]
             orchestrator.append_feature_child = old["append_feature_child"]
             orchestrator._write_workflow_alert = old["_write_workflow_alert"]
+            orchestrator._STATE_ENGINE_CACHE = {"key": None, "engine": None}
+            if old_env["STATE_ENGINE_MODE"] is None:
+                os.environ.pop("STATE_ENGINE_MODE", None)
+            else:
+                os.environ["STATE_ENGINE_MODE"] = old_env["STATE_ENGINE_MODE"]
+            if old_env["STATE_ENGINE_PATH"] is None:
+                os.environ.pop("STATE_ENGINE_PATH", None)
+            else:
+                os.environ["STATE_ENGINE_PATH"] = old_env["STATE_ENGINE_PATH"]
         issue = saved["self_repair"]["issues"][0]
         return {
             "tick": out,
@@ -1871,6 +1919,13 @@ def _run_backup_roundtrip(repo_root, scenario):
         finally:
             for key, value in old.items():
                 setattr(orchestrator, key, value)
+        return {
+            "backup_exists": pathlib.Path(backup["backup_path"]).exists(),
+            "corrupted_marker": corrupted_marker,
+            "integrity_check": status.get("integrity_check"),
+            "task_state": found[0] if found else None,
+            "feature_status": (feature_row or {}).get("status"),
+        }
 
 
 def _run_wal_backup_restore(repo_root, scenario):
@@ -2934,6 +2989,11 @@ def _run_memory_vec_missing(repo_root, scenario):
                 mode="primary",
             )
         )
+        def _disable_vec(conn):
+            engine._vec_enabled = False
+            engine._vec_error = "sqlite-vec unavailable"
+            engine._local.vec_checked = True
+        engine._try_enable_sqlite_vec = _disable_vec
         status = engine.initialize()
         for row in scenario["observations"]:
             engine.upsert_memory_observation(dict(row))

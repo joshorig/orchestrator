@@ -1,5 +1,5 @@
 {
-  "vec_enabled": false,
+  "vec_enabled": true,
   "fts_titles": [
     "workflow-check stale planner ids",
     "Self-repair planner loops on stale issue state",
