@@ -1,0 +1,6 @@
+{
+  "backup_size_gt_4k": true,
+  "restored_value": "keepme",
+  "wal_exists_after_restore": false,
+  "shm_exists_after_restore": false
+}

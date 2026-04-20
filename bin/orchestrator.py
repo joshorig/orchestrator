@@ -1012,6 +1012,18 @@ def append_metric(name, value, *, metric_type="gauge", tags=None, source=None, t
     return row
 
 
+def _append_metric_fs_only(row):
+    """Write a metric row to the filesystem log without mirroring to SQLite.
+
+    This is the escape hatch for state-engine fault reporting: when a DB read
+    fails, attempting to mirror the fallback metric back into that same DB just
+    turns degraded reads into hard crashes.
+    """
+    METRICS_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with METRICS_LOG.open("a") as f:
+        f.write(json.dumps(row, sort_keys=True) + "\n")
+
+
 def read_metrics(*, name=None, limit=None):
     if _state_engine_read_enabled():
         try:
@@ -1493,13 +1505,19 @@ def scan_agent_roots(paths, *, kind="skills", opt_out=False):
 
 
 def _record_state_engine_fs_fallback(scope, key):
-    append_metric(
-        "state_engine.fs_fallback",
-        1,
-        metric_type="counter",
-        tags={"scope": scope, "key": key},
-        source="state-engine",
-    )
+    row = {
+        "ts": now_iso(),
+        "name": "state_engine.fs_fallback",
+        "type": "counter",
+        "value": 1,
+        "tags": {"scope": scope, "key": key},
+        "source": "state-engine",
+    }
+    try:
+        _append_metric_fs_only(row)
+    except Exception:
+        return False
+    return True
 
 
 def iter_tasks(*, states=None, project=None, engine=None, role=None, limit=None, newest_first=False):

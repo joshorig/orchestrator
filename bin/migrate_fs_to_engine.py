@@ -22,25 +22,74 @@ def _load_module(name: str, path: pathlib.Path):
     return module
 
 
+def _sqlite_sidecars(db_path: pathlib.Path) -> list[pathlib.Path]:
+    return [
+        db_path,
+        db_path.with_name(db_path.name + "-wal"),
+        db_path.with_name(db_path.name + "-shm"),
+    ]
+
+
+def _backup_live_db(db_path: pathlib.Path, backup_path: pathlib.Path) -> None:
+    """Create a self-contained SQLite backup from a live WAL database."""
+    backup_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        backup_path.unlink()
+    except FileNotFoundError:
+        pass
+    src = sqlite3.connect(db_path, timeout=30)
+    dst = sqlite3.connect(backup_path, timeout=30)
+    try:
+        src.backup(dst)
+    finally:
+        dst.close()
+        src.close()
+
+
+def _restore_backup_db(db_path: pathlib.Path, backup_path: pathlib.Path) -> None:
+    """Restore a self-contained backup, removing stale WAL sidecars first."""
+    for path in _sqlite_sidecars(db_path):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+    shutil.copy2(backup_path, db_path)
+
+
+def _replace_db_from_temp(db_path: pathlib.Path, temp_path: pathlib.Path) -> None:
+    for path in _sqlite_sidecars(db_path):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+    temp_path.replace(db_path)
+
+
 def migrate_from_fs(repo_root: pathlib.Path, db_path: pathlib.Path, *, backup_path: pathlib.Path | None = None) -> dict[str, int | str]:
     orchestrator = _load_module("orchestrator", repo_root / "bin" / "orchestrator.py")
     state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
 
-    engine = state_engine.StateEngine(
-        state_engine.StateEngineConfig(
-            root=repo_root,
-            db_path=db_path,
-            migrations_dir=repo_root / "state" / "migrations",
-            mode="mirror",
-        )
-    )
     backup_file = backup_path
     if backup_file is None:
         backup_file = db_path.with_suffix(db_path.suffix + ".bak")
     if db_path.exists():
-        backup_file.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(db_path, backup_file)
+        _backup_live_db(db_path, backup_file)
 
+    temp_db = db_path.with_name(db_path.name + ".tmp")
+    for path in _sqlite_sidecars(temp_db):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+    engine = state_engine.StateEngine(
+        state_engine.StateEngineConfig(
+            root=repo_root,
+            db_path=temp_db,
+            migrations_dir=repo_root / "state" / "migrations",
+            mode="mirror",
+        )
+    )
     engine.initialize()
     conn = engine.connect()
     try:
@@ -85,16 +134,23 @@ def migrate_from_fs(repo_root: pathlib.Path, db_path: pathlib.Path, *, backup_pa
                     engine.upsert_memory_observation(observation, conn=conn)
                     counts["memory_observations"] += 1
         engine.rebuild_memory_fts(conn=conn)
+        engine.checkpoint(conn=conn)
         integrity = engine.integrity_check(conn=conn)
         if integrity != "ok":
             raise RuntimeError(f"integrity_check failed: {integrity}")
+        engine.close()
+        _replace_db_from_temp(db_path, temp_db)
         return {**counts, "integrity_check": integrity, "db_path": str(db_path), "backup_path": str(backup_file)}
     except Exception:
-        if backup_file.exists():
-            shutil.copy2(backup_file, db_path)
-        raise
-    finally:
         engine.close()
+        for path in _sqlite_sidecars(temp_db):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+        if backup_file.exists():
+            _restore_backup_db(db_path, backup_file)
+        raise
 
 
 def _clear_engine_tables(conn: sqlite3.Connection) -> None:

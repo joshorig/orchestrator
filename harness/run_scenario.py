@@ -4,6 +4,7 @@ import json
 import os
 import pathlib
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -1611,21 +1612,104 @@ def _run_backup_roundtrip(repo_root, scenario):
         finally:
             for key, value in old.items():
                 setattr(orchestrator, key, value)
-            if old_env["STATE_ENGINE_MODE"] is None:
-                os.environ.pop("STATE_ENGINE_MODE", None)
-            else:
-                os.environ["STATE_ENGINE_MODE"] = old_env["STATE_ENGINE_MODE"]
-            if old_env["STATE_ENGINE_PATH"] is None:
-                os.environ.pop("STATE_ENGINE_PATH", None)
-            else:
-                os.environ["STATE_ENGINE_PATH"] = old_env["STATE_ENGINE_PATH"]
+
+
+def _run_wal_backup_restore(repo_root, scenario):
+    migrate = _load_module("migrate_fs_to_engine", repo_root / "bin" / "migrate_fs_to_engine.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        db_path = root / "orchestrator.db"
+        backup_path = root / "orchestrator.backup.db"
+
+        conn = sqlite3.connect(db_path, timeout=30)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("CREATE TABLE sentinel(value TEXT)")
+            conn.execute("INSERT INTO sentinel(value) VALUES ('keepme')")
+            conn.commit()
+        finally:
+            conn.close()
+
+        migrate._backup_live_db(db_path, backup_path)
+
+        # Simulate a bad rollback target plus stale sidecars.
+        db_path.write_text("not-a-db")
+        (db_path.parent / f"{db_path.name}-wal").write_text("stale wal")
+        (db_path.parent / f"{db_path.name}-shm").write_text("stale shm")
+        migrate._restore_backup_db(db_path, backup_path)
+
+        verify = sqlite3.connect(db_path, timeout=30)
+        try:
+            value = verify.execute("SELECT value FROM sentinel").fetchone()[0]
+        finally:
+            verify.close()
         return {
-            "backup_exists": pathlib.Path(backup["backup_path"]).exists(),
-            "corrupted_marker": corrupted_marker,
-            "integrity_check": status.get("integrity_check"),
-            "task_state": found[0] if found else None,
-            "feature_status": (feature_row or {}).get("status"),
+            "backup_size_gt_4k": backup_path.stat().st_size > 4096,
+            "restored_value": value,
+            "wal_exists_after_restore": (db_path.parent / f"{db_path.name}-wal").exists(),
+            "shm_exists_after_restore": (db_path.parent / f"{db_path.name}-shm").exists(),
         }
+
+
+def _run_corrupt_db_fallback(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        runtime = root / "state" / "runtime"
+        runtime.mkdir(parents=True, exist_ok=True)
+        metrics_log = runtime / "metrics.jsonl"
+        db_path = runtime / "broken.db"
+        metrics_log.write_text(
+            json.dumps(
+                {
+                    "ts": "2026-04-20T21:00:00",
+                    "name": "task.enqueued",
+                    "type": "counter",
+                    "value": 1,
+                    "tags": {},
+                    "source": "scenario-50",
+                },
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        db_path.write_text("not-a-db")
+        old = {
+            "METRICS_LOG": orchestrator.METRICS_LOG,
+            "STATE_ROOT": orchestrator.STATE_ROOT,
+            "RUNTIME_DIR": orchestrator.RUNTIME_DIR,
+            "CONFIG_LOCAL_PATH": orchestrator.CONFIG_LOCAL_PATH,
+        }
+        env_old = {name: os.environ.get(name) for name in ("STATE_ENGINE_MODE", "STATE_ENGINE_PATH")}
+        cache_old = dict(orchestrator._STATE_ENGINE_CACHE)
+        try:
+            orchestrator.METRICS_LOG = metrics_log
+            orchestrator.STATE_ROOT = root / "state"
+            orchestrator.RUNTIME_DIR = runtime
+            os.environ["STATE_ENGINE_MODE"] = "primary"
+            os.environ["STATE_ENGINE_PATH"] = str(db_path)
+            orchestrator._STATE_ENGINE_CACHE["key"] = None
+            orchestrator._STATE_ENGINE_CACHE["engine"] = None
+
+            rows = orchestrator.read_metrics(limit=10)
+            lines = metrics_log.read_text(errors="replace").splitlines()
+            fallback_rows = [json.loads(line) for line in lines if '"name": "state_engine.fs_fallback"' in line]
+            return {
+                "read_count": len(rows),
+                "first_metric_name": rows[0]["name"] if rows else None,
+                "fallback_count": len(fallback_rows),
+                "fallback_scope": (fallback_rows[-1].get("tags") or {}).get("scope") if fallback_rows else None,
+            }
+        finally:
+            for key, value in old.items():
+                setattr(orchestrator, key, value)
+            orchestrator._STATE_ENGINE_CACHE.clear()
+            orchestrator._STATE_ENGINE_CACHE.update(cache_old)
+            for name, value in env_old.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
 
 
 def _run_memory_hybrid(repo_root, scenario):
@@ -2017,6 +2101,10 @@ def main(argv):
         actual = _run_environment_check_log(repo_root, scenario)
     elif kind == "backup_roundtrip":
         actual = _run_backup_roundtrip(repo_root, scenario)
+    elif kind == "wal_backup_restore":
+        actual = _run_wal_backup_restore(repo_root, scenario)
+    elif kind == "corrupt_db_fallback":
+        actual = _run_corrupt_db_fallback(repo_root, scenario)
     elif kind == "memory_hybrid_rrf":
         actual = _run_memory_hybrid(repo_root, scenario)
     elif kind == "memory_vec_missing_fallback":
