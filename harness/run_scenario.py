@@ -1712,6 +1712,247 @@ def _run_corrupt_db_fallback(repo_root, scenario):
                     os.environ[name] = value
 
 
+def _run_disk_full_insert(repo_root, scenario):
+    state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        db_path = root / "orchestrator.db"
+        engine = state_engine.StateEngine(
+            state_engine.StateEngineConfig(
+                root=root,
+                db_path=db_path,
+                migrations_dir=repo_root / "state" / "migrations",
+                mode="mirror",
+            )
+        )
+        engine.initialize()
+        engine.close()
+
+        real_connect = state_engine.sqlite3.connect
+
+        class FaultyConnection(sqlite3.Connection):
+            def execute(self, sql, params=(), /):
+                if "INSERT INTO task_transitions" in sql:
+                    raise sqlite3.OperationalError("database or disk is full")
+                return super().execute(sql, params)
+
+        def faulty_connect(*args, **kwargs):
+            kwargs["factory"] = FaultyConnection
+            return real_connect(*args, **kwargs)
+
+        state_engine.sqlite3.connect = faulty_connect
+        try:
+            failing = state_engine.StateEngine(
+                state_engine.StateEngineConfig(
+                    root=root,
+                    db_path=db_path,
+                    migrations_dir=repo_root / "state" / "migrations",
+                    mode="mirror",
+                )
+            )
+            error = None
+            try:
+                failing.record_transition(
+                    {
+                        "ts": "2026-04-20T21:10:00",
+                        "task_id": "task-51",
+                        "from_state": "queued",
+                        "to_state": "claimed",
+                        "reason": "scenario-51",
+                    }
+                )
+            except Exception as exc:
+                error = str(exc)
+        finally:
+            state_engine.sqlite3.connect = real_connect
+
+        verify = state_engine.StateEngine(
+            state_engine.StateEngineConfig(
+                root=root,
+                db_path=db_path,
+                migrations_dir=repo_root / "state" / "migrations",
+                mode="mirror",
+            )
+        )
+        verify.initialize()
+        return {
+            "integrity_check": verify.integrity_check(),
+            "transition_count": verify.count_table("task_transitions"),
+            "error_has_disk_full": "disk is full" in (error or ""),
+        }
+
+
+def _run_eio_read(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        runtime = root / "state" / "runtime"
+        runtime.mkdir(parents=True, exist_ok=True)
+        metrics_log = runtime / "metrics.jsonl"
+        db_path = runtime / "orchestrator.db"
+        metrics_log.write_text(
+            json.dumps(
+                {
+                    "ts": "2026-04-20T21:20:00",
+                    "name": "task.enqueued",
+                    "type": "counter",
+                    "value": 1,
+                    "tags": {},
+                    "source": "scenario-52",
+                },
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        old = {
+            "METRICS_LOG": orchestrator.METRICS_LOG,
+            "STATE_ROOT": orchestrator.STATE_ROOT,
+            "RUNTIME_DIR": orchestrator.RUNTIME_DIR,
+        }
+        env_old = {name: os.environ.get(name) for name in ("STATE_ENGINE_MODE", "STATE_ENGINE_PATH")}
+        cache_old = dict(orchestrator._STATE_ENGINE_CACHE)
+        try:
+            orchestrator.METRICS_LOG = metrics_log
+            orchestrator.STATE_ROOT = root / "state"
+            orchestrator.RUNTIME_DIR = runtime
+            os.environ["STATE_ENGINE_MODE"] = "primary"
+            os.environ["STATE_ENGINE_PATH"] = str(db_path)
+            orchestrator._STATE_ENGINE_CACHE["key"] = None
+            orchestrator._STATE_ENGINE_CACHE["engine"] = None
+            engine = orchestrator.get_state_engine()
+            engine.initialize()
+            engine = orchestrator.get_state_engine()
+            old_read_metrics = engine.read_metrics
+            engine.read_metrics = lambda **kwargs: (_ for _ in ()).throw(sqlite3.OperationalError("disk I/O error"))
+            rows = orchestrator.read_metrics(limit=10)
+            engine.read_metrics = old_read_metrics
+            lines = metrics_log.read_text(errors="replace").splitlines()
+            fallback_rows = [json.loads(line) for line in lines if '"name": "state_engine.fs_fallback"' in line]
+            return {
+                "read_count": len(rows),
+                "first_metric_name": rows[0]["name"] if rows else None,
+                "fallback_count": len(fallback_rows),
+                "fallback_scope": (fallback_rows[-1].get("tags") or {}).get("scope") if fallback_rows else None,
+            }
+        finally:
+            for key, value in old.items():
+                setattr(orchestrator, key, value)
+            orchestrator._STATE_ENGINE_CACHE.clear()
+            orchestrator._STATE_ENGINE_CACHE.update(cache_old)
+            for name, value in env_old.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
+
+def _run_db_deleted(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        runtime = root / "state" / "runtime"
+        runtime.mkdir(parents=True, exist_ok=True)
+        metrics_log = runtime / "metrics.jsonl"
+        db_path = runtime / "orchestrator.db"
+        metrics_log.write_text(
+            json.dumps(
+                {
+                    "ts": "2026-04-20T21:30:00",
+                    "name": "task.enqueued",
+                    "type": "counter",
+                    "value": 1,
+                    "tags": {},
+                    "source": "scenario-53",
+                },
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        old = {
+            "METRICS_LOG": orchestrator.METRICS_LOG,
+            "STATE_ROOT": orchestrator.STATE_ROOT,
+            "RUNTIME_DIR": orchestrator.RUNTIME_DIR,
+        }
+        env_old = {name: os.environ.get(name) for name in ("STATE_ENGINE_MODE", "STATE_ENGINE_PATH")}
+        cache_old = dict(orchestrator._STATE_ENGINE_CACHE)
+        try:
+            orchestrator.METRICS_LOG = metrics_log
+            orchestrator.STATE_ROOT = root / "state"
+            orchestrator.RUNTIME_DIR = runtime
+            os.environ["STATE_ENGINE_MODE"] = "primary"
+            os.environ["STATE_ENGINE_PATH"] = str(db_path)
+            orchestrator._STATE_ENGINE_CACHE["key"] = None
+            orchestrator._STATE_ENGINE_CACHE["engine"] = None
+            engine = orchestrator.get_state_engine()
+            engine.initialize()
+            engine.close()
+            db_path.unlink()
+            rows = orchestrator.read_metrics(limit=10)
+            lines = metrics_log.read_text(errors="replace").splitlines()
+            fallback_rows = [json.loads(line) for line in lines if '"name": "state_engine.fs_fallback"' in line]
+            return {
+                "db_exists_after_read": db_path.exists(),
+                "read_count": len(rows),
+                "fallback_count": len(fallback_rows),
+                "fallback_scope": (fallback_rows[-1].get("tags") or {}).get("scope") if fallback_rows else None,
+            }
+        finally:
+            for key, value in old.items():
+                setattr(orchestrator, key, value)
+            orchestrator._STATE_ENGINE_CACHE.clear()
+            orchestrator._STATE_ENGINE_CACHE.update(cache_old)
+            for name, value in env_old.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
+
+def _run_restore_active_rejected(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        runtime = root / "state" / "runtime"
+        runtime.mkdir(parents=True, exist_ok=True)
+        db_path = runtime / "orchestrator.db"
+        backup_path = runtime / "state.backup.db"
+        old = {
+            "STATE_ROOT": orchestrator.STATE_ROOT,
+            "RUNTIME_DIR": orchestrator.RUNTIME_DIR,
+            "STATE_ENGINE_DB_PATH": orchestrator.STATE_ENGINE_DB_PATH,
+            "_active_orchestrator_launch_agent_labels": orchestrator._active_orchestrator_launch_agent_labels,
+        }
+        env_old = {name: os.environ.get(name) for name in ("STATE_ENGINE_MODE", "STATE_ENGINE_PATH")}
+        cache_old = dict(orchestrator._STATE_ENGINE_CACHE)
+        try:
+            orchestrator.STATE_ROOT = root / "state"
+            orchestrator.RUNTIME_DIR = runtime
+            orchestrator.STATE_ENGINE_DB_PATH = db_path
+            os.environ["STATE_ENGINE_MODE"] = "primary"
+            os.environ["STATE_ENGINE_PATH"] = str(db_path)
+            orchestrator._STATE_ENGINE_CACHE["key"] = None
+            orchestrator._STATE_ENGINE_CACHE["engine"] = None
+            orchestrator.get_state_engine().initialize()
+            backup = orchestrator.state_engine_backup(backup_path=backup_path)
+            orchestrator._active_orchestrator_launch_agent_labels = lambda: ["com.devmini.orchestrator.telegram-bot"]
+            out = orchestrator.state_engine_restore(backup_path=backup["backup_path"])
+            return {
+                "restored": bool(out.get("restored")),
+                "error": out.get("error"),
+                "active_count": len(out.get("active_labels") or []),
+            }
+        finally:
+            for key, value in old.items():
+                setattr(orchestrator, key, value)
+            orchestrator._STATE_ENGINE_CACHE.clear()
+            orchestrator._STATE_ENGINE_CACHE.update(cache_old)
+            for name, value in env_old.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
+
 def _run_memory_hybrid(repo_root, scenario):
     state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
     with tempfile.TemporaryDirectory() as tmp:
@@ -2105,6 +2346,14 @@ def main(argv):
         actual = _run_wal_backup_restore(repo_root, scenario)
     elif kind == "corrupt_db_fallback":
         actual = _run_corrupt_db_fallback(repo_root, scenario)
+    elif kind == "disk_full_insert":
+        actual = _run_disk_full_insert(repo_root, scenario)
+    elif kind == "eio_read":
+        actual = _run_eio_read(repo_root, scenario)
+    elif kind == "db_deleted":
+        actual = _run_db_deleted(repo_root, scenario)
+    elif kind == "restore_active_rejected":
+        actual = _run_restore_active_rejected(repo_root, scenario)
     elif kind == "memory_hybrid_rrf":
         actual = _run_memory_hybrid(repo_root, scenario)
     elif kind == "memory_vec_missing_fallback":

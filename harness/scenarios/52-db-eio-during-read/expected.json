@@ -1,0 +1,6 @@
+{
+  "read_count": 2,
+  "first_metric_name": "task.enqueued",
+  "fallback_count": 1,
+  "fallback_scope": "metrics"
+}

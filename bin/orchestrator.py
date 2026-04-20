@@ -1763,6 +1763,73 @@ def state_engine_backup(*, cfg=None, backup_path=None):
     }
 
 
+def _state_engine_sidecars(db_path):
+    db_path = pathlib.Path(db_path)
+    return [
+        db_path,
+        db_path.with_name(db_path.name + "-wal"),
+        db_path.with_name(db_path.name + "-shm"),
+    ]
+
+
+def _active_orchestrator_launch_agent_labels():
+    labels = []
+    uid = os.getuid()
+    for plist in orchestrator_launch_agent_plists():
+        label = plist.stem
+        proc = subprocess.run(
+            ["launchctl", "print", f"gui/{uid}/{label}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode == 0:
+            labels.append(label)
+    return labels
+
+
+def state_engine_restore(*, cfg=None, backup_path=None):
+    cfg = cfg or load_config()
+    engine = get_state_engine(cfg=cfg)
+    status = engine.initialize()
+    if not status.get("enabled"):
+        return {"enabled": False, "mode": status.get("mode"), "restored": False}
+    source = pathlib.Path(backup_path or (RUNTIME_DIR / "state.backup.db"))
+    if not source.exists():
+        return {"enabled": True, "mode": status.get("mode"), "restored": False, "error": "backup_missing", "backup_path": str(source)}
+    active_labels = _active_orchestrator_launch_agent_labels()
+    if active_labels:
+        return {
+            "enabled": True,
+            "mode": status.get("mode"),
+            "restored": False,
+            "error": "state_engine_restore_active_runtime",
+            "active_labels": active_labels,
+            "backup_path": str(source),
+        }
+    db_path = pathlib.Path(state_engine_config(cfg=cfg)["path"])
+    engine.close()
+    _STATE_ENGINE_CACHE["key"] = None
+    _STATE_ENGINE_CACHE["engine"] = None
+    for path in _state_engine_sidecars(db_path):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+    shutil.copy2(source, db_path)
+    restored_engine = get_state_engine(cfg=cfg)
+    restored_status = restored_engine.initialize()
+    append_event("state-engine", "backup_restored", details={"path": str(source)})
+    return {
+        "enabled": True,
+        "mode": restored_status.get("mode"),
+        "restored": True,
+        "backup_path": str(source),
+        "db_path": str(db_path),
+        "integrity_check": restored_engine.integrity_check(),
+    }
+
+
 def _state_engine_maybe_reconcile(*, cfg=None):
     cfg = cfg or load_config()
     if not _state_engine_write_enabled(cfg=cfg):
@@ -11809,6 +11876,8 @@ def main(argv=None):
     sub.add_parser("state-engine-reconcile")
     p_state_backup = sub.add_parser("state-engine-backup")
     p_state_backup.add_argument("--path", default=None)
+    p_state_restore = sub.add_parser("state-engine-restore")
+    p_state_restore.add_argument("--path", default=None)
     p_agent_scan = sub.add_parser("agent-scan")
     p_agent_scan.add_argument("action", choices=("scan",))
     p_agent_scan.add_argument("--skills", action="append", default=[])
@@ -11962,6 +12031,8 @@ def main(argv=None):
         print(json.dumps(state_engine_reconcile(), sort_keys=True))
     elif args.cmd == "state-engine-backup":
         print(json.dumps(state_engine_backup(backup_path=args.path), sort_keys=True))
+    elif args.cmd == "state-engine-restore":
+        print(json.dumps(state_engine_restore(backup_path=args.path), sort_keys=True))
     elif args.cmd == "agent-scan":
         if args.action == "scan":
             if args.skills:

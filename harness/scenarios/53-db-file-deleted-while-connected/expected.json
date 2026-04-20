@@ -1,0 +1,6 @@
+{
+  "db_exists_after_read": false,
+  "read_count": 2,
+  "fallback_count": 1,
+  "fallback_scope": "metrics"
+}

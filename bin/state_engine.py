@@ -77,6 +77,7 @@ class StateEngine:
         self._local = threading.local()
         self._vec_enabled = False
         self._vec_error: str | None = None
+        self._initialized_once = False
 
     def initialize(self) -> dict[str, Any]:
         if not self.config.enabled:
@@ -89,12 +90,15 @@ class StateEngine:
         conn = self.connect()
         self._ensure_bootstrap_tables(conn)
         applied = self.apply_migrations(conn)
+        self._initialized_once = True
         return self.status(conn=conn, applied_in_run=applied)
 
     def connect(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
         if conn is None:
             self.config.db_path.parent.mkdir(parents=True, exist_ok=True)
+            if self._initialized_once and not self.config.db_path.exists():
+                raise sqlite3.DatabaseError("state engine database missing")
             conn = sqlite3.connect(self.config.db_path, timeout=30)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA foreign_keys = ON")
