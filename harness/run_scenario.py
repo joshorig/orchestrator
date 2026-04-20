@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from datetime import datetime, timezone
 
 
 def _load_module(name, path):
@@ -24,6 +25,40 @@ def _load_repo_modules(repo_root):
     orchestrator = _load_module("orchestrator", repo_root / "bin" / "orchestrator.py")
     worker = _load_module("worker", repo_root / "bin" / "worker.py")
     return orchestrator, worker
+
+
+def _trace_root_base(repo_root):
+    return repo_root / "harness" / "runs"
+
+
+def _new_trace_root(repo_root, scenario_dir):
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return _trace_root_base(repo_root) / stamp / scenario_dir.name
+
+
+def _write_json(path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _trace_enabled():
+    return bool(os.environ.get("HARNESS_TRACE_ROOT"))
+
+
+def _trace_trial_dir(index):
+    root = os.environ.get("HARNESS_TRACE_ROOT")
+    if not root:
+        return None
+    return pathlib.Path(root) / f"trial-{index + 1:02d}"
+
+
+def _trace_workspace_snapshot(trial_dir, label, workspace_dir):
+    if trial_dir is None:
+        return
+    snap_dir = trial_dir / "state_snapshots" / label
+    if snap_dir.exists():
+        shutil.rmtree(snap_dir)
+    _copy_tree_contents(workspace_dir, snap_dir)
 
 
 def _copy_tree_contents(src, dst):
@@ -62,7 +97,13 @@ def _run_trials_with_fixture_snapshot(scenario_dir, scenario, fn):
             workspace_dir.mkdir(parents=True, exist_ok=True)
             _clear_dir_contents(workspace_dir)
             _copy_tree_contents(snapshot_dir, workspace_dir)
+            trial_dir = _trace_trial_dir(index)
+            if trial_dir is not None:
+                _write_json(trial_dir / "meta.json", {"trial_index": index + 1, "scenario_kind": scenario.get("kind")})
+                _trace_workspace_snapshot(trial_dir, "before", workspace_dir)
             results.append(fn(workspace_dir, index))
+            if trial_dir is not None:
+                _trace_workspace_snapshot(trial_dir, "after", workspace_dir)
         return results
 
 
@@ -2198,6 +2239,28 @@ def _run_runner_fixture_restore(repo_root, scenario_dir, scenario):
     }
 
 
+def _run_runner_trace_dirs(repo_root, scenario_dir, scenario):
+    def _trial(workspace_dir, index):
+        marker = workspace_dir / "state" / "runtime" / f"trace-{index}.txt"
+        marker.write_text(f"trial-{index + 1}\n", encoding="utf-8")
+        return {"marker": marker.name}
+
+    trials = _run_trials_with_fixture_snapshot(scenario_dir, scenario, _trial)
+    trace_root = pathlib.Path(os.environ["HARNESS_TRACE_ROOT"])
+    trial_dirs = sorted([p for p in trace_root.iterdir() if p.is_dir() and p.name.startswith("trial-")])
+    return {
+        "trial_count": len(trials),
+        "trial_dir_count": len(trial_dirs),
+        "has_meta": all((p / "meta.json").exists() for p in trial_dirs),
+        "has_before_snapshots": all((p / "state_snapshots" / "before").exists() for p in trial_dirs),
+        "has_after_snapshots": all((p / "state_snapshots" / "after").exists() for p in trial_dirs),
+        "marker_captured": all(
+            any(path.name.startswith("trace-") for path in (p / "state_snapshots" / "after" / "state" / "runtime").glob("*"))
+            for p in trial_dirs
+        ),
+    }
+
+
 def _run_self_repair_observation(repo_root, scenario):
     orchestrator, _ = _load_repo_modules(repo_root)
     with tempfile.TemporaryDirectory() as tmp:
@@ -2477,6 +2540,9 @@ def main(argv):
     scenario = json.loads((scenario_dir / "scenario.yaml").read_text())
     expected = json.loads((scenario_dir / "expected.json").read_text())
     repo_root = scenario_dir.parents[2]
+    trace_root = _new_trace_root(repo_root, scenario_dir)
+    trace_root.mkdir(parents=True, exist_ok=True)
+    os.environ["HARNESS_TRACE_ROOT"] = str(trace_root)
     kind = scenario["kind"]
     if kind == "attempt_cap":
         actual = _run_attempt_cap(repo_root, scenario_dir, scenario)
@@ -2548,6 +2614,8 @@ def main(argv):
         actual = _run_memory_vec_missing(repo_root, scenario)
     elif kind == "runner_fixture_restore":
         actual = _run_runner_fixture_restore(repo_root, scenario_dir, scenario)
+    elif kind == "runner_trace_dirs":
+        actual = _run_runner_trace_dirs(repo_root, scenario_dir, scenario)
     elif kind == "self_repair_observation":
         actual = _run_self_repair_observation(repo_root, scenario)
     elif kind == "telegram_surface":
@@ -2563,6 +2631,12 @@ def main(argv):
     else:
         raise SystemExit(f"unknown scenario kind: {kind}")
 
+    trace_root = pathlib.Path(os.environ["HARNESS_TRACE_ROOT"]) if os.environ.get("HARNESS_TRACE_ROOT") else None
+    if trace_root is not None:
+        _write_json(trace_root / "scenario.json", scenario)
+        _write_json(trace_root / "expected.json", expected)
+        _write_json(trace_root / "actual.json", actual)
+        _write_json(trace_root / "result.json", {"passed": actual == expected, "scenario_kind": kind})
     if actual != expected:
         print(json.dumps({"expected": expected, "actual": actual}, indent=2))
         raise SystemExit(1)
