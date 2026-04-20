@@ -11,7 +11,7 @@ import sys
 import tempfile
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 def _load_module(name, path):
@@ -2196,6 +2196,454 @@ def _run_council_timeout(repo_root, scenario):
         }
 
 
+def _run_wal_growth_stalls(repo_root, scenario):
+    state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        engine = state_engine.StateEngine(
+            state_engine.StateEngineConfig(
+                root=root,
+                db_path=root / "runtime" / "orchestrator.db",
+                migrations_dir=repo_root / "state" / "migrations",
+                mode="primary",
+            )
+        )
+        engine.initialize()
+        writer = engine.connect()
+        writer.execute("BEGIN IMMEDIATE")
+        for idx in range(20):
+            writer.execute(
+                "INSERT INTO metrics(name, value, metric_type, created_at_epoch, tags_json) VALUES (?, ?, ?, ?, ?)",
+                ("wal.test", float(idx), "gauge", idx + 1, "{}"),
+            )
+        chk = engine.checkpoint(conn=sqlite3.connect(engine.config.db_path))
+        writer.rollback()
+        post = engine.checkpoint()
+        return {
+            "checkpoint_busy": int(chk[0] or 0) > 0,
+            "post_checkpoint_ok": int(post[0] or 0) == 0,
+            "integrity_ok": engine.integrity_check() == "ok",
+        }
+
+
+def _run_migration_partial(repo_root, scenario):
+    state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        migrations = root / "migrations"
+        migrations.mkdir()
+        (migrations / "0001_initial.sql").write_text("CREATE TABLE ok(id INTEGER PRIMARY KEY);\n", encoding="utf-8")
+        (migrations / "0002_broken.sql").write_text("CREAT TABLE nope(\n", encoding="utf-8")
+        engine = state_engine.StateEngine(
+            state_engine.StateEngineConfig(root=root, db_path=root / "runtime" / "orchestrator.db", migrations_dir=migrations, mode="primary")
+        )
+        try:
+            engine.initialize()
+        except Exception as exc:
+            error = str(exc)
+        else:
+            error = ""
+        conn = engine.connect()
+        applied = sorted(engine._applied_migrations(conn))
+        return {
+            "error_present": bool(error),
+            "applied": applied,
+            "broken_applied": "0002_broken" in applied,
+        }
+
+
+def _run_migration_idempotence(repo_root, scenario):
+    state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        engine = state_engine.StateEngine(
+            state_engine.StateEngineConfig(root=root, db_path=root / "runtime" / "orchestrator.db", migrations_dir=repo_root / "state" / "migrations", mode="primary")
+        )
+        first = engine.initialize()
+        second = engine.initialize()
+        return {
+            "first_applied": first["applied_in_run"],
+            "second_applied": second["applied_in_run"],
+            "same_applied_count": first["applied_count"] == second["applied_count"],
+        }
+
+
+def _run_council_malformed(repo_root, scenario):
+    _, worker = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        task = {"task_id": "task-62", "engine_args": {}}
+        old = {
+            "_run_bounded": worker._run_bounded,
+            "_claude_subprocess_env": worker._claude_subprocess_env,
+            "_claude_budget_flag": worker._claude_budget_flag,
+        }
+        worker._run_bounded = lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, stdout="not-json", stderr="")
+        worker._claude_subprocess_env = lambda: {}
+        worker._claude_budget_flag = lambda *args, **kwargs: "1.0"
+        try:
+            out = worker._run_self_repair_council(
+                task=task, stage="pre_execute", panel=("socrates",), prompt_body="Decide.", worktree=root, timeout=60, last_msg_path=None
+            )
+        finally:
+            for key, value in old.items():
+                setattr(worker, key, value)
+        return {
+            "error_has_invalid": "invalid council output" in (out.get("error") or ""),
+            "blocker_code": out.get("blocker_code"),
+        }
+
+
+def _run_fts5_recovery(repo_root, scenario):
+    state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        engine = state_engine.StateEngine(
+            state_engine.StateEngineConfig(root=root, db_path=root / "runtime" / "orchestrator.db", migrations_dir=repo_root / "state" / "migrations", mode="primary")
+        )
+        engine.initialize()
+        engine.upsert_memory_observation({
+            "project": "devmini-orchestrator", "source_doc": "DECISIONS.md", "section_key": "s1", "type": "decision",
+            "title": "Vector memory title", "content": "fts recovers cleanly", "importance": 5, "created_at": "2026-04-20T00:00:00",
+        })
+        conn = engine.connect()
+        with conn:
+            conn.execute("DROP TABLE memory_obs_fts")
+            conn.execute("CREATE VIRTUAL TABLE memory_obs_fts USING fts5(title, content, tags)")
+        rows = engine.memory_search("vector memory", project="devmini-orchestrator", limit=3)
+        return {"titles": [r["title"] for r in rows], "integrity_ok": engine.integrity_check() == "ok"}
+
+
+def _run_vector_rowid_divergence(repo_root, scenario):
+    state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        engine = state_engine.StateEngine(
+            state_engine.StateEngineConfig(root=root, db_path=root / "runtime" / "orchestrator.db", migrations_dir=repo_root / "state" / "migrations", mode="primary")
+        )
+        status = engine.initialize()
+        keep_id = engine.upsert_memory_observation({
+            "project": "devmini-orchestrator", "source_doc": "DECISIONS.md", "section_key": "keep", "type": "decision",
+            "title": "Healthy title", "content": "healthy content", "importance": 5, "created_at": "2026-04-20T00:00:00",
+        })
+        stale_id = engine.upsert_memory_observation({
+            "project": "devmini-orchestrator", "source_doc": "DECISIONS.md", "section_key": "stale", "type": "decision",
+            "title": "Stale title", "content": "stale content", "importance": 5, "created_at": "2026-04-20T00:00:01",
+        })
+        conn = engine.connect()
+        with conn:
+            conn.execute("DELETE FROM memory_observations WHERE id = ?", (stale_id,))
+        rows = engine.memory_search("healthy", project="devmini-orchestrator", limit=3, semantic_candidates=[stale_id, keep_id])
+        return {
+            "vec_enabled": status.get("vec_enabled"),
+            "titles": [r["title"] for r in rows],
+            "no_crash": True,
+        }
+
+
+def _run_observation_orphan(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        feats = root / "features"; feats.mkdir()
+        queue_root = root / "queue"
+        for state in orchestrator.STATES:
+            (queue_root / state).mkdir(parents=True, exist_ok=True)
+        old = {k: orchestrator.tick_self_repair_observation_window.__globals__[k] for k in ("FEATURES_DIR", "QUEUE_ROOT", "append_event", "append_transition")}
+        old_env = {"STATE_ENGINE_MODE": os.environ.get("STATE_ENGINE_MODE"), "STATE_ENGINE_PATH": os.environ.get("STATE_ENGINE_PATH")}
+        os.environ["STATE_ENGINE_MODE"] = "off"
+        os.environ["STATE_ENGINE_PATH"] = str(root / "runtime" / "scenario.db")
+        orchestrator._STATE_ENGINE_CACHE = {"key": None, "engine": None}
+        orchestrator.FEATURES_DIR = feats
+        orchestrator.QUEUE_ROOT = queue_root
+        orchestrator.append_event = lambda *args, **kwargs: None
+        orchestrator.append_transition = lambda *args: None
+        try:
+            orchestrator.write_json_atomic(feats / "feature-65.json", {
+                "feature_id": "feature-65", "project": "devmini-orchestrator", "status": "open",
+                "self_repair": {"enabled": True, "issues": [{
+                    "issue_key": "task:task-missing:blocked:template_refine_exhausted", "status": "resolved",
+                    "observation_target": {"task_id": "task-missing", "blocker_code": "template_refine_exhausted"},
+                    "observation_due_at": "2000-01-01T00:00:00", "observation_status": "pending",
+                }]}
+            })
+            out = orchestrator.tick_self_repair_observation_window()
+            saved = orchestrator.read_json(feats / "feature-65.json", {})
+        finally:
+            for key, value in old.items():
+                orchestrator.tick_self_repair_observation_window.__globals__[key] = value
+            orchestrator._STATE_ENGINE_CACHE = {"key": None, "engine": None}
+            if old_env["STATE_ENGINE_MODE"] is None:
+                os.environ.pop("STATE_ENGINE_MODE", None)
+            else:
+                os.environ["STATE_ENGINE_MODE"] = old_env["STATE_ENGINE_MODE"]
+            if old_env["STATE_ENGINE_PATH"] is None:
+                os.environ.pop("STATE_ENGINE_PATH", None)
+            else:
+                os.environ["STATE_ENGINE_PATH"] = old_env["STATE_ENGINE_PATH"]
+        issue = saved["self_repair"]["issues"][0]
+        return {"reopened": out["reopened"], "observation_status": issue.get("observation_status"), "status": issue.get("status")}
+
+
+def _run_observation_idempotent(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        feats = root / "features"; feats.mkdir()
+        queue_root = root / "queue"
+        for state in orchestrator.STATES:
+            (queue_root / state).mkdir(parents=True, exist_ok=True)
+        old = {k: orchestrator.tick_self_repair_observation_window.__globals__[k] for k in ("FEATURES_DIR", "QUEUE_ROOT", "append_event", "append_transition")}
+        old_env = {"STATE_ENGINE_MODE": os.environ.get("STATE_ENGINE_MODE"), "STATE_ENGINE_PATH": os.environ.get("STATE_ENGINE_PATH")}
+        events = []; transitions = []
+        os.environ["STATE_ENGINE_MODE"] = "off"
+        os.environ["STATE_ENGINE_PATH"] = str(root / "runtime" / "scenario.db")
+        orchestrator._STATE_ENGINE_CACHE = {"key": None, "engine": None}
+        orchestrator.FEATURES_DIR = feats
+        orchestrator.QUEUE_ROOT = queue_root
+        orchestrator.append_event = lambda *args, **kwargs: events.append((args, kwargs))
+        orchestrator.append_transition = lambda *args: transitions.append(args)
+        try:
+            orchestrator.write_json_atomic(feats / "feature-66.json", {
+                "feature_id": "feature-66", "status": "open", "self_repair": {"enabled": True, "issues": [{
+                    "issue_key": "task:task-66:blocked:template_refine_exhausted", "status": "resolved",
+                    "observation_target": {"task_id": "task-66", "blocker_code": "template_refine_exhausted"},
+                    "observation_due_at": "2000-01-01T00:00:00",
+                }]}
+            })
+            orchestrator.write_json_atomic(queue_root / "blocked" / "task-66.json", {"task_id": "task-66", "blocker": {"code": "template_refine_exhausted"}})
+            first = orchestrator.tick_self_repair_observation_window()
+            second = orchestrator.tick_self_repair_observation_window()
+            saved = orchestrator.read_json(feats / "feature-66.json", {})
+        finally:
+            for key, value in old.items():
+                orchestrator.tick_self_repair_observation_window.__globals__[key] = value
+            orchestrator._STATE_ENGINE_CACHE = {"key": None, "engine": None}
+            if old_env["STATE_ENGINE_MODE"] is None:
+                os.environ.pop("STATE_ENGINE_MODE", None)
+            else:
+                os.environ["STATE_ENGINE_MODE"] = old_env["STATE_ENGINE_MODE"]
+            if old_env["STATE_ENGINE_PATH"] is None:
+                os.environ.pop("STATE_ENGINE_PATH", None)
+            else:
+                os.environ["STATE_ENGINE_PATH"] = old_env["STATE_ENGINE_PATH"]
+        issue = saved["self_repair"]["issues"][0]
+        return {
+            "first_reopened": first["reopened"],
+            "second_reopened": second["reopened"],
+            "transition_count": len(transitions),
+            "checked_at_present": bool(issue.get("observation_checked_at")),
+        }
+
+
+def _run_clock_skew_backward(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        feats = root / "features"; feats.mkdir()
+        queue_root = root / "queue"
+        for state in orchestrator.STATES:
+            (queue_root / state).mkdir(parents=True, exist_ok=True)
+        old = {k: orchestrator.tick_self_repair_observation_window.__globals__[k] for k in ("FEATURES_DIR", "QUEUE_ROOT", "append_event", "append_transition", "OBSERVATION_SKEW_TOLERANCE_SECONDS")}
+        old_env = {"STATE_ENGINE_MODE": os.environ.get("STATE_ENGINE_MODE"), "STATE_ENGINE_PATH": os.environ.get("STATE_ENGINE_PATH")}
+        os.environ["STATE_ENGINE_MODE"] = "off"
+        os.environ["STATE_ENGINE_PATH"] = str(root / "runtime" / "scenario.db")
+        orchestrator._STATE_ENGINE_CACHE = {"key": None, "engine": None}
+        orchestrator.FEATURES_DIR = feats
+        orchestrator.QUEUE_ROOT = queue_root
+        orchestrator.append_event = lambda *args, **kwargs: None
+        orchestrator.append_transition = lambda *args: None
+        orchestrator.OBSERVATION_SKEW_TOLERANCE_SECONDS = 120
+        try:
+            future_due = (datetime.now() + timedelta(seconds=30)).isoformat(timespec="seconds")
+            orchestrator.write_json_atomic(feats / "feature-67.json", {
+                "feature_id": "feature-67", "status": "open", "self_repair": {"enabled": True, "issues": [{
+                    "issue_key": "task:task-67:blocked:template_refine_exhausted", "status": "resolved",
+                    "observation_target": {"task_id": "task-67", "blocker_code": "template_refine_exhausted"},
+                    "observation_due_at": future_due,
+                }]}
+            })
+            orchestrator.write_json_atomic(queue_root / "blocked" / "task-67.json", {"task_id": "task-67", "blocker": {"code": "template_refine_exhausted"}})
+            out = orchestrator.tick_self_repair_observation_window()
+        finally:
+            for key, value in old.items():
+                orchestrator.tick_self_repair_observation_window.__globals__[key] = value
+            orchestrator._STATE_ENGINE_CACHE = {"key": None, "engine": None}
+            if old_env["STATE_ENGINE_MODE"] is None:
+                os.environ.pop("STATE_ENGINE_MODE", None)
+            else:
+                os.environ["STATE_ENGINE_MODE"] = old_env["STATE_ENGINE_MODE"]
+            if old_env["STATE_ENGINE_PATH"] is None:
+                os.environ.pop("STATE_ENGINE_PATH", None)
+            else:
+                os.environ["STATE_ENGINE_PATH"] = old_env["STATE_ENGINE_PATH"]
+        return {"reopened": out["reopened"], "checked": out["checked"]}
+
+
+def _run_checkpoint_starved(repo_root, scenario):
+    state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        engine = state_engine.StateEngine(
+            state_engine.StateEngineConfig(root=root, db_path=root / "runtime" / "orchestrator.db", migrations_dir=repo_root / "state" / "migrations", mode="primary")
+        )
+        engine.initialize()
+        stop = {"flag": False}
+        def writer():
+            conn = sqlite3.connect(engine.config.db_path, timeout=30)
+            while not stop["flag"]:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute("INSERT INTO metrics(name, value, metric_type, created_at_epoch, tags_json) VALUES ('starve', 1, 'gauge', 1, '{}')")
+                time.sleep(0.2)
+                conn.commit()
+            conn.close()
+        t = threading.Thread(target=writer)
+        t.start()
+        time.sleep(0.05)
+        chk = engine.checkpoint(conn=sqlite3.connect(engine.config.db_path))
+        stop["flag"] = True
+        t.join()
+        return {"busy_seen": int(chk[0] or 0) > 0, "integrity_ok": engine.integrity_check() == "ok"}
+
+
+def _run_metrics_rotation(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        log = root / "metrics.jsonl"
+        old = {"METRICS_LOG": orchestrator.METRICS_LOG}
+        old_env = {"STATE_ENGINE_MODE": os.environ.get("STATE_ENGINE_MODE"), "STATE_ENGINE_PATH": os.environ.get("STATE_ENGINE_PATH")}
+        os.environ["STATE_ENGINE_MODE"] = "off"
+        orchestrator._STATE_ENGINE_CACHE = {"key": None, "engine": None}
+        orchestrator.METRICS_LOG = log
+        try:
+            log.write_text(
+                json.dumps({"ts": "2000-01-01T00:00:00", "name": "old", "type": "gauge", "value": 1}) + "\n" +
+                json.dumps({"ts": datetime.now().isoformat(timespec="seconds"), "name": "new", "type": "gauge", "value": 1}) + "\n",
+                encoding="utf-8",
+            )
+            out = orchestrator.purge_old_metrics(now=datetime.now(), retention_days=1)
+            rows = orchestrator.read_metrics()
+        finally:
+            orchestrator.METRICS_LOG = old["METRICS_LOG"]
+            orchestrator._STATE_ENGINE_CACHE = {"key": None, "engine": None}
+            if old_env["STATE_ENGINE_MODE"] is None:
+                os.environ.pop("STATE_ENGINE_MODE", None)
+            else:
+                os.environ["STATE_ENGINE_MODE"] = old_env["STATE_ENGINE_MODE"]
+            if old_env["STATE_ENGINE_PATH"] is None:
+                os.environ.pop("STATE_ENGINE_PATH", None)
+            else:
+                os.environ["STATE_ENGINE_PATH"] = old_env["STATE_ENGINE_PATH"]
+        return {"removed_fs": out["removed_fs"], "remaining_names": [r["name"] for r in rows]}
+
+
+def _run_retention_purge_safe(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        log = root / "metrics.jsonl"
+        cfg = {"state_engine": {"mode": "primary", "path": str(root / "runtime" / "orchestrator.db"), "migrations_dir": str(repo_root / "state" / "migrations")}}
+        old = {"METRICS_LOG": orchestrator.METRICS_LOG, "_STATE_ENGINE_CACHE": dict(orchestrator._STATE_ENGINE_CACHE)}
+        orchestrator.METRICS_LOG = log
+        orchestrator._STATE_ENGINE_CACHE = {"key": None, "engine": None}
+        try:
+            engine = orchestrator.get_state_engine(cfg=cfg)
+            engine.initialize()
+            engine.record_metric({"ts": "2000-01-01T00:00:00", "name": "old.db", "type": "gauge", "value": 1, "tags": {}, "source": "test"})
+            engine.record_metric({"ts": datetime.now().isoformat(timespec="seconds"), "name": "new.db", "type": "gauge", "value": 1, "tags": {}, "source": "test"})
+            out = orchestrator.purge_old_metrics(now=datetime.now(), retention_days=1, cfg=cfg)
+            rows = engine.read_metrics()
+        finally:
+            orchestrator.METRICS_LOG = old["METRICS_LOG"]
+            orchestrator._STATE_ENGINE_CACHE = dict(old["_STATE_ENGINE_CACHE"])
+        return {"removed_db": out["removed_db"], "remaining_names": [r["name"] for r in rows]}
+
+
+def _run_fk_violation(repo_root, scenario):
+    state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        engine = state_engine.StateEngine(
+            state_engine.StateEngineConfig(root=root, db_path=root / "runtime" / "orchestrator.db", migrations_dir=repo_root / "state" / "migrations", mode="primary")
+        )
+        engine.initialize()
+        conn = engine.connect()
+        with conn:
+            conn.execute("CREATE TABLE feature_parent(fid TEXT PRIMARY KEY)")
+            conn.execute("CREATE TABLE feature_child(fid TEXT NOT NULL REFERENCES feature_parent(fid) ON DELETE CASCADE, tid TEXT)")
+        try:
+            with conn:
+                conn.execute("INSERT INTO feature_child(fid, tid) VALUES ('missing', 'task-x')")
+        except sqlite3.IntegrityError as exc:
+            error = str(exc)
+        else:
+            error = ""
+        return {"integrity_error": bool(error), "mentions_fk": "FOREIGN KEY" in error.upper()}
+
+
+def _run_skill_prompt_injection(repo_root, scenario):
+    orchestrator = _load_module("orchestrator", repo_root / "bin" / "orchestrator.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp) / "skills"
+        skill = root / "evil-skill"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(scenario["body"], encoding="utf-8")
+        old = {
+            "AGENT_SCAN_DIR": orchestrator.AGENT_SCAN_DIR,
+            "MCP_AUDIT_DIR": orchestrator.MCP_AUDIT_DIR,
+            "append_event": orchestrator.append_event,
+        }
+        orchestrator.AGENT_SCAN_DIR = root.parent / "agent_scans"
+        orchestrator.MCP_AUDIT_DIR = root.parent / "mcp_audits"
+        orchestrator.append_event = lambda *args, **kwargs: None
+        try:
+            report = orchestrator.scan_agent_roots([root], kind="skills", opt_out=True)
+        finally:
+            orchestrator.AGENT_SCAN_DIR = old["AGENT_SCAN_DIR"]
+            orchestrator.MCP_AUDIT_DIR = old["MCP_AUDIT_DIR"]
+            orchestrator.append_event = old["append_event"]
+        return {
+            "accepted": report["accepted"],
+            "high_count": report["counts"]["high"],
+            "has_prompt_injection_reason": any("prompt-injection" in f["reason"] for f in report["findings"]),
+        }
+
+
+def _run_council_deleted_task_ref(repo_root, scenario):
+    orchestrator, worker = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        task = {"task_id": "task-73", "engine_args": {}}
+        old = {
+            "_run_bounded": worker._run_bounded,
+            "_claude_subprocess_env": worker._claude_subprocess_env,
+            "_claude_budget_flag": worker._claude_budget_flag,
+            "find_task": orchestrator.find_task,
+        }
+        worker._run_bounded = lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0, stdout=json.dumps({"result": json.dumps({"referenced_task_id": "task-deleted", "verdict": "approve"})}), stderr=""
+        )
+        worker._claude_subprocess_env = lambda: {}
+        worker._claude_budget_flag = lambda *args, **kwargs: "1.0"
+        orchestrator.find_task = lambda task_id, states=None: None
+        try:
+            out = worker._run_self_repair_council(
+                task=task, stage="pre_execute", panel=("socrates",), prompt_body="Decide.", worktree=root, timeout=60, last_msg_path=None
+            )
+        finally:
+            for key, value in old.items():
+                if key == "find_task":
+                    orchestrator.find_task = value
+                else:
+                    setattr(worker, key, value)
+        return {
+            "error_has_missing_task": "missing task" in (out.get("error") or ""),
+            "blocker_code": out.get("blocker_code"),
+        }
+
+
 def _run_memory_hybrid(repo_root, scenario):
     state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
     with tempfile.TemporaryDirectory() as tmp:
@@ -2663,6 +3111,36 @@ def main(argv):
         actual = _run_db_deleted(repo_root, scenario)
     elif kind == "restore_active_rejected":
         actual = _run_restore_active_rejected(repo_root, scenario)
+    elif kind == "wal_growth_stalls":
+        actual = _run_wal_growth_stalls(repo_root, scenario)
+    elif kind == "migration_partial":
+        actual = _run_migration_partial(repo_root, scenario)
+    elif kind == "migration_idempotence":
+        actual = _run_migration_idempotence(repo_root, scenario)
+    elif kind == "council_malformed":
+        actual = _run_council_malformed(repo_root, scenario)
+    elif kind == "fts5_recovery":
+        actual = _run_fts5_recovery(repo_root, scenario)
+    elif kind == "vector_rowid_divergence":
+        actual = _run_vector_rowid_divergence(repo_root, scenario)
+    elif kind == "observation_orphan":
+        actual = _run_observation_orphan(repo_root, scenario)
+    elif kind == "observation_idempotent":
+        actual = _run_observation_idempotent(repo_root, scenario)
+    elif kind == "clock_skew_backward":
+        actual = _run_clock_skew_backward(repo_root, scenario)
+    elif kind == "checkpoint_starved":
+        actual = _run_checkpoint_starved(repo_root, scenario)
+    elif kind == "metrics_rotation":
+        actual = _run_metrics_rotation(repo_root, scenario)
+    elif kind == "retention_purge_safe":
+        actual = _run_retention_purge_safe(repo_root, scenario)
+    elif kind == "fk_constraint_violation":
+        actual = _run_fk_violation(repo_root, scenario)
+    elif kind == "skill_prompt_injection":
+        actual = _run_skill_prompt_injection(repo_root, scenario)
+    elif kind == "council_deleted_task_ref":
+        actual = _run_council_deleted_task_ref(repo_root, scenario)
     elif kind == "memory_hybrid_rrf":
         actual = _run_memory_hybrid(repo_root, scenario)
     elif kind == "memory_vec_missing_fallback":

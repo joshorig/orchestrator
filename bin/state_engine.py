@@ -32,6 +32,7 @@ from typing import Any, Iterable
 DEFAULT_DB_BASENAME = "orchestrator.db"
 DEFAULT_MEMORY_VEC_DIMENSIONS = 24
 DEFAULT_MEMORY_RRF_K = 60
+DEFAULT_METRICS_RETENTION_DAYS = 14
 REPO_MEMORY_SECTION_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
 
 
@@ -147,6 +148,12 @@ class StateEngine:
     def checkpoint(self, *, conn: sqlite3.Connection | None = None) -> tuple[Any, ...]:
         conn = conn or self.connect()
         return tuple(conn.execute("PRAGMA wal_checkpoint(RESTART)").fetchone() or ())
+
+    def purge_old_metrics(self, *, cutoff_epoch: int, conn: sqlite3.Connection | None = None) -> int:
+        conn = conn or self.connect()
+        with conn:
+            cur = conn.execute("DELETE FROM metrics WHERE created_at_epoch < ?", (int(cutoff_epoch),))
+        return int(cur.rowcount or 0)
 
     def backup_into(self, backup_path: str | pathlib.Path, *, conn: sqlite3.Connection | None = None) -> str:
         conn = conn or self.connect()
@@ -734,16 +741,29 @@ class StateEngine:
         scores: dict[int, float] = {}
         rrf_k = DEFAULT_MEMORY_RRF_K
         fts_query = _fts_query_for(terms)
-        fts_rows = conn.execute(
-            """
-            SELECT rowid
-              FROM memory_obs_fts
-             WHERE memory_obs_fts MATCH ?
-               AND rowid IN (SELECT id FROM memory_observations WHERE project = ?)
-             LIMIT ?
-            """,
-            (fts_query, project, int(limit) * 4),
-        ).fetchall()
+        try:
+            fts_rows = conn.execute(
+                """
+                SELECT rowid
+                  FROM memory_obs_fts
+                 WHERE memory_obs_fts MATCH ?
+                   AND rowid IN (SELECT id FROM memory_observations WHERE project = ?)
+                 LIMIT ?
+                """,
+                (fts_query, project, int(limit) * 4),
+            ).fetchall()
+        except sqlite3.Error:
+            self.rebuild_memory_fts(conn=conn)
+            fts_rows = conn.execute(
+                """
+                SELECT rowid
+                  FROM memory_obs_fts
+                 WHERE memory_obs_fts MATCH ?
+                   AND rowid IN (SELECT id FROM memory_observations WHERE project = ?)
+                 LIMIT ?
+                """,
+                (fts_query, project, int(limit) * 4),
+            ).fetchall()
         for rank, row in enumerate(fts_rows, start=1):
             scores[int(row["rowid"])] = scores.get(int(row["rowid"]), 0.0) + (1.0 / (rrf_k + rank))
 

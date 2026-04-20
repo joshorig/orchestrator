@@ -63,6 +63,8 @@ TASK_ACTION_NOTES_PATH = RUNTIME_DIR / "task-action-notes.json"
 TASK_FULL_MESSAGE_DIR = RUNTIME_DIR / "telegram-full"
 TASK_FULL_MESSAGE_LIMIT = 100
 ALLOWLIST_PATH = RUNTIME_DIR / "allowlist.json"
+METRICS_RETENTION_DAYS = 14
+OBSERVATION_SKEW_TOLERANCE_SECONDS = 120
 FEATURES_DIR = STATE_ROOT / "state" / "features"
 TRANSITIONS_LOG = RUNTIME_DIR / "transitions.log"
 REPORT_DIR = STATE_ROOT / "reports"
@@ -1054,6 +1056,35 @@ def read_metrics(*, name=None, limit=None):
     return rows
 
 
+def purge_old_metrics(now=None, *, retention_days=None, cfg=None):
+    now_dt = now if isinstance(now, dt.datetime) else dt.datetime.now()
+    retention = int(retention_days if retention_days is not None else METRICS_RETENTION_DAYS)
+    cutoff_dt = now_dt - dt.timedelta(days=max(retention, 0))
+    cutoff_iso = cutoff_dt.isoformat(timespec="seconds")
+    cutoff_epoch = int(cutoff_dt.timestamp())
+    removed_db = 0
+    if _state_engine_write_enabled(cfg=cfg):
+        try:
+            removed_db = get_state_engine(cfg=cfg).purge_old_metrics(cutoff_epoch=cutoff_epoch)
+        except Exception:
+            removed_db = 0
+    removed_fs = 0
+    if METRICS_LOG.exists():
+        kept = []
+        for line in METRICS_LOG.read_text(errors="replace").splitlines():
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            ts = str(row.get("ts") or "")
+            if ts and ts < cutoff_iso:
+                removed_fs += 1
+                continue
+            kept.append(json.dumps(row, sort_keys=True))
+        METRICS_LOG.write_text(("\n".join(kept) + ("\n" if kept else "")), encoding="utf-8")
+    return {"removed_db": removed_db, "removed_fs": removed_fs, "cutoff": cutoff_iso}
+
+
 def latest_metric_values(*, names=None):
     wanted = set(names or [])
     latest = {}
@@ -1427,6 +1458,8 @@ _AGENT_SCAN_RISK_RULES = (
     ("medium", re.compile(r"\bos\.environ\b"), "reads environment variables"),
     ("medium", re.compile(r"\b(?:rm -rf|git reset --hard|git push --force)\b"), "contains destructive shell command"),
     ("medium", re.compile(r"\b(?:eval|exec)\b"), "contains dynamic code execution"),
+    ("high", re.compile(r"ignore (?:all |any )?(?:previous|prior) instructions", re.I), "contains prompt-injection override language"),
+    ("high", re.compile(r"(?:send|post|upload|exfiltrat\w*).{0,40}(?:secret|token|key|credential)", re.I | re.S), "contains credential exfiltration language"),
 )
 
 
@@ -7458,7 +7491,7 @@ def tick_self_repair_observation_window():
                 due_at = now
             if due_at.tzinfo is not None:
                 due_at = due_at.astimezone().replace(tzinfo=None)
-            if due_at > now:
+            if due_at > now and (due_at - now).total_seconds() > OBSERVATION_SKEW_TOLERANCE_SECONDS:
                 continue
             checked += 1
             issue["observation_checked_at"] = now_iso()

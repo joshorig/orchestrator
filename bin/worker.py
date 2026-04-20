@@ -3183,6 +3183,16 @@ def _run_self_repair_council(
         data = _parse_council_json(raw)
     except Exception as exc:
         return {"error": f"invalid council output: {exc}", "blocker_code": "review_gate_protocol_error"}
+    referenced_task_id = (
+        data.get("referenced_task_id")
+        or data.get("target_task_id")
+        or (data.get("task_ref") if isinstance(data.get("task_ref"), str) else None)
+    )
+    if referenced_task_id and o.find_task(str(referenced_task_id)) is None:
+        return {
+            "error": f"council referenced missing task: {referenced_task_id}",
+            "blocker_code": "review_gate_protocol_error",
+        }
     data.setdefault("panel", list(panel))
     data.setdefault("stage", stage)
     data["raw"] = raw
