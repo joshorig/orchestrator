@@ -648,6 +648,30 @@
     <aside class="stack">
       <div class="card">
         <div class="section-head">
+          <span class="section-title">Codeburn</span>
+          <span class="section-sub">24h task costs + one-shot success</span>
+        </div>
+        <div class="mini-list" id="costs"></div>
+      </div>
+      <div class="card">
+        <div class="section-head">
+          <span class="section-title">Memory Freshness</span>
+          <span class="section-sub">observation surface</span>
+        </div>
+        <div class="memory-list" id="memorySurface"></div>
+      </div>
+      <div class="card">
+        <div class="section-head">
+          <span class="section-title">Environment &amp; Migrations</span>
+          <span class="section-sub">state engine + env checks</span>
+        </div>
+        <div class="mini-list" id="envPanel"></div>
+      </div>
+    </aside>
+
+    <main class="stack">
+      <div class="card">
+        <div class="section-head">
           <span class="section-title">Round-4 Heartbeat</span>
           <span class="section-sub">clean + strategic</span>
         </div>
@@ -655,73 +679,35 @@
       </div>
       <div class="card">
         <div class="section-head">
-          <span class="section-title">Review Gate Status</span>
-          <span class="section-sub">queue + findings</span>
-        </div>
-        <div id="reviewGateStatus"></div>
-      </div>
-      <div class="card">
-        <div class="section-head">
-          <span class="section-title">Agent Roster</span>
-          <span class="section-sub" id="agentCount">-</span>
-        </div>
-        <div class="agent-list" id="agents"></div>
-      </div>
-      <div class="card">
-        <div class="section-head">
-          <span class="section-title">Agent Tasks</span>
-          <span class="section-sub" id="agentTaskCount">select an agent</span>
-        </div>
-        <div class="mini-list" id="agentTasks"></div>
-      </div>
-      <div class="card">
-        <div class="section-head">
-          <span class="section-title">Dashboard Server</span>
-          <span class="section-sub">live config</span>
-        </div>
-        <div class="mini-list" id="server"></div>
-      </div>
-      <div class="card">
-        <div class="section-head">
-          <span class="section-title">Claude Budget</span>
-          <span class="section-sub">24h hit tail</span>
-        </div>
-        <div class="mini-list" id="budget"></div>
-      </div>
-      <div class="card">
-        <div class="section-head">
-          <span class="section-title">Codeburn</span>
-          <span class="section-sub">24h task costs + one-shot success</span>
-        </div>
-        <div class="mini-list" id="costs"></div>
-      </div>
-    </aside>
-
-    <main class="stack">
-      <div class="card">
-        <div class="section-head">
           <span class="section-title">Feature Pipeline</span>
           <span class="section-sub" id="featureCount">-</span>
         </div>
         <div class="feature-list" id="features"></div>
       </div>
+      <div class="card">
+        <div class="section-head">
+          <span class="section-title">Self-Repair &amp; Observation Window</span>
+          <span class="section-sub">active issues + NEW-6</span>
+        </div>
+        <div id="selfRepairPanel"></div>
+      </div>
+      <div class="card">
+        <div class="section-head">
+          <span class="section-title">Skill Invocations</span>
+          <span class="section-sub">trusted external skills</span>
+        </div>
+        <div id="skillPanel"></div>
+      </div>
+      <div class="card">
+        <div class="section-head">
+          <span class="section-title">Harness Runs</span>
+          <span class="section-sub">recent summary</span>
+        </div>
+        <div id="harnessPanel"></div>
+      </div>
     </main>
 
     <aside class="stack">
-      <div class="card">
-        <div class="section-head">
-          <span class="section-title">Observation Window</span>
-          <span class="section-sub">NEW-6 follow-through</span>
-        </div>
-        <div class="observation-list" id="observationWindow"></div>
-      </div>
-      <div class="card">
-        <div class="section-head">
-          <span class="section-title">Memory Surface</span>
-          <span class="section-sub">observation freshness</span>
-        </div>
-        <div class="memory-list" id="memorySurface"></div>
-      </div>
       <div class="card">
         <div class="section-head">
           <span class="section-title">Queue Depth</span>
@@ -732,24 +718,24 @@
       </div>
       <div class="card">
         <div class="section-head">
-          <span class="section-title">Blocker Codes</span>
+          <span class="section-title">Frontier Blockers</span>
           <span class="section-sub" id="blockerCount">-</span>
         </div>
         <table><tbody id="blockers"></tbody></table>
       </div>
       <div class="card">
         <div class="section-head">
-          <span class="section-title">Recent Transitions</span>
-          <span class="section-sub">tail</span>
+          <span class="section-title">Review Gate Status</span>
+          <span class="section-sub">queue + findings</span>
         </div>
-        <div class="mini-list" id="transitions"></div>
+        <div id="reviewGateStatus"></div>
       </div>
       <div class="card">
         <div class="section-head">
-          <span class="section-title">Runtime Audit</span>
-          <span class="section-sub">env, bypass, orphan</span>
+          <span class="section-title">Telegram Log</span>
+          <span class="section-sub">push + command ticker</span>
         </div>
-        <div class="mini-list" id="runtimeAudit"></div>
+        <div class="mini-list" id="telegramTicker"></div>
       </div>
     </aside>
   </section>
@@ -1260,6 +1246,128 @@
       `).join("") : `<div class="empty">No memory observations recorded.</div>`;
     }
 
+    function renderEnvironmentPanel(data) {
+      const env = data.environment || {};
+      const projects = env.projects || [];
+      const migrations = env.migrations || [];
+      document.getElementById("envPanel").innerHTML = `
+        <div class="mini-row">
+          <div class="mini-top"><strong>State Engine</strong><span class="tiny">${esc(env.mode || "-")}</span></div>
+          <div class="mini-detail">${esc(env.integrity_check || "-")}</div>
+          <div class="tiny">${esc((data.dashboard_server || {}).state_engine?.db_path || "")}</div>
+        </div>
+        ${projects.map(row => `
+          <div class="mini-row">
+            <div class="mini-top"><strong>${esc(row.project || "global")}</strong><span class="state-chip state-${esc(row.result === "ok" ? "done" : "blocked")}">${esc(row.result || "-")}</span></div>
+            <div class="mini-detail">${esc(row.blocker_summary || "no blockers")}</div>
+            <div class="tiny">${esc(formatTs(row.checked_at))}</div>
+          </div>
+        `).join("") || `<div class="empty">No environment audit rows yet.</div>`}
+        ${migrations.length ? `<div class="section-title" style="margin-top:12px">Migrations</div>` : ""}
+        ${migrations.map(name => `
+          <div class="mini-row">
+            <div class="mini-top"><strong>${esc(name)}</strong><span class="tiny">applied</span></div>
+          </div>
+        `).join("")}
+      `;
+    }
+
+    function renderSelfRepairPanel(data) {
+      const features = data.features || [];
+      const issues = [];
+      features.forEach(feature => {
+        ((feature.self_repair || {}).issues || []).forEach(issue => issues.push({ ...issue, feature_id: feature.feature_id, project: feature.project }));
+      });
+      const activeObs = (data.observation_window || {}).issues || [];
+      document.getElementById("selfRepairPanel").innerHTML = `
+        <div class="review-grid">
+          <div class="review-stat"><div class="lbl">issues</div><div class="val">${esc(issues.length)}</div></div>
+          <div class="review-stat"><div class="lbl">observation windows</div><div class="val">${esc((data.observation_window || {}).active_count || 0)}</div></div>
+          <div class="review-stat"><div class="lbl">blocked frontiers</div><div class="val">${esc((data.heartbeat || {}).blocked_frontiers || 0)}</div></div>
+          <div class="review-stat"><div class="lbl">escalated</div><div class="val">${esc((data.heartbeat || {}).escalated_issues || 0)}</div></div>
+        </div>
+        <div class="observation-list">
+          ${issues.slice(0, 8).map(issue => `
+            <div class="observation-row">
+              <div class="row-head">
+                <span class="row-title">${esc(issue.feature_id || "-")}</span>
+                <span class="state-chip state-${esc(issue.status || "queued")}">${esc(issue.status || "-")}</span>
+              </div>
+              <div class="mini-detail">${esc(issue.issue_key || issue.kind || "-")}</div>
+              <div class="tiny">${esc(issue.project || "-")}${issue.planner_task_id ? ` · planner ${esc(issue.planner_task_id)}` : ""}${issue.last_deliberation_stage ? ` · ${esc(issue.last_deliberation_stage)}` : ""}</div>
+            </div>
+          `).join("") || `<div class="empty">No self-repair issues open.</div>`}
+          ${activeObs.length ? `<div class="section-title" style="margin-top:12px">Observation countdowns</div>` : ""}
+          ${activeObs.map(row => `
+            <div class="observation-row">
+              <div class="row-head"><span class="row-title">${esc(row.feature_id || "-")}</span><span class="countdown">${esc(formatRemaining(row.remaining_seconds))}</span></div>
+              <div class="mini-detail">${esc(row.blocker_code || "-")} · ${esc(row.task_id || "-")}</div>
+              <div class="tiny">due ${esc(formatTs(row.observation_due_at))}</div>
+            </div>
+          `).join("")}
+        </div>
+      `;
+    }
+
+    function renderSkillsPanel(data) {
+      const skills = (data.skills || {}).skills || [];
+      const latestScan = (data.skills || {}).latest_scan_counts || {};
+      document.getElementById("skillPanel").innerHTML = `
+        <div class="mini-row">
+          <div class="mini-top"><strong>Trusted skills</strong><span class="tiny">${esc((data.skills || {}).count || 0)} installed</span></div>
+          <div class="mini-detail">latest agent-scan: high ${esc(latestScan.high || 0)} · medium ${esc(latestScan.medium || 0)} · low ${esc(latestScan.low || 0)}</div>
+          <div class="tiny">${esc(formatTs((data.skills || {}).latest_scan_at))}</div>
+        </div>
+        ${skills.map(row => `
+          <div class="mini-row">
+            <div class="mini-top"><strong>${esc(row.name || "-")}</strong><span class="tiny">${esc(row.scan_status || "unknown")}</span></div>
+            <div class="mini-detail">${esc(row.source || "-")}</div>
+            <div class="tiny">${esc((row.sha || "").slice(0, 12))}${row.upstream_path ? ` · ${esc(row.upstream_path)}` : ""}</div>
+          </div>
+        `).join("") || `<div class="empty">No trusted skills configured.</div>`}
+      `;
+    }
+
+    function renderHarnessPanel(data) {
+      const harness = data.harness || {};
+      const total = harness.summary || {};
+      const clusters = harness.clusters || {};
+      const clusterRows = Object.entries(clusters).map(([name, row]) => `
+        <div class="mini-row">
+          <div class="mini-top"><strong>${esc(name)}</strong><span class="tiny">${esc(row.scenarios || 0)} scenarios</span></div>
+          <div class="mini-detail">${esc(row.passed || 0)} passed · ${esc(row.failed || 0)} failed</div>
+          <div class="tiny">${esc(row.pass_rate || 0)}% pass rate</div>
+        </div>
+      `).join("");
+      const recentRows = (harness.recent || []).map(row => `
+        <div class="mini-row">
+          <div class="mini-top"><strong>${esc(row.scenario || "-")}</strong><span class="state-chip state-${row.passed ? "done" : "failed"}">${row.passed ? "pass" : "fail"}</span></div>
+          <div class="mini-detail">${esc((row.wall_time_seconds || 0).toFixed ? row.wall_time_seconds.toFixed(2) : row.wall_time_seconds)}s</div>
+          <div class="tiny">${esc(formatTs(row.timestamp))}</div>
+        </div>
+      `).join("");
+      document.getElementById("harnessPanel").innerHTML = `
+        <div class="mini-row">
+          <div class="mini-top"><strong>Scenario coverage</strong><span class="tiny">${esc(harness.total_scenarios || 0)} total</span></div>
+          <div class="mini-detail">${esc(total.passed || 0)} passed · ${esc(total.failed || 0)} failed</div>
+          <div class="tiny">${esc(total.pass_rate || 0)}% pass rate</div>
+        </div>
+        ${clusterRows}
+        ${recentRows || `<div class="empty">No recent harness traces found.</div>`}
+      `;
+    }
+
+    function renderTelegramTicker(data) {
+      const rows = data.telegram_log || [];
+      document.getElementById("telegramTicker").innerHTML = rows.length ? rows.map(row => `
+        <div class="mini-row">
+          <div class="mini-top"><strong>${esc(row.kind || "-")}</strong><span class="tiny">${esc(formatTs(row.ts))}</span></div>
+          <div class="mini-detail">${esc(row.cmd || "-")}</div>
+          <div class="tiny">${esc(row.result || "")}</div>
+        </div>
+      `).join("") : `<div class="empty">No telegram command or push rows captured.</div>`;
+    }
+
     function indexTasks(data) {
       taskIndex = {};
       (data.features || []).forEach((feature) => {
@@ -1621,19 +1729,17 @@
       renderFsFallback(data);
       renderScorecards(data);
       renderHeartbeat(data);
-      renderReviewGates(data);
-      renderAgents(data);
-      renderAgentTasks();
-      renderServer(data);
-      renderBudget(data);
       renderCosts(data);
-      renderObservationWindow(data);
       renderMemorySurface(data);
+      renderEnvironmentPanel(data);
       renderQueue(data);
       renderBlockers(data);
-      renderTransitions(data);
-      renderRuntimeAudit(data);
+      renderReviewGates(data);
       renderFeatures(data);
+      renderSelfRepairPanel(data);
+      renderSkillsPanel(data);
+      renderHarnessPanel(data);
+      renderTelegramTicker(data);
     }
 
     async function refresh() {

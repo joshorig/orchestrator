@@ -482,6 +482,114 @@ def _runtime_audit():
     }
 
 
+def _skills():
+    cfg = o.load_config()
+    trusted = list(o.skills_config(cfg=cfg)["trusted_skills"])
+    scans = []
+    if o.AGENT_SCAN_DIR.exists():
+        scans = sorted(o.AGENT_SCAN_DIR.glob("skills-audit-*.json"))[-8:]
+    latest_scan = None
+    if scans:
+        try:
+            latest_scan = json.loads(scans[-1].read_text())
+        except Exception:
+            latest_scan = None
+    scan_counts = (latest_scan or {}).get("counts") or {}
+    rows = []
+    for item in trusted:
+        rows.append(
+            {
+                "name": item.get("name"),
+                "source": item.get("source"),
+                "sha": item.get("sha"),
+                "upstream_path": item.get("upstream_path"),
+                "scan_status": "accepted" if latest_scan and latest_scan.get("accepted") else ("unknown" if not latest_scan else "rejected"),
+                "scan_counts": scan_counts,
+            }
+        )
+    return {
+        "count": len(rows),
+        "latest_scan_at": (latest_scan or {}).get("scanned_at"),
+        "latest_scan_counts": scan_counts,
+        "skills": rows,
+    }
+
+
+def _harness():
+    scenarios = sorted((o.STATE_ROOT / "harness" / "scenarios").glob("*/scenario.yaml"))
+    summary = {"total": {"scenarios": len(scenarios), "passed": 0, "failed": 0, "pass_rate": 0.0}, "clusters": {}}
+    runs_root = o.STATE_ROOT / "harness" / "runs"
+    if runs_root.exists():
+        try:
+            sys.path.insert(0, str(o.STATE_ROOT / "harness"))
+            import run_scenario  # type: ignore
+            summary = run_scenario.summarize_runs(o.STATE_ROOT, runs_dir=runs_root)
+        except Exception:
+            pass
+    recent = []
+    if runs_root.exists():
+        for result_path in sorted(runs_root.glob("*/**/result.json"))[-6:]:
+            try:
+                result = json.loads(result_path.read_text())
+                recent.append(
+                    {
+                        "scenario": result_path.parent.name,
+                        "passed": bool(result.get("passed")),
+                        "wall_time_seconds": float((result.get("budget_report") or {}).get("wall_time_seconds") or 0.0),
+                        "timestamp": result.get("completed_at") or result.get("started_at"),
+                    }
+                )
+            except Exception:
+                continue
+    return {
+        "total_scenarios": len(scenarios),
+        "summary": summary.get("total") or {},
+        "clusters": summary.get("clusters") or {},
+        "recent": recent[-6:],
+    }
+
+
+def _telegram_log():
+    rows = []
+    reject_path = o.LOGS_DIR / "telegram-reject.log"
+    if reject_path.exists():
+        for line in reject_path.read_text(errors="replace").splitlines()[-8:]:
+            parts = line.split("\t", 3)
+            if len(parts) >= 4:
+                rows.append({"ts": parts[0], "kind": "reject", "cmd": parts[3], "result": parts[2]})
+    for path in sorted(o.REPORT_DIR.glob("workflow-check_*.md"))[-4:]:
+        rows.append({"ts": dt.datetime.fromtimestamp(path.stat().st_mtime, tz=dt.timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds"), "kind": "workflow", "cmd": path.name, "result": "workflow-check report"})
+    for path in sorted(o.REPORT_DIR.glob("workflow-alert_*.md"))[-4:]:
+        rows.append({"ts": dt.datetime.fromtimestamp(path.stat().st_mtime, tz=dt.timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds"), "kind": "push", "cmd": path.name, "result": "workflow alert"})
+    rows.sort(key=lambda row: row.get("ts") or "", reverse=True)
+    return rows[:12]
+
+
+def _environment_panel(runtime_audit, dashboard_server):
+    status = (dashboard_server.get("state_engine") or {}) if dashboard_server else {}
+    checks_by_project = defaultdict(list)
+    for row in runtime_audit.get("environment_checks") or []:
+        checks_by_project[row.get("project") or "global"].append(row)
+    projects = []
+    for project, entries in sorted(checks_by_project.items()):
+        latest = entries[-1]
+        projects.append(
+            {
+                "project": project,
+                "result": latest.get("result"),
+                "blocker_summary": latest.get("blocker_summary"),
+                "checked_at": latest.get("ts"),
+            }
+        )
+    return {
+        "projects": projects,
+        "migrations": list((status.get("applied_migrations") or [])),
+        "integrity_check": status.get("integrity_check"),
+        "mode": status.get("mode"),
+        "db_path": status.get("db_path"),
+    }
+
+
 def _fs_fallback():
     engine, conn = _conn()
     if not engine or not conn:
@@ -623,6 +731,7 @@ def build_feed(*, emit_runtime_metrics=False):
     runtime_audit = _runtime_audit()
     fs_fallback = _fs_fallback()
     observation_window = _observation_window(features)
+    dashboard_server = _dashboard_server()
     return {
         "timestamp": o.now_iso(),
         "health": health,
@@ -639,7 +748,11 @@ def build_feed(*, emit_runtime_metrics=False):
         "memory_observations": _memory_observations(),
         "observation_window": observation_window,
         "heartbeat": _heartbeat(health, runtime_audit, fs_fallback, observation_window, features),
-        "dashboard_server": _dashboard_server(),
+        "skills": _skills(),
+        "harness": _harness(),
+        "telegram_log": _telegram_log(),
+        "environment": _environment_panel(runtime_audit, dashboard_server),
+        "dashboard_server": dashboard_server,
     }
 
 
