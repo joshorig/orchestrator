@@ -80,6 +80,13 @@ class StateEngine:
         self._vec_error: str | None = None
         self._initialized_once = False
 
+    def _current_db_identity(self) -> tuple[int, int] | None:
+        try:
+            stat = self.config.db_path.stat()
+        except FileNotFoundError:
+            return None
+        return (int(stat.st_dev), int(stat.st_ino))
+
     def initialize(self) -> dict[str, Any]:
         if not self.config.enabled:
             return {
@@ -96,6 +103,15 @@ class StateEngine:
 
     def connect(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
+        current_identity = self._current_db_identity()
+        cached_identity = getattr(self._local, "db_identity", None)
+        if conn is not None and cached_identity != current_identity:
+            try:
+                conn.close()
+            finally:
+                self._local.conn = None
+                self._local.db_identity = None
+            conn = None
         if conn is None:
             self.config.db_path.parent.mkdir(parents=True, exist_ok=True)
             if self._initialized_once and not self.config.db_path.exists():
@@ -108,6 +124,7 @@ class StateEngine:
             conn.execute("PRAGMA temp_store = MEMORY")
             self._try_enable_sqlite_vec(conn)
             self._local.conn = conn
+            self._local.db_identity = self._current_db_identity()
         return conn
 
     def close(self) -> None:
@@ -115,6 +132,7 @@ class StateEngine:
         if conn is not None:
             conn.close()
             self._local.conn = None
+            self._local.db_identity = None
 
     def status(self, *, conn: sqlite3.Connection | None = None, applied_in_run: int = 0) -> dict[str, Any]:
         conn = conn or self.connect()

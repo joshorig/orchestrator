@@ -42,6 +42,53 @@ def _write_json(path, payload):
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _scenario_cluster(name, scenario_kind):
+    if name.startswith("runner-r") or scenario_kind in {"runner_fixture_restore", "runner_trace_dirs", "runner_version_budgets", "runner_summary"}:
+        return "runner"
+    if scenario_kind in {
+        "state_engine_mirror", "fs_to_engine_migration", "atomic_claim_concurrency", "atomic_claim_concurrency_10",
+        "kill9_integrity", "backup_roundtrip", "wal_backup_restore", "corrupt_db_fallback", "disk_full_insert",
+        "eio_read", "db_deleted", "restore_active_rejected", "wal_growth_stalls", "migration_forward_drift",
+        "migration_sha_mismatch", "migration_partial", "migration_idempotence", "fts5_recovery",
+        "vector_rowid_divergence", "checkpoint_starved", "retention_purge_safe", "fk_constraint_violation",
+    }:
+        return "state-engine"
+    if scenario_kind in {"telegram_surface", "task_cost_capture", "supply_chain_gate", "security_secret_gate", "untrusted_skill_refusal"}:
+        return "wave-c"
+    if scenario_kind in {"review_feedback_exhaustion", "issue_replan_cap", "self_repair_resolution", "self_repair_observation",
+                         "observation_orphan", "observation_idempotent", "clock_skew_backward", "council_timeout",
+                         "council_malformed", "council_deleted_task_ref", "false_blocker_attach", "qa_preflight",
+                         "project_main_dirty_cap", "regression_clear", "missing_child", "canary_fallback", "qa_contract_scoped",
+                         "qa_contract_full_tick", "self_repair_issue_backfill", "attempt_cap", "fix2_reopen_after_manual_abandon",
+                         "r16_override"}:
+        return "self-repair"
+    return "other"
+
+
+def summarize_runs(repo_root, *, runs_dir=None):
+    runs_root = pathlib.Path(runs_dir) if runs_dir else _trace_root_base(repo_root)
+    latest_by_scenario = {}
+    for result_path in sorted(runs_root.glob("*/**/result.json")):
+        scenario_dir = result_path.parent
+        name = scenario_dir.name
+        latest_by_scenario[name] = result_path
+    total = {"passed": 0, "failed": 0, "scenarios": 0}
+    clusters = {}
+    for name, result_path in sorted(latest_by_scenario.items()):
+        result = json.loads(result_path.read_text())
+        scenario = json.loads((result_path.parent / "scenario.json").read_text())
+        cluster = _scenario_cluster(name, scenario.get("kind"))
+        clusters.setdefault(cluster, {"passed": 0, "failed": 0, "scenarios": 0})
+        passed = bool(result.get("passed"))
+        total["scenarios"] += 1
+        total["passed" if passed else "failed"] += 1
+        clusters[cluster]["scenarios"] += 1
+        clusters[cluster]["passed" if passed else "failed"] += 1
+    for bucket in [total, *clusters.values()]:
+        bucket["pass_rate"] = round((bucket["passed"] / bucket["scenarios"]) * 100.0, 1) if bucket["scenarios"] else 0.0
+    return {"runs_dir": str(runs_root), "total": total, "clusters": clusters}
+
+
 def _trace_enabled():
     return bool(os.environ.get("HARNESS_TRACE_ROOT"))
 
@@ -2644,6 +2691,41 @@ def _run_council_deleted_task_ref(repo_root, scenario):
         }
 
 
+def _run_state_engine_reconnect_after_replace(repo_root, scenario):
+    state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        db_path = root / "runtime" / "orchestrator.db"
+        engine = state_engine.StateEngine(
+            state_engine.StateEngineConfig(root=root, db_path=db_path, migrations_dir=repo_root / "state" / "migrations", mode="primary")
+        )
+        engine.initialize()
+        conn1 = engine.connect()
+        with conn1:
+            conn1.execute("CREATE TABLE marker(name TEXT)")
+            conn1.execute("INSERT INTO marker(name) VALUES ('old')")
+        engine.checkpoint(conn=conn1)
+
+        replacement = root / "runtime" / "replacement.db"
+        conn2 = sqlite3.connect(replacement)
+        conn2.execute("CREATE TABLE marker(name TEXT)")
+        conn2.execute("INSERT INTO marker(name) VALUES ('new')")
+        conn2.commit()
+        conn2.close()
+        for suffix in ("-wal", "-shm"):
+            stale = pathlib.Path(f"{db_path}{suffix}")
+            if stale.exists():
+                stale.unlink()
+        os.replace(replacement, db_path)
+
+        conn3 = engine.connect()
+        value = conn3.execute("SELECT name FROM marker LIMIT 1").fetchone()[0]
+        return {
+            "reconnected": conn1 is not conn3,
+            "marker": value,
+        }
+
+
 def _run_memory_hybrid(repo_root, scenario):
     state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
     with tempfile.TemporaryDirectory() as tmp:
@@ -2761,6 +2843,33 @@ def _run_runner_version_budgets(repo_root, scenario_dir, scenario):
         "token_usage": int(scenario.get("reported_token_usage") or 0),
         "marker": "ok",
     }
+
+
+def _run_runner_summary(repo_root, scenario_dir, scenario):
+    with tempfile.TemporaryDirectory() as tmp:
+        runs_root = pathlib.Path(tmp)
+        samples = [
+            ("20260101T000000Z", "59-wal-growth-no-checkpoint", "wal_growth_stalls", True),
+            ("20260101T000001Z", "62-council-verdict-json-malformed", "council_malformed", False),
+            ("20260101T000002Z", "44-telegram-command-surface", "telegram_surface", True),
+            ("20260101T000003Z", "runner-r3-version-and-budgets", "runner_version_budgets", True),
+        ]
+        for stamp, name, kind, passed in samples:
+            root = runs_root / stamp / name
+            root.mkdir(parents=True, exist_ok=True)
+            _write_json(root / "scenario.json", {"kind": kind, "scenario_version": 1})
+            _write_json(root / "expected.json", {})
+            _write_json(root / "actual.json", {})
+            _write_json(root / "result.json", {"passed": passed, "scenario_kind": kind})
+        out = summarize_runs(repo_root, runs_dir=runs_root)
+        return {
+            "total_scenarios": out["total"]["scenarios"],
+            "total_passed": out["total"]["passed"],
+            "state_engine_pass_rate": out["clusters"]["state-engine"]["pass_rate"],
+            "self_repair_failed": out["clusters"]["self-repair"]["failed"],
+            "wave_c_passed": out["clusters"]["wave-c"]["passed"],
+            "runner_passed": out["clusters"]["runner"]["passed"],
+        }
 
 
 def _run_self_repair_observation(repo_root, scenario):
@@ -3036,8 +3145,13 @@ def _run_untrusted_skill_refusal(repo_root, scenario):
 
 
 def main(argv):
-    if len(argv) != 2:
-        raise SystemExit("usage: harness/run_scenario.py <scenario-dir>")
+    if len(argv) < 2 or len(argv) > 3:
+        raise SystemExit("usage: harness/run_scenario.py <scenario-dir> | summary [runs-dir]")
+    if argv[1] == "summary":
+        repo_root = pathlib.Path(__file__).resolve().parents[1]
+        out = summarize_runs(repo_root, runs_dir=argv[2] if len(argv) == 3 else None)
+        print(json.dumps(out, indent=2, sort_keys=True))
+        return
     scenario_dir = pathlib.Path(argv[1]).resolve()
     scenario = _normalize_scenario_contract(json.loads((scenario_dir / "scenario.yaml").read_text()))
     expected = json.loads((scenario_dir / "expected.json").read_text())
@@ -3141,6 +3255,8 @@ def main(argv):
         actual = _run_skill_prompt_injection(repo_root, scenario)
     elif kind == "council_deleted_task_ref":
         actual = _run_council_deleted_task_ref(repo_root, scenario)
+    elif kind == "state_engine_reconnect_after_replace":
+        actual = _run_state_engine_reconnect_after_replace(repo_root, scenario)
     elif kind == "memory_hybrid_rrf":
         actual = _run_memory_hybrid(repo_root, scenario)
     elif kind == "memory_vec_missing_fallback":
@@ -3151,6 +3267,8 @@ def main(argv):
         actual = _run_runner_trace_dirs(repo_root, scenario_dir, scenario)
     elif kind == "runner_version_budgets":
         actual = _run_runner_version_budgets(repo_root, scenario_dir, scenario)
+    elif kind == "runner_summary":
+        actual = _run_runner_summary(repo_root, scenario_dir, scenario)
     elif kind == "self_repair_observation":
         actual = _run_self_repair_observation(repo_root, scenario)
     elif kind == "telegram_surface":

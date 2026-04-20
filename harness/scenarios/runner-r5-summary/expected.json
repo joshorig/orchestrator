@@ -1,0 +1,8 @@
+{
+  "total_scenarios": 4,
+  "total_passed": 3,
+  "state_engine_pass_rate": 100.0,
+  "self_repair_failed": 1,
+  "wave_c_passed": 1,
+  "runner_passed": 1
+}
