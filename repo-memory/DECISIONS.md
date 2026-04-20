@@ -214,3 +214,13 @@ for interactive shells and optional `launchctl setenv GH_TOKEN ...` bootstrap.
   optionally `launchctl setenv GH_TOKEN "$GH_TOKEN"`.
 - PAT lifecycle management is now an operator concern, but the credential
   source is visible, documented, and shared across launchd and shell usage.
+
+## 2026-04-20 — Round-4 state wipe at 20260420T233432Z
+
+**Context:** All three Wave-A/B/C waves landed; harness passed through the round-4 P0/P1/P2 floor; state engine had been in primary mode long enough to justify a clean observation-window baseline. The DB still carried the historical residue of earlier audit rounds, including superseded self-repair planners, old transitions, cost rows, and mirrored runtime logs that would have made the 7-day observation window hard to interpret.
+
+**Decision:** Wiped task state (`tasks`, `task_transitions`, `features`, `feature_children`, `self_repair_issues`, `self_repair_deliberations`, `artifacts`, `events`, `metrics`, `task_costs`, aux runtime logs), then cleared the filesystem queue/features/runtime mirrors. Preserved `schema_migrations`, `blocker_codes`, `memory_observations` + FTS + vec, `allowlist.json`, trusted skills/config, and audit history. Added round-4 observation telemetry for trusted-skill context usage and token-savior usage before opening the window.
+
+**Rollback:** Archive at `archive/round4-pre-wipe-20260420T233432Z/` contains `orchestrator.db.snapshot`, `fs-mirror.tar.gz`, and JSON exports for key tables. Git tag `pre-wipe-round-4-20260420T233432Z` marks the canonical pre-wipe commit. Restore path is the runbook restore procedure via snapshot + mirror.
+
+**Consequences:** The first post-wipe planner tick starts from zero operational history, but the planner/reviewer memory surface retains accumulated DECISIONS / FAILURES / RECENT_WORK knowledge. Day 1 of round-4 runs in reduced-concurrency mode (2 codex slots, 2 full projects, TRP canary-only) so any regressions are attributable and cheap to diagnose.
