@@ -74,6 +74,8 @@
       padding: 16px;
       backdrop-filter: blur(12px);
       box-shadow: 0 20px 60px rgba(2, 6, 23, 0.28);
+      min-width: 0;
+      overflow: hidden;
     }
     .title-row {
       display: flex;
@@ -214,9 +216,11 @@
     }
     .layout {
       display: grid;
-      grid-template-columns: 280px minmax(0, 1fr) 330px;
+      grid-template-columns: 236px minmax(0, 1.08fr) 296px;
       gap: 16px;
+      align-items: start;
     }
+    .layout > * { min-width: 0; }
     .section-head {
       display: flex;
       justify-content: space-between;
@@ -231,7 +235,13 @@
       color: var(--muted);
     }
     .section-sub { font-size: 11px; color: var(--dim); }
-    .stack { display: grid; gap: 16px; }
+    .stack {
+      display: grid;
+      gap: 16px;
+      min-width: 0;
+      align-content: start;
+    }
+    .stack > * { min-width: 0; }
     .agent-list, .feature-list, .mini-list { display: grid; gap: 10px; }
     .agent-row, .mini-row, .task-row, .event-row {
       border: 1px solid var(--border);
@@ -308,8 +318,14 @@
       gap: 8px;
       align-items: baseline;
       margin-bottom: 4px;
+      min-width: 0;
     }
-    .row-title { font-weight: 700; color: var(--text); }
+    .row-title {
+      font-weight: 700;
+      color: var(--text);
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
     .row-meta, .countdown { font-size: 11px; }
     .row-meta { color: var(--dim); }
     .countdown { color: var(--amber); font-weight: 700; font-variant-numeric: tabular-nums; }
@@ -318,12 +334,14 @@
       grid-template-columns: 1fr;
       gap: 8px;
       margin-top: 10px;
+      min-width: 0;
     }
     .cost-hero {
       display: grid;
       grid-template-columns: 1fr;
       gap: 8px;
       margin-top: 10px;
+      min-width: 0;
     }
     .cost-stat-grid {
       display: grid;
@@ -374,11 +392,14 @@
       align-items: center;
       color: var(--muted);
       font-size: 11px;
+      min-width: 0;
     }
     .legend-name {
       display: inline-flex;
       align-items: center;
       gap: 6px;
+      min-width: 0;
+      overflow-wrap: anywhere;
     }
     .legend-dot {
       width: 8px;
@@ -388,6 +409,7 @@
     .cost-table {
       width: 100%;
       border-collapse: collapse;
+      table-layout: fixed;
       font-size: 11px;
     }
     .cost-table th, .cost-table td {
@@ -661,6 +683,7 @@
     .env-table, .skill-table, .harness-table, .selfrepair-table {
       width: 100%;
       border-collapse: collapse;
+      table-layout: fixed;
       font-size: 11px;
     }
     .env-table th, .env-table td,
@@ -671,6 +694,7 @@
       border-bottom: 1px solid var(--border);
       text-align: left;
       font-variant-numeric: tabular-nums;
+      overflow-wrap: anywhere;
     }
     .env-table th, .skill-table th, .harness-table th, .selfrepair-table th {
       color: var(--dim);
