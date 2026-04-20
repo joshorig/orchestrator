@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -23,6 +23,24 @@
       --orange: #fb923c;
       --rose: #fb7185;
       --violet: #a78bfa;
+      --slate: #64748b;
+    }
+    :root[data-theme="light"] {
+      --bg: #f8fafc;
+      --bg-2: #eef2ff;
+      --surface: rgba(255, 255, 255, 0.94);
+      --surface-2: rgba(248, 250, 252, 0.88);
+      --border: #dbe4f0;
+      --border-strong: #c0d0e1;
+      --text: #0f172a;
+      --muted: #475569;
+      --dim: #94a3b8;
+      --cyan: #0891b2;
+      --emerald: #059669;
+      --amber: #d97706;
+      --orange: #ea580c;
+      --rose: #e11d48;
+      --violet: #7c3aed;
       --slate: #64748b;
     }
     body {
@@ -136,6 +154,12 @@
       gap: 10px;
       align-items: stretch;
     }
+    .header-actions-right {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-left: auto;
+    }
     .fs-badge,
     .top-toggle {
       min-width: 160px;
@@ -164,6 +188,7 @@
       box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.3) inset;
       background: rgba(34, 211, 238, 0.08);
     }
+    .top-toggle.slim { min-width: 72px; text-align: center; }
     .fs-badge .lbl, .top-toggle .lbl {
       display: block;
       font-size: 10px;
@@ -621,6 +646,109 @@
       font-variant-numeric: tabular-nums;
     }
     .blocker-card.warn .count { color: var(--amber); }
+    .env-table, .skill-table, .harness-table, .selfrepair-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+    }
+    .env-table th, .env-table td,
+    .skill-table th, .skill-table td,
+    .harness-table th, .harness-table td,
+    .selfrepair-table th, .selfrepair-table td {
+      padding: 5px 4px;
+      border-bottom: 1px solid var(--border);
+      text-align: left;
+      font-variant-numeric: tabular-nums;
+    }
+    .env-table th, .skill-table th, .harness-table th, .selfrepair-table th {
+      color: var(--dim);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 10px;
+      font-weight: 500;
+    }
+    .env-check { text-align: center; font-weight: 700; }
+    .env-check.ok { color: var(--emerald); }
+    .env-check.warn { color: var(--amber); }
+    .env-check.crit { color: var(--rose); }
+    .selfrepair-summary {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .selfrepair-stat, .harness-stat {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 12px;
+      background: rgba(15, 23, 42, 0.34);
+    }
+    .selfrepair-stat .lbl, .harness-stat .lbl {
+      color: var(--dim);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 10px;
+      margin-bottom: 4px;
+    }
+    .selfrepair-stat .val, .harness-stat .val {
+      font-size: 18px;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+    }
+    .harness-summary-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .ticker {
+      display: grid;
+      gap: 8px;
+      max-height: 280px;
+      overflow: auto;
+    }
+    .ticker-row {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 12px;
+      background: rgba(15, 23, 42, 0.34);
+    }
+    .ticker-row.failed { border-color: rgba(251, 113, 133, 0.45); }
+    .help-overlay {
+      position: fixed;
+      top: 16px;
+      right: 16px;
+      z-index: 70;
+      display: none;
+      width: 320px;
+      background: var(--surface);
+      border: 1px solid var(--border-strong);
+      border-radius: 16px;
+      padding: 16px;
+      box-shadow: 0 30px 80px rgba(2, 6, 23, 0.35);
+    }
+    .help-overlay.open { display: block; }
+    .help-overlay h3 {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+    .help-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 4px 0;
+      font-size: 11px;
+    }
+    .help-kbd {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1px 8px;
+      color: var(--cyan);
+      background: var(--surface-2);
+    }
     .empty {
       color: var(--dim);
       font-style: italic;
@@ -777,6 +905,16 @@
           <span class="val">off</span>
           <span class="sub">7-day round-4 focus</span>
         </button>
+        <div class="header-actions-right">
+          <button class="top-toggle slim" id="themeToggle" type="button" onclick="toggleTheme()">
+            <span class="lbl">Theme</span>
+            <span class="val" id="themeIcon">☀</span>
+          </button>
+          <button class="top-toggle slim" id="helpToggle" type="button" onclick="toggleHelp()">
+            <span class="lbl">Help</span>
+            <span class="val">?</span>
+          </button>
+        </div>
       </div>
     </div>
     <div class="scorecards" id="scorecards"></div>
@@ -883,6 +1021,15 @@
   <div class="modal-scrim" id="modalScrim" onclick="if (event.target.id === 'modalScrim') closeTaskModal()">
     <div class="modal" id="taskModal"></div>
   </div>
+  <div class="help-overlay" id="helpOverlay">
+    <h3>Keyboard Shortcuts</h3>
+    <div class="help-row"><span>toggle help</span><span class="help-kbd">?</span></div>
+    <div class="help-row"><span>toggle theme</span><span class="help-kbd">T</span></div>
+    <div class="help-row"><span>toggle 7-day mode</span><span class="help-kbd">O</span></div>
+    <div class="help-row"><span>manual refresh</span><span class="help-kbd">R</span></div>
+    <div class="help-row"><span>clear filters</span><span class="help-kbd">X</span></div>
+    <div class="help-row"><span>close modal/help</span><span class="help-kbd">Esc</span></div>
+  </div>
 
   <script>
     const DASHBOARD_API_URL = "/api/dashboard";
@@ -916,6 +1063,7 @@
     let reconnectTimer = null;
     let pollingTimer = null;
     const FEATURE_SECTION_STATE = {};
+    let CURRENT_THEME = "dark";
 
     function esc(value) {
       return String(value ?? "").replace(/[&<>"]/g, ch => ({
@@ -996,6 +1144,16 @@
       render(latestData);
     }
 
+    function toggleTheme() {
+      CURRENT_THEME = CURRENT_THEME === "dark" ? "light" : "dark";
+      document.documentElement.setAttribute("data-theme", CURRENT_THEME);
+      document.getElementById("themeIcon").textContent = CURRENT_THEME === "dark" ? "☀" : "☾";
+    }
+
+    function toggleHelp() {
+      document.getElementById("helpOverlay").classList.toggle("open");
+    }
+
     function clearFilter(key) {
       FILTERS[key] = null;
       render(latestData);
@@ -1009,6 +1167,22 @@
       btn.querySelector(".sub").textContent = OBS_MODE ? "showing NEW-6 windows inline" : "7-day round-4 focus";
       render(latestData);
     }
+
+    document.addEventListener("keydown", (event) => {
+      if (event.target && ["INPUT", "TEXTAREA"].includes(event.target.tagName)) return;
+      if (event.key === "?") toggleHelp();
+      if (event.key === "t" || event.key === "T") toggleTheme();
+      if (event.key === "o" || event.key === "O") toggleObservationMode();
+      if (event.key === "r" || event.key === "R") refresh().catch(() => {});
+      if (event.key === "x" || event.key === "X") {
+        Object.keys(FILTERS).forEach((key) => { FILTERS[key] = null; });
+        render(latestData);
+      }
+      if (event.key === "Escape") {
+        closeTaskModal();
+        document.getElementById("helpOverlay").classList.remove("open");
+      }
+    });
 
     function renderFilters() {
       const rows = activeFilters();
@@ -1342,15 +1516,27 @@
 
     function renderMemorySurface(data) {
       const rows = (data.memory_observations || {}).by_project || [];
-      document.getElementById("memorySurface").innerHTML = rows.length ? rows.map(row => `
-        <div class="memory-row" onclick="setFilter('project','${escAttr(row.project)}')">
-          <div class="row-head">
-            <span class="row-title">${esc(row.project)}</span>
-            <span class="row-meta">${esc(row.count)} observations</span>
-          </div>
-          <div class="tiny">latest ${esc(formatTs(row.latest_at))}</div>
+      const totalCount = (data.memory_observations || {}).total_count || 0;
+      const now = Date.now();
+      document.getElementById("memorySurface").innerHTML = rows.length ? `
+        <div class="mini-row">
+          <div class="mini-top"><strong>Total observations</strong><span class="tiny">${esc(totalCount)} rows</span></div>
         </div>
-      `).join("") : `<div class="empty">No memory observations recorded.</div>`;
+        ${rows.map(row => {
+          const ageDays = row.latest_at ? Math.max(0, Math.floor((now - Date.parse(row.latest_at)) / 86400000)) : null;
+          const ageClass = ageDays == null ? "" : ageDays <= 3 ? "ok" : ageDays <= 7 ? "warn" : "crit";
+          return `
+            <div class="memory-row" onclick="setFilter('project','${escAttr(row.project)}')">
+              <div class="row-head">
+                <span class="row-title">${esc(row.project)}</span>
+                <span class="row-meta">${esc(row.count)} observations</span>
+              </div>
+              <div class="tiny">latest ${esc(formatTs(row.latest_at))}</div>
+              <div class="tiny ${ageClass}">${ageDays == null ? "unknown age" : `${ageDays}d stale`}</div>
+            </div>
+          `;
+        }).join("")}
+      ` : `<div class="empty">No memory observations recorded.</div>`;
     }
 
     function renderEnvironmentPanel(data) {
@@ -1363,13 +1549,21 @@
           <div class="mini-detail">${esc(env.integrity_check || "-")}</div>
           <div class="tiny">${esc((data.dashboard_server || {}).state_engine?.db_path || "")}</div>
         </div>
-        ${projects.map(row => `
-          <div class="mini-row">
-            <div class="mini-top"><strong>${esc(row.project || "global")}</strong><span class="state-chip state-${esc(row.result === "ok" ? "done" : "blocked")}">${esc(row.result || "-")}</span></div>
-            <div class="mini-detail">${esc(row.blocker_summary || "no blockers")}</div>
-            <div class="tiny">${esc(formatTs(row.checked_at))}</div>
-          </div>
-        `).join("") || `<div class="empty">No environment audit rows yet.</div>`}
+        ${projects.length ? `
+          <table class="env-table">
+            <thead><tr><th>project</th><th>status</th><th>checked</th></tr></thead>
+            <tbody>
+              ${projects.map(row => `
+                <tr>
+                  <td>${esc(row.project || "global")}</td>
+                  <td class="env-check ${row.result === "ok" ? "ok" : "warn"}">${row.result === "ok" ? "✓ ok" : esc(row.result || "-")}</td>
+                  <td>${esc(formatTs(row.checked_at))}</td>
+                </tr>
+                ${row.blocker_summary ? `<tr><td colspan="3" class="tiny">${esc(row.blocker_summary)}</td></tr>` : ""}
+              `).join("")}
+            </tbody>
+          </table>
+        ` : `<div class="empty">No environment audit rows yet.</div>`}
         ${migrations.length ? `<div class="section-title" style="margin-top:12px">Migrations</div>` : ""}
         ${migrations.map(name => `
           <div class="mini-row">
@@ -1387,32 +1581,35 @@
       });
       const activeObs = (data.observation_window || {}).issues || [];
       document.getElementById("selfRepairPanel").innerHTML = `
-        <div class="review-grid">
-          <div class="review-stat"><div class="lbl">issues</div><div class="val">${esc(issues.length)}</div></div>
-          <div class="review-stat"><div class="lbl">observation windows</div><div class="val">${esc((data.observation_window || {}).active_count || 0)}</div></div>
-          <div class="review-stat"><div class="lbl">blocked frontiers</div><div class="val">${esc((data.heartbeat || {}).blocked_frontiers || 0)}</div></div>
-          <div class="review-stat"><div class="lbl">escalated</div><div class="val">${esc((data.heartbeat || {}).escalated_issues || 0)}</div></div>
+        <div class="selfrepair-summary">
+          <div class="selfrepair-stat"><div class="lbl">issues</div><div class="val">${esc(issues.length)}</div></div>
+          <div class="selfrepair-stat"><div class="lbl">observation windows</div><div class="val">${esc((data.observation_window || {}).active_count || 0)}</div></div>
+          <div class="selfrepair-stat"><div class="lbl">blocked frontiers</div><div class="val">${esc((data.heartbeat || {}).blocked_frontiers || 0)}</div></div>
+          <div class="selfrepair-stat"><div class="lbl">escalated</div><div class="val">${esc((data.heartbeat || {}).escalated_issues || 0)}</div></div>
         </div>
-        <div class="observation-list">
-          ${issues.slice(0, 8).map(issue => `
-            <div class="observation-row">
-              <div class="row-head">
-                <span class="row-title">${esc(issue.feature_id || "-")}</span>
-                <span class="state-chip state-${esc(issue.status || "queued")}">${esc(issue.status || "-")}</span>
-              </div>
-              <div class="mini-detail">${esc(issue.issue_key || issue.kind || "-")}</div>
-              <div class="tiny">${esc(issue.project || "-")}${issue.planner_task_id ? ` · planner ${esc(issue.planner_task_id)}` : ""}${issue.last_deliberation_stage ? ` · ${esc(issue.last_deliberation_stage)}` : ""}</div>
-            </div>
-          `).join("") || `<div class="empty">No self-repair issues open.</div>`}
-          ${activeObs.length ? `<div class="section-title" style="margin-top:12px">Observation countdowns</div>` : ""}
-          ${activeObs.map(row => `
-            <div class="observation-row">
-              <div class="row-head"><span class="row-title">${esc(row.feature_id || "-")}</span><span class="countdown">${esc(formatRemaining(row.remaining_seconds))}</span></div>
-              <div class="mini-detail">${esc(row.blocker_code || "-")} · ${esc(row.task_id || "-")}</div>
-              <div class="tiny">due ${esc(formatTs(row.observation_due_at))}</div>
-            </div>
-          `).join("")}
-        </div>
+        ${issues.length ? `
+          <table class="selfrepair-table">
+            <thead><tr><th>feature</th><th>status</th><th>issue</th><th>project</th></tr></thead>
+            <tbody>
+              ${issues.slice(0, 8).map(issue => `
+                <tr>
+                  <td>${esc(issue.feature_id || "-")}</td>
+                  <td><span class="state-chip state-${esc(issue.status || "queued")}">${esc(issue.status || "-")}</span></td>
+                  <td>${esc(issue.issue_key || issue.kind || "-")}</td>
+                  <td>${esc(issue.project || "-")}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        ` : `<div class="empty">No self-repair issues open.</div>`}
+        ${activeObs.length ? `<div class="section-title" style="margin-top:12px">Observation countdowns</div>` : ""}
+        ${activeObs.map(row => `
+          <div class="observation-row">
+            <div class="row-head"><span class="row-title">${esc(row.feature_id || "-")}</span><span class="countdown">${esc(formatRemaining(row.remaining_seconds))}</span></div>
+            <div class="mini-detail">${esc(row.blocker_code || "-")} · ${esc(row.task_id || "-")}</div>
+            <div class="tiny">due ${esc(formatTs(row.observation_due_at))}</div>
+          </div>
+        `).join("")}
       `;
     }
 
@@ -1425,13 +1622,21 @@
           <div class="mini-detail">latest agent-scan: high ${esc(latestScan.high || 0)} · medium ${esc(latestScan.medium || 0)} · low ${esc(latestScan.low || 0)}</div>
           <div class="tiny">${esc(formatTs((data.skills || {}).latest_scan_at))}</div>
         </div>
-        ${skills.map(row => `
-          <div class="mini-row">
-            <div class="mini-top"><strong>${esc(row.name || "-")}</strong><span class="tiny">${esc(row.scan_status || "unknown")}</span></div>
-            <div class="mini-detail">${esc(row.source || "-")}</div>
-            <div class="tiny">${esc((row.sha || "").slice(0, 12))}${row.upstream_path ? ` · ${esc(row.upstream_path)}` : ""}</div>
-          </div>
-        `).join("") || `<div class="empty">No trusted skills configured.</div>`}
+        ${skills.length ? `
+          <table class="skill-table">
+            <thead><tr><th>skill</th><th>status</th><th>source</th></tr></thead>
+            <tbody>
+              ${skills.map(row => `
+                <tr>
+                  <td>${esc(row.name || "-")}</td>
+                  <td>${esc(row.scan_status || "unknown")}</td>
+                  <td>${esc((row.source || "").replace("github:", ""))}</td>
+                </tr>
+                <tr><td colspan="3" class="tiny">${esc((row.sha || "").slice(0, 12))}${row.upstream_path ? ` · ${esc(row.upstream_path)}` : ""}</td></tr>
+              `).join("")}
+            </tbody>
+          </table>
+        ` : `<div class="empty">No trusted skills configured.</div>`}
       `;
     }
 
@@ -1439,40 +1644,65 @@
       const harness = data.harness || {};
       const total = harness.summary || {};
       const clusters = harness.clusters || {};
-      const clusterRows = Object.entries(clusters).map(([name, row]) => `
-        <div class="mini-row">
-          <div class="mini-top"><strong>${esc(name)}</strong><span class="tiny">${esc(row.scenarios || 0)} scenarios</span></div>
-          <div class="mini-detail">${esc(row.passed || 0)} passed · ${esc(row.failed || 0)} failed</div>
-          <div class="tiny">${esc(row.pass_rate || 0)}% pass rate</div>
-        </div>
-      `).join("");
-      const recentRows = (harness.recent || []).map(row => `
-        <div class="mini-row">
-          <div class="mini-top"><strong>${esc(row.scenario || "-")}</strong><span class="state-chip state-${row.passed ? "done" : "failed"}">${row.passed ? "pass" : "fail"}</span></div>
-          <div class="mini-detail">${esc((row.wall_time_seconds || 0).toFixed ? row.wall_time_seconds.toFixed(2) : row.wall_time_seconds)}s</div>
-          <div class="tiny">${esc(formatTs(row.timestamp))}</div>
-        </div>
-      `).join("");
       document.getElementById("harnessPanel").innerHTML = `
-        <div class="mini-row">
-          <div class="mini-top"><strong>Scenario coverage</strong><span class="tiny">${esc(harness.total_scenarios || 0)} total</span></div>
-          <div class="mini-detail">${esc(total.passed || 0)} passed · ${esc(total.failed || 0)} failed</div>
-          <div class="tiny">${esc(total.pass_rate || 0)}% pass rate</div>
+        <div class="harness-summary-grid">
+          <div class="harness-stat"><div class="lbl">scenarios</div><div class="val">${esc(harness.total_scenarios || 0)}</div></div>
+          <div class="harness-stat"><div class="lbl">passed</div><div class="val">${esc(total.passed || 0)}</div></div>
+          <div class="harness-stat"><div class="lbl">pass rate</div><div class="val">${esc(total.pass_rate || 0)}%</div></div>
         </div>
-        ${clusterRows}
-        ${recentRows || `<div class="empty">No recent harness traces found.</div>`}
+        ${Object.keys(clusters).length ? `
+          <table class="harness-table">
+            <thead><tr><th>cluster</th><th>scenarios</th><th>passed</th><th>failed</th><th>rate</th></tr></thead>
+            <tbody>
+              ${Object.entries(clusters).map(([name, row]) => `
+                <tr>
+                  <td>${esc(name)}</td>
+                  <td>${esc(row.scenarios || 0)}</td>
+                  <td>${esc(row.passed || 0)}</td>
+                  <td>${esc(row.failed || 0)}</td>
+                  <td>${esc(row.pass_rate || 0)}%</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        ` : `
+          <div class="mini-row">
+            <div class="mini-top"><strong>Scenario coverage</strong><span class="tiny">${esc(harness.total_scenarios || 0)} total</span></div>
+            <div class="mini-detail">${esc(total.passed || 0)} passed · ${esc(total.failed || 0)} failed</div>
+            <div class="tiny">${esc(total.pass_rate || 0)}% pass rate</div>
+          </div>
+        `}
+        ${(harness.recent || []).length ? `
+          <table class="harness-table" style="margin-top:10px">
+            <thead><tr><th>scenario</th><th>verdict</th><th>elapsed</th><th>when</th></tr></thead>
+            <tbody>
+              ${(harness.recent || []).map(row => `
+                <tr>
+                  <td>${esc(row.scenario || "-")}</td>
+                  <td>${row.passed ? "pass" : "fail"}</td>
+                  <td>${esc((row.wall_time_seconds || 0).toFixed ? row.wall_time_seconds.toFixed(2) : row.wall_time_seconds)}s</td>
+                  <td>${esc(formatTs(row.timestamp))}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        ` : `<div class="empty">No recent harness traces found.</div>`}
       `;
     }
 
     function renderTelegramTicker(data) {
       const rows = data.telegram_log || [];
-      document.getElementById("telegramTicker").innerHTML = rows.length ? rows.map(row => `
-        <div class="mini-row">
-          <div class="mini-top"><strong>${esc(row.kind || "-")}</strong><span class="tiny">${esc(formatTs(row.ts))}</span></div>
-          <div class="mini-detail">${esc(row.cmd || "-")}</div>
-          <div class="tiny">${esc(row.result || "")}</div>
+      document.getElementById("telegramTicker").innerHTML = rows.length ? `
+        <div class="ticker">
+          ${rows.map(row => `
+            <div class="ticker-row ${String(row.result || "").startsWith("✗") ? "failed" : ""}">
+              <div class="mini-top"><strong>${esc(row.kind || "-")}</strong><span class="tiny">${esc(formatTs(row.ts))}</span></div>
+              <div class="mini-detail">${esc(row.cmd || "-")}</div>
+              <div class="tiny">${esc(row.result || "")}</div>
+            </div>
+          `).join("")}
         </div>
-      `).join("") : `<div class="empty">No telegram command or push rows captured.</div>`;
+      ` : `<div class="empty">No telegram command or push rows captured.</div>`;
     }
 
     function indexTasks(data) {
