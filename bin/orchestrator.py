@@ -11854,6 +11854,28 @@ def dispatch_telegram_command(text):
         if verb == "approve" and target_id.startswith("feature-"):
             tick_self_repair_queue()
             return f"{target_id}: self-repair queue ticked"
+        if verb == "abandon" and target_id.startswith("feature-"):
+            feature = read_feature(target_id)
+            if not feature:
+                return f"target not found: {target_id}"
+            old_status = feature.get("status") or "open"
+            update_feature(
+                target_id,
+                lambda f: f.update(
+                    {
+                        "status": "abandoned",
+                        "abandoned_at": now_iso(),
+                        "abandoned_reason": "telegram abandon",
+                    }
+                ),
+            )
+            append_transition(target_id, old_status, "abandoned", "telegram abandon")
+            append_event(
+                "telegram",
+                "feature_abandoned",
+                details={"feature_id": target_id, "reason": "telegram abandon"},
+            )
+            return f"{target_id}: {old_status} -> abandoned"
         if not found:
             return f"target not found: {target_id}"
         state, task = found

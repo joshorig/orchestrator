@@ -172,6 +172,7 @@ def build_handlers(cfg):
             action_row.append(("Abandon", f"action:{frontier}:abandon"))
         if action_row:
             rows.append(action_row)
+        rows.append([("Abandon feature", f"action:{fid}:abandon")])
         for task_id, state in list((feature.get("child_states") or {}).items())[:4]:
             label = f"{task_id[-6:]} {state}"
             rows.append([(label[:32], f"task:{task_id}")])
@@ -230,6 +231,42 @@ def build_handlers(cfg):
                 lines.append(
                     f"  {(evt.get('ts') or '')[11:16]} {evt.get('role') or '-'}:{evt.get('event') or '-'}"
                 )
+        return "\n".join(lines)
+
+    def feature_alert_text(feature):
+        frontier = feature.get("frontier") or {}
+        blocker = frontier.get("blocker") or {}
+        task_id = frontier.get("task_id")
+        lines = [
+            feature.get("feature_id") or "feature",
+            f"project: {feature.get('project') or '-'}",
+            f"frontier: {frontier.get('state') or '-'} {task_id or '-'}",
+        ]
+        if frontier.get("age_text"):
+            lines.append(f"age: {frontier.get('age_text')}")
+        if blocker.get("code"):
+            lines.append(f"blocker: {blocker.get('code')}")
+        evidence = []
+        if blocker.get("summary"):
+            evidence.append(blocker.get("summary"))
+        if blocker.get("detail"):
+            evidence.append(blocker.get("detail"))
+        review = None
+        if task_id:
+            found = o.find_task(task_id)
+            task = found[1] if found else {}
+            if (task or {}).get("reviewed_by"):
+                review = f"reviewer={task.get('reviewed_by')}"
+            unresolved = int(((feature.get("delivery") or {}).get("final_pr_sweep") or {}).get("unresolved_bot_threads") or 0)
+            if unresolved:
+                evidence.append(f"unresolved bot threads: {unresolved}")
+            findings = list((task or {}).get("policy_review_findings") or [])[:2]
+            if findings:
+                evidence.extend(findings)
+        if review:
+            evidence.append(review)
+        if evidence:
+            lines.append(f"evidence: {' | '.join(str(item) for item in evidence[:3])}")
         return "\n".join(lines)
 
     def task_action_rows(task_id):
@@ -314,6 +351,28 @@ def build_handlers(cfg):
         if verb == "approve" and target_id.startswith("feature-"):
             o.tick_self_repair_queue()
             return f"{target_id}: self-repair queue ticked"
+        if verb == "abandon" and target_id.startswith("feature-"):
+            feature = o.read_feature(target_id)
+            if not feature:
+                return f"target not found: {target_id}"
+            old_status = feature.get("status") or "open"
+            o.update_feature(
+                target_id,
+                lambda f: f.update(
+                    {
+                        "status": "abandoned",
+                        "abandoned_at": o.now_iso(),
+                        "abandoned_reason": "telegram abandon",
+                    }
+                ),
+            )
+            o.append_transition(target_id, old_status, "abandoned", "telegram abandon")
+            o.append_event(
+                "telegram",
+                "feature_abandoned",
+                details={"feature_id": target_id, "reason": "telegram abandon"},
+            )
+            return f"{target_id}: {old_status} -> abandoned"
         if not found:
             return f"target not found: {target_id}"
         state, task = found
@@ -446,7 +505,7 @@ def build_handlers(cfg):
                 if o.should_push_alert(key, 1800):
                     await send_or_reply(
                         None,
-                        block("⚠️", "feature", o.features_brief(wf.get("project"))),
+                        block("⚠️", "feature blocked", feature_alert_text(wf)),
                         buttons=feature_buttons(wf),
                     )
         for path in sorted(o.REPORT_DIR.glob("workflow-check_*.md"))[-3:]:

@@ -8,6 +8,7 @@ import os
 import pathlib
 import sys
 import datetime as dt
+from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import orchestrator as o  # noqa: E402
@@ -27,6 +28,13 @@ def _state_engine():
     engine = o.get_state_engine(cfg=cfg)
     engine.initialize()
     return engine
+
+
+def _conn():
+    engine = _state_engine()
+    if not engine:
+        return None, None
+    return engine, engine.connect()
 
 
 def _read_task_log(task_id, *, tail_lines=80, max_chars=12000):
@@ -58,6 +66,7 @@ def _task_snapshot(task_id, state, task):
         "source": task.get("source"),
         "attempt": _safe_int(task.get("attempt"), 1),
         "base_branch": task.get("base_branch"),
+        "braid_template": task.get("braid_template"),
         "created_at": task.get("created_at"),
         "claimed_at": task.get("claimed_at"),
         "started_at": task.get("started_at"),
@@ -166,6 +175,7 @@ def _queue():
 
 
 def _features():
+    engine = _state_engine()
     rows = []
     for wf in o.open_feature_workflow_summaries():
         feature = o.read_feature(wf.get("feature_id")) or {}
@@ -217,16 +227,50 @@ def _features():
                 "repair_history": wf.get("repair_history") or [],
                 "workflow_check": wf.get("workflow_check") or {},
                 "canary": wf.get("canary") or {},
+                "memory_observations": _project_memory_observations(engine, wf.get("project")),
                 "tasks": tasks,
                 "self_repair": {
                     "enabled": bool(self_repair.get("enabled")),
                     "status": (issues[0] if issues else {}).get("status") or self_repair.get("status"),
                     "issue_count": len(issues),
                     "issues": issues,
+                    "deliberations": [
+                        deliberation
+                        for issue in issues[:2]
+                        for deliberation in list(issue.get("deliberations") or [])[-3:]
+                    ][-6:],
                 },
             }
         )
     return rows
+
+
+def _project_memory_observations(engine, project):
+    if not engine or not project:
+        return {"count": 0, "latest": None}
+    count = engine.memory_count(project=project)
+    if count <= 0:
+        return {"count": 0, "latest": None}
+    latest = None
+    try:
+        rows = engine.connect().execute(
+            """
+            SELECT title, created_at
+              FROM memory_observations
+             WHERE project = ?
+             ORDER BY created_at_epoch DESC, id DESC
+             LIMIT 1
+            """,
+            (project,),
+        ).fetchall()
+        if rows:
+            latest = {
+                "title": rows[0]["title"],
+                "updated_at": rows[0]["created_at"],
+            }
+    except Exception:
+        latest = None
+    return {"count": count, "latest": latest}
 
 
 def _blocker_codes():
@@ -323,10 +367,104 @@ def _dashboard_server():
 
 
 def _task_costs():
-    engine = _state_engine()
-    if not engine:
-        return {"window_hours": 24, "summary": {}, "by_engine": [], "recent": []}
-    return engine.aggregate_task_costs(hours=24)
+    engine, conn = _conn()
+    if not engine or not conn:
+        return {
+            "window_hours": 24,
+            "summary": {},
+            "by_engine": [],
+            "by_project": [],
+            "by_template": [],
+            "recent": [],
+            "template_success": [],
+        }
+    payload = engine.aggregate_task_costs(hours=24, conn=conn)
+    since_epoch = int(dt.datetime.now(dt.timezone.utc).timestamp()) - 24 * 3600
+    project_rows = conn.execute(
+        """
+        SELECT
+            COALESCE(NULLIF(t.project, ''), 'unknown') AS project,
+            COUNT(*) AS rows_count,
+            COUNT(DISTINCT c.task_id) AS task_count,
+            COALESCE(SUM(c.cost_usd), 0.0) AS cost_usd
+          FROM task_costs AS c
+          LEFT JOIN tasks AS t ON t.task_id = c.task_id
+         WHERE c.ts_epoch >= ?
+         GROUP BY 1
+         ORDER BY cost_usd DESC, project ASC
+         LIMIT 8
+        """,
+        (since_epoch,),
+    ).fetchall()
+    template_rows = conn.execute(
+        """
+        SELECT
+            COALESCE(NULLIF(t.braid_template, ''), 'untemplated') AS braid_template,
+            COUNT(*) AS rows_count,
+            COUNT(DISTINCT c.task_id) AS task_count,
+            COALESCE(SUM(c.cost_usd), 0.0) AS cost_usd
+          FROM task_costs AS c
+          LEFT JOIN tasks AS t ON t.task_id = c.task_id
+         WHERE c.ts_epoch >= ?
+         GROUP BY 1
+         ORDER BY cost_usd DESC, braid_template ASC
+         LIMIT 8
+        """,
+        (since_epoch,),
+    ).fetchall()
+    template_success_rows = conn.execute(
+        """
+        SELECT
+            COALESCE(NULLIF(braid_template, ''), 'untemplated') AS braid_template,
+            COUNT(*) AS finished_count,
+            SUM(
+                CASE
+                    WHEN state = 'done'
+                     AND attempt = 1
+                     AND COALESCE(json_extract(metadata_json, '$.review_verdict'), '') = 'approve'
+                    THEN 1 ELSE 0
+                END
+            ) AS one_shot_successes
+          FROM tasks
+         WHERE finished_at_epoch IS NOT NULL
+           AND finished_at_epoch >= ?
+         GROUP BY 1
+         ORDER BY finished_count DESC, braid_template ASC
+         LIMIT 8
+        """,
+        (since_epoch,),
+    ).fetchall()
+    payload["by_project"] = [
+        {
+            "project": row["project"],
+            "rows_count": int(row["rows_count"] or 0),
+            "task_count": int(row["task_count"] or 0),
+            "cost_usd": float(row["cost_usd"] or 0.0),
+        }
+        for row in project_rows
+    ]
+    payload["by_template"] = [
+        {
+            "braid_template": row["braid_template"],
+            "rows_count": int(row["rows_count"] or 0),
+            "task_count": int(row["task_count"] or 0),
+            "cost_usd": float(row["cost_usd"] or 0.0),
+        }
+        for row in template_rows
+    ]
+    payload["template_success"] = [
+        {
+            "braid_template": row["braid_template"],
+            "finished_count": int(row["finished_count"] or 0),
+            "one_shot_successes": int(row["one_shot_successes"] or 0),
+            "one_shot_success_rate": round(
+                (int(row["one_shot_successes"] or 0) / max(int(row["finished_count"] or 0), 1)) * 100.0,
+                1,
+            ),
+        }
+        for row in template_success_rows
+    ]
+    return payload
 
 
 def _runtime_audit():
@@ -344,20 +482,163 @@ def _runtime_audit():
     }
 
 
+def _fs_fallback():
+    engine, conn = _conn()
+    if not engine or not conn:
+        return {"event_count": 0, "hours_since_last": None, "last_fallback_at": None, "streak_anchor_at": None}
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS event_count,
+            MAX(created_at_epoch) AS last_fallback_epoch,
+            MIN(created_at_epoch) AS first_fallback_epoch
+          FROM metrics
+         WHERE name = 'state_engine.fs_fallback'
+        """
+    ).fetchone()
+    any_metric = conn.execute("SELECT MIN(created_at_epoch) AS first_metric_epoch FROM metrics").fetchone()
+    now_epoch = int(dt.datetime.now(dt.timezone.utc).timestamp())
+    last_epoch = int(row["last_fallback_epoch"] or 0) if row else 0
+    anchor_epoch = last_epoch or int(any_metric["first_metric_epoch"] or 0) if any_metric else 0
+    hours_since_last = round((now_epoch - anchor_epoch) / 3600.0, 1) if anchor_epoch else None
+    return {
+        "event_count": int(row["event_count"] or 0) if row else 0,
+        "last_fallback_at": dt.datetime.fromtimestamp(last_epoch, tz=dt.timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds") if last_epoch else None,
+        "hours_since_last": hours_since_last,
+        "streak_anchor_at": dt.datetime.fromtimestamp(anchor_epoch, tz=dt.timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds") if anchor_epoch else None,
+    }
+
+
+def _review_gate_status(features):
+    tasks = [task for feature in features for task in feature.get("tasks") or []]
+    awaiting_review = sum(1 for task in tasks if task.get("state") == "awaiting-review")
+    request_change = sum(1 for task in tasks if task.get("review_verdict") == "request_change")
+    approve = sum(1 for task in tasks if task.get("review_verdict") == "approve")
+    thread_failures = sum(_safe_int(task.get("resolve_thread_failures"), 0) for task in tasks)
+    policy_findings = sum(len(task.get("policy_review_findings") or []) for task in tasks)
+    gate_counter = Counter()
+    recent = []
+    for task in tasks:
+        for gate in task.get("review_gates") or []:
+            gate_counter[gate] += 1
+        if task.get("review_verdict") or task.get("state") == "awaiting-review":
+            recent.append(task)
+    recent.sort(key=lambda task: str(task.get("reviewed_at") or task.get("started_at") or task.get("created_at") or ""), reverse=True)
+    return {
+        "awaiting_review": awaiting_review,
+        "request_change": request_change,
+        "approve": approve,
+        "thread_failures": thread_failures,
+        "policy_findings": policy_findings,
+        "top_gates": [{"gate": gate, "count": count} for gate, count in gate_counter.most_common(6)],
+        "recent": recent[:6],
+    }
+
+
+def _observation_window(features):
+    issues = []
+    for feature in features:
+        for issue in (feature.get("self_repair") or {}).get("issues") or []:
+            if not issue.get("observation_due_at"):
+                continue
+            due = issue.get("observation_due_at")
+            try:
+                due_dt = dt.datetime.fromisoformat(due.replace("Z", "+00:00"))
+                now_dt = dt.datetime.now(dt.timezone.utc)
+                remaining = int((due_dt - now_dt).total_seconds())
+            except Exception:
+                remaining = None
+            issues.append(
+                {
+                    "feature_id": feature.get("feature_id"),
+                    "issue_key": issue.get("issue_key"),
+                    "status": issue.get("status"),
+                    "observation_status": issue.get("observation_status"),
+                    "observation_due_at": due,
+                    "remaining_seconds": remaining,
+                    "task_id": ((issue.get("observation_target") or {}).get("task_id")),
+                    "blocker_code": ((issue.get("observation_target") or {}).get("blocker_code")),
+                }
+            )
+    issues.sort(key=lambda row: (row["remaining_seconds"] is None, row["remaining_seconds"] if row["remaining_seconds"] is not None else 10**12))
+    return {"active_count": len(issues), "issues": issues[:8]}
+
+
+def _memory_observations():
+    engine, conn = _conn()
+    if not engine or not conn:
+        return {"total_count": 0, "by_project": []}
+    rows = conn.execute(
+        """
+        SELECT
+            COALESCE(NULLIF(project, ''), 'unknown') AS project,
+            COUNT(*) AS obs_count,
+            MAX(created_at) AS latest_at
+          FROM memory_observations
+         GROUP BY 1
+         ORDER BY obs_count DESC, project ASC
+         LIMIT 8
+        """
+    ).fetchall()
+    total = engine.memory_count()
+    return {
+        "total_count": total,
+        "by_project": [
+            {
+                "project": row["project"],
+                "count": int(row["obs_count"] or 0),
+                "latest_at": row["latest_at"],
+            }
+            for row in rows
+        ],
+    }
+
+
+def _heartbeat(health, runtime_audit, fs_fallback, observation_window, features):
+    env_errors = _safe_int(health.get("environment_error_count"), 0)
+    escalated = 0
+    blocked = _safe_int(health.get("feature_frontier_blocked_count"), 0)
+    for feature in features:
+        for issue in (feature.get("self_repair") or {}).get("issues") or []:
+            if issue.get("status") == "escalated":
+                escalated += 1
+    return {
+        "fs_fallback_streak_hours": fs_fallback.get("hours_since_last"),
+        "fs_fallback_events": fs_fallback.get("event_count"),
+        "workflow_issues": _safe_int(health.get("workflow_check_issue_count"), 0),
+        "blocked_frontiers": blocked,
+        "escalated_issues": escalated,
+        "environment_errors": env_errors,
+        "orphan_recoveries_24h": len(runtime_audit.get("orphan_recoveries") or []),
+        "task_bypasses_24h": len(runtime_audit.get("task_bypasses") or []),
+        "observation_windows": observation_window.get("active_count", 0),
+    }
+
+
 def build_feed(*, emit_runtime_metrics=False):
     if emit_runtime_metrics:
         o.emit_runtime_metrics_snapshot(source="dashboard-feed")
+    health = _health()
+    features = _features()
+    runtime_audit = _runtime_audit()
+    fs_fallback = _fs_fallback()
+    observation_window = _observation_window(features)
     return {
         "timestamp": o.now_iso(),
-        "health": _health(),
+        "health": health,
         "agents": _agents(),
         "queue": _queue(),
-        "features": _features(),
+        "features": features,
         "blocker_codes": _blocker_codes(),
         "recent_transitions": _recent_transitions(),
         "claude_budget": _claude_budget(),
         "task_costs": _task_costs(),
-        "runtime_audit": _runtime_audit(),
+        "runtime_audit": runtime_audit,
+        "review_gates": _review_gate_status(features),
+        "fs_fallback": fs_fallback,
+        "memory_observations": _memory_observations(),
+        "observation_window": observation_window,
+        "heartbeat": _heartbeat(health, runtime_audit, fs_fallback, observation_window, features),
         "dashboard_server": _dashboard_server(),
     }
 

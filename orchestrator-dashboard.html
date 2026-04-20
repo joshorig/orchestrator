@@ -129,6 +129,61 @@
       font: inherit;
     }
     .filter-hint { color: var(--dim); font-size: 11px; }
+    .header-actions {
+      margin-top: 12px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: stretch;
+    }
+    .fs-badge,
+    .top-toggle {
+      min-width: 160px;
+      border-radius: 12px;
+      padding: 10px 12px;
+      cursor: pointer;
+      text-align: left;
+    }
+    .fs-badge {
+      border: 1px solid rgba(52, 211, 153, 0.4);
+      background: rgba(52, 211, 153, 0.08);
+      color: var(--emerald);
+    }
+    .fs-badge.warn {
+      border-color: rgba(251, 191, 36, 0.45);
+      background: rgba(251, 191, 36, 0.08);
+      color: var(--amber);
+    }
+    .top-toggle {
+      border: 1px solid var(--border);
+      background: var(--surface-2);
+      color: var(--text);
+    }
+    .top-toggle.active {
+      border-color: var(--cyan);
+      box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.3) inset;
+      background: rgba(34, 211, 238, 0.08);
+    }
+    .fs-badge .lbl, .top-toggle .lbl {
+      display: block;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      opacity: 0.78;
+    }
+    .fs-badge .val, .top-toggle .val {
+      display: block;
+      font-size: 17px;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      margin-top: 2px;
+    }
+    .fs-badge .sub, .top-toggle .sub {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      margin-top: 3px;
+    }
     .layout {
       display: grid;
       grid-template-columns: 280px minmax(0, 1fr) 330px;
@@ -157,6 +212,73 @@
       background: rgba(15, 23, 42, 0.45);
     }
     .agent-row.active { border-color: var(--cyan); }
+    .heartbeat-grid, .review-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .heartbeat-stat, .review-stat, .review-gate-row, .memory-row, .observation-row {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 12px;
+      background: rgba(15, 23, 42, 0.45);
+    }
+    .heartbeat-stat { border-left: 3px solid var(--border-strong); }
+    .heartbeat-stat.ok { border-left-color: var(--emerald); }
+    .heartbeat-stat.warn { border-left-color: var(--amber); }
+    .heartbeat-stat.crit { border-left-color: var(--rose); }
+    .heartbeat-stat .lbl, .review-stat .lbl {
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 10px;
+      margin-bottom: 4px;
+    }
+    .heartbeat-stat .val, .review-stat .val {
+      font-size: 18px;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+    }
+    .heartbeat-stat .sub { color: var(--dim); font-size: 11px; margin-top: 4px; }
+    .review-gates, .memory-list, .observation-list { display: grid; gap: 8px; }
+    .row-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: baseline;
+      margin-bottom: 4px;
+    }
+    .row-title { font-weight: 700; color: var(--text); }
+    .row-meta, .countdown { font-size: 11px; }
+    .row-meta { color: var(--dim); }
+    .countdown { color: var(--amber); font-weight: 700; font-variant-numeric: tabular-nums; }
+    .cost-breakdown {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .cost-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+    }
+    .cost-table th, .cost-table td {
+      padding: 4px 2px;
+      border-bottom: 1px solid var(--border);
+      text-align: left;
+      font-variant-numeric: tabular-nums;
+    }
+    .cost-table th {
+      color: var(--dim);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 10px;
+    }
+    .cost-table td:last-child, .cost-table th:last-child { text-align: right; }
+    .cost-table .pct.good { color: var(--emerald); }
+    .cost-table .pct.warn { color: var(--amber); }
+    .cost-table .pct.bad { color: var(--rose); }
     .agent-top, .mini-top {
       display: flex;
       justify-content: space-between;
@@ -191,6 +313,7 @@
     }
     .feature-card.stale { border-left: 4px solid var(--amber); }
     .feature-card.blocked { border-left: 4px solid var(--rose); }
+    .feature-card.observation-active { box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.28) inset; }
     .feature-top {
       display: flex;
       justify-content: space-between;
@@ -501,8 +624,20 @@
         <span class="pulse"></span>
         <h1>devmini orchestrator</h1>
       </div>
-      <p class="subtitle">workflow state, feature frontier, queue pressure, blockers, self-repair, and delivery state</p>
+      <p class="subtitle">round 4 — is the system clean, DB-first, cost-effective, and on track through the 7-day observation window?</p>
       <p class="timestamp" id="timestamp">loading…</p>
+      <div class="header-actions">
+        <button class="fs-badge" id="fsBadge" type="button">
+          <span class="lbl">DB-First</span>
+          <span class="val">loading…</span>
+          <span class="sub">state_engine.fs_fallback</span>
+        </button>
+        <button class="top-toggle" id="obsToggle" type="button" onclick="toggleObservationMode()">
+          <span class="lbl">Observation Window</span>
+          <span class="val">off</span>
+          <span class="sub">7-day round-4 focus</span>
+        </button>
+      </div>
     </div>
     <div class="scorecards" id="scorecards"></div>
   </section>
@@ -511,6 +646,20 @@
 
   <section class="layout">
     <aside class="stack">
+      <div class="card">
+        <div class="section-head">
+          <span class="section-title">Round-4 Heartbeat</span>
+          <span class="section-sub">clean + strategic</span>
+        </div>
+        <div class="heartbeat-grid" id="heartbeat"></div>
+      </div>
+      <div class="card">
+        <div class="section-head">
+          <span class="section-title">Review Gate Status</span>
+          <span class="section-sub">queue + findings</span>
+        </div>
+        <div id="reviewGateStatus"></div>
+      </div>
       <div class="card">
         <div class="section-head">
           <span class="section-title">Agent Roster</span>
@@ -542,7 +691,7 @@
       <div class="card">
         <div class="section-head">
           <span class="section-title">Codeburn</span>
-          <span class="section-sub">24h task costs</span>
+          <span class="section-sub">24h task costs + one-shot success</span>
         </div>
         <div class="mini-list" id="costs"></div>
       </div>
@@ -559,6 +708,20 @@
     </main>
 
     <aside class="stack">
+      <div class="card">
+        <div class="section-head">
+          <span class="section-title">Observation Window</span>
+          <span class="section-sub">NEW-6 follow-through</span>
+        </div>
+        <div class="observation-list" id="observationWindow"></div>
+      </div>
+      <div class="card">
+        <div class="section-head">
+          <span class="section-title">Memory Surface</span>
+          <span class="section-sub">observation freshness</span>
+        </div>
+        <div class="memory-list" id="memorySurface"></div>
+      </div>
       <div class="card">
         <div class="section-head">
           <span class="section-title">Queue Depth</span>
@@ -606,6 +769,7 @@
       agentRole: null,
       featureStatus: null,
     };
+    let OBS_MODE = false;
     const QUEUE_COLORS = {
       queued: "#22d3ee",
       claimed: "#0ea5e9",
@@ -660,6 +824,26 @@
       return ts.replace("T", " ").replace("Z", "");
     }
 
+    function formatHours(value) {
+      const n = Number(value || 0);
+      if (!Number.isFinite(n) || n <= 0) return "0h";
+      return `${n.toFixed(n >= 24 ? 0 : 1)}h`;
+    }
+
+    function formatRemaining(seconds) {
+      if (seconds == null) return "unknown";
+      if (seconds <= 0) return "due now";
+      const h = Math.floor(seconds / 3600);
+      const m = Math.floor((seconds % 3600) / 60);
+      return h > 0 ? `${h}h ${m}m` : `${m}m`;
+    }
+
+    function toneForRate(rate) {
+      if (rate >= 80) return "good";
+      if (rate >= 50) return "warn";
+      return "bad";
+    }
+
     function activeFilters() {
       return Object.entries(FILTERS).filter(([, value]) => value);
     }
@@ -685,6 +869,15 @@
       render(latestData);
     }
 
+    function toggleObservationMode() {
+      OBS_MODE = !OBS_MODE;
+      const btn = document.getElementById("obsToggle");
+      btn.classList.toggle("active", OBS_MODE);
+      btn.querySelector(".val").textContent = OBS_MODE ? "on" : "off";
+      btn.querySelector(".sub").textContent = OBS_MODE ? "showing NEW-6 windows inline" : "7-day round-4 focus";
+      render(latestData);
+    }
+
     function renderFilters() {
       const rows = activeFilters();
       const host = document.getElementById("filters");
@@ -705,7 +898,20 @@
       if (FILTERS.featureStatus && (feature.status || "") !== FILTERS.featureStatus) return false;
       if (FILTERS.frontierState && (feature.frontier?.state || "") !== FILTERS.frontierState) return false;
       if (FILTERS.blockerCode && ((feature.frontier?.blocker?.code || "") !== FILTERS.blockerCode)) return false;
+      if (OBS_MODE && !((feature.self_repair?.issues || []).some(issue => issue.observation_due_at))) return false;
       return true;
+    }
+
+    function renderFsFallback(data) {
+      const fs = data.fs_fallback || {};
+      const badge = document.getElementById("fsBadge");
+      const value = fs.event_count ? formatHours(fs.hours_since_last) : "clean";
+      badge.classList.toggle("warn", Boolean(fs.event_count));
+      badge.innerHTML = `
+        <span class="lbl">DB-First</span>
+        <span class="val">${esc(value)}</span>
+        <span class="sub">${fs.event_count ? `${esc(fs.event_count)} fallback events · last ${esc(formatTs(fs.last_fallback_at))}` : `no fallback events recorded${fs.streak_anchor_at ? ` · anchor ${esc(formatTs(fs.streak_anchor_at))}` : ""}`}</span>
+      `;
     }
 
     function renderScorecards(data) {
@@ -848,6 +1054,9 @@
       const costs = data.task_costs || {};
       const summary = costs.summary || {};
       const engines = costs.by_engine || [];
+      const projects = costs.by_project || [];
+      const templates = costs.by_template || [];
+      const success = new Map((costs.template_success || []).map(row => [row.braid_template, row]));
       const recent = costs.recent || [];
       const top = `
         <div class="mini-row">
@@ -870,7 +1079,43 @@
           <div class="tiny">${esc(formatTs(row.ts))}</div>
         </div>
       `).join("");
-      document.getElementById("costs").innerHTML = top + engineRows + recentRows;
+      const projectRows = projects.map(row => `
+        <tr>
+          <td>${esc(row.project || "unknown")}</td>
+          <td>${esc(row.task_count || 0)}</td>
+          <td>$${esc(Number(row.cost_usd || 0).toFixed(4))}</td>
+        </tr>
+      `).join("") || `<tr><td colspan="3" class="tiny">No project costs yet.</td></tr>`;
+      const templateRows = templates.map(row => {
+        const stats = success.get(row.braid_template) || {};
+        const rate = Number(stats.one_shot_success_rate || 0);
+        return `
+          <tr>
+            <td>${esc(row.braid_template || "untemplated")}</td>
+            <td>${esc(row.task_count || 0)}</td>
+            <td>$${esc(Number(row.cost_usd || 0).toFixed(4))}</td>
+            <td class="pct ${toneForRate(rate)}">${esc(rate.toFixed ? rate.toFixed(1) : rate)}%</td>
+          </tr>
+        `;
+      }).join("") || `<tr><td colspan="4" class="tiny">No template costs yet.</td></tr>`;
+      document.getElementById("costs").innerHTML = top + engineRows + `
+        <div class="cost-breakdown">
+          <div class="mini-row">
+            <div class="mini-top"><strong>By project</strong><span class="tiny">24h</span></div>
+            <table class="cost-table">
+              <thead><tr><th>project</th><th>tasks</th><th>cost</th></tr></thead>
+              <tbody>${projectRows}</tbody>
+            </table>
+          </div>
+          <div class="mini-row">
+            <div class="mini-top"><strong>By BRAID template</strong><span class="tiny">one-shot rate</span></div>
+            <table class="cost-table">
+              <thead><tr><th>template</th><th>tasks</th><th>cost</th><th>1-shot</th></tr></thead>
+              <tbody>${templateRows}</tbody>
+            </table>
+          </div>
+        </div>
+      ` + recentRows;
     }
 
     function renderQueue(data) {
@@ -939,6 +1184,82 @@
       document.getElementById("runtimeAudit").innerHTML = envRows + bypassRows + orphanRows || `<div class="empty">No runtime audit rows yet.</div>`;
     }
 
+    function renderHeartbeat(data) {
+      const heartbeat = data.heartbeat || {};
+      const rows = [
+        { label: "DB-first streak", value: formatHours(heartbeat.fs_fallback_streak_hours), sub: `${heartbeat.fs_fallback_events || 0} fallback events`, tone: heartbeat.fs_fallback_events ? "warn" : "ok" },
+        { label: "Workflow issues", value: heartbeat.workflow_issues || 0, sub: "workflow-check active", tone: Number(heartbeat.workflow_issues || 0) === 0 ? "ok" : "warn" },
+        { label: "Blocked frontiers", value: heartbeat.blocked_frontiers || 0, sub: "open features blocked", tone: Number(heartbeat.blocked_frontiers || 0) === 0 ? "ok" : "warn" },
+        { label: "Escalated issues", value: heartbeat.escalated_issues || 0, sub: "self-repair escalations", tone: Number(heartbeat.escalated_issues || 0) === 0 ? "ok" : "crit" },
+        { label: "Env errors", value: heartbeat.environment_errors || 0, sub: "runtime blockers", tone: Number(heartbeat.environment_errors || 0) === 0 ? "ok" : "crit" },
+        { label: "Orphan reaps", value: heartbeat.orphan_recoveries_24h || 0, sub: "recent recoveries", tone: Number(heartbeat.orphan_recoveries_24h || 0) === 0 ? "ok" : "warn" },
+        { label: "Bypasses", value: heartbeat.task_bypasses_24h || 0, sub: "env gate bypasses", tone: Number(heartbeat.task_bypasses_24h || 0) === 0 ? "ok" : "warn" },
+        { label: "Observations", value: heartbeat.observation_windows || 0, sub: "NEW-6 active", tone: Number(heartbeat.observation_windows || 0) === 0 ? "ok" : "warn" },
+      ];
+      document.getElementById("heartbeat").innerHTML = rows.map(row => `
+        <div class="heartbeat-stat ${row.tone}">
+          <div class="lbl">${esc(row.label)}</div>
+          <div class="val">${esc(row.value)}</div>
+          <div class="sub">${esc(row.sub)}</div>
+        </div>
+      `).join("");
+    }
+
+    function renderReviewGates(data) {
+      const gates = data.review_gates || {};
+      const topGates = gates.top_gates || [];
+      const recent = gates.recent || [];
+      document.getElementById("reviewGateStatus").innerHTML = `
+        <div class="review-grid">
+          <div class="review-stat"><div class="lbl">awaiting review</div><div class="val">${esc(gates.awaiting_review || 0)}</div></div>
+          <div class="review-stat"><div class="lbl">request change</div><div class="val">${esc(gates.request_change || 0)}</div></div>
+          <div class="review-stat"><div class="lbl">approvals</div><div class="val">${esc(gates.approve || 0)}</div></div>
+          <div class="review-stat"><div class="lbl">thread failures</div><div class="val">${esc(gates.thread_failures || 0)}</div></div>
+        </div>
+        <div class="review-gates">
+          ${topGates.map(row => `
+            <div class="review-gate-row">
+              <div class="row-head"><span class="row-title">${esc(row.gate)}</span><span class="row-meta">${esc(row.count)} task(s)</span></div>
+            </div>
+          `).join("") || `<div class="empty">No active review gates recorded.</div>`}
+          ${recent.map(task => `
+            <div class="review-gate-row" onclick="showTaskModal('${escAttr(task.task_id)}')">
+              <div class="row-head"><span class="row-title">${esc(task.task_id)}</span><span class="state-chip state-${esc(task.review_verdict || task.state || "queued")}">${esc(task.review_verdict || task.state || "-")}</span></div>
+              <div class="mini-detail">${esc(task.summary || "")}</div>
+              <div class="tiny">${esc((task.review_gates || []).join(", ") || "no gates")} · findings ${esc((task.policy_review_findings || []).length)}</div>
+            </div>
+          `).join("")}
+        </div>
+      `;
+    }
+
+    function renderObservationWindow(data) {
+      const rows = (data.observation_window || {}).issues || [];
+      document.getElementById("observationWindow").innerHTML = rows.length ? rows.map(row => `
+        <div class="observation-row">
+          <div class="row-head">
+            <span class="row-title">${esc(row.feature_id || "-")}</span>
+            <span class="countdown">${esc(formatRemaining(row.remaining_seconds))}</span>
+          </div>
+          <div class="mini-detail">${esc(row.blocker_code || "-")} · ${esc(row.task_id || "-")}</div>
+          <div class="tiny">${esc(row.status || "-")} · due ${esc(formatTs(row.observation_due_at))}</div>
+        </div>
+      `).join("") : `<div class="empty">No active observation windows.</div>`;
+    }
+
+    function renderMemorySurface(data) {
+      const rows = (data.memory_observations || {}).by_project || [];
+      document.getElementById("memorySurface").innerHTML = rows.length ? rows.map(row => `
+        <div class="memory-row" onclick="setFilter('project','${escAttr(row.project)}')">
+          <div class="row-head">
+            <span class="row-title">${esc(row.project)}</span>
+            <span class="row-meta">${esc(row.count)} observations</span>
+          </div>
+          <div class="tiny">latest ${esc(formatTs(row.latest_at))}</div>
+        </div>
+      `).join("") : `<div class="empty">No memory observations recorded.</div>`;
+    }
+
     function indexTasks(data) {
       taskIndex = {};
       (data.features || []).forEach((feature) => {
@@ -965,12 +1286,14 @@
       const events = feature.recent_events || [];
       const delivery = feature.delivery || {};
       const repair = feature.self_repair || {};
+      const activeIssue = (repair.issues || [])[0] || {};
+      const observationActive = (repair.issues || []).some(issue => issue.observation_due_at);
       const stale = Number(feature.frontier?.age_seconds || 0) > 3600;
       const blocked = feature.frontier?.state === "blocked" || Boolean(feature.frontier?.blocker?.code);
       const childStates = Object.entries(feature.child_states || {});
       const followUpStates = Object.entries(feature.follow_up_states || {});
       return `
-        <div class="feature-card ${stale ? "stale" : ""} ${blocked ? "blocked" : ""}" data-feature-id="${escAttr(feature.feature_id)}">
+        <div class="feature-card ${stale ? "stale" : ""} ${blocked ? "blocked" : ""} ${observationActive ? "observation-active" : ""}" data-feature-id="${escAttr(feature.feature_id)}">
           <div class="feature-top">
             <div>
               <div class="feature-id">${esc(feature.feature_id)}</div>
@@ -1014,6 +1337,21 @@
                   <div class="box-v">${esc(formatTs(feature.created_at))}</div>
                   <div class="tiny">${esc(feature.branch || "")}</div>
                 </div>
+                <div class="meta-box">
+                  <div class="box-k">Planner</div>
+                  <div class="box-v">${feature.planner?.task_id ? `<code>${esc(feature.planner.task_id)}</code>` : "no planner"}</div>
+                  <div class="tiny">${esc(feature.planner?.state || "-")} ${feature.planner?.model ? `· ${esc(feature.planner.model)}` : ""}</div>
+                </div>
+                <div class="meta-box">
+                  <div class="box-k">Workflow / Canary</div>
+                  <div class="box-v">${feature.workflow_check?.last_run ? esc(formatTs(feature.workflow_check.last_run)) : "no workflow-check"}</div>
+                  <div class="tiny">${feature.workflow_check ? `${esc(feature.workflow_check.issues || 0)} issue(s)` : "no workflow data"}${feature.canary?.enabled ? ` · canary SLA ${esc(feature.canary.sla_hours || "-")}h` : ""}</div>
+                </div>
+                <div class="meta-box">
+                  <div class="box-k">Memory Observations</div>
+                  <div class="box-v">${esc(feature.memory_observations?.count || 0)}</div>
+                  <div class="tiny">${esc(formatTs(feature.memory_observations?.latest?.updated_at))}${feature.memory_observations?.latest?.title ? ` · ${esc(feature.memory_observations.latest.title)}` : ""}</div>
+                </div>
               </div>
             `, sectionIsOpen(feature.feature_id, "Roadmap", false))}
             ${featureSection("Delivery", delivery.final_pr_number ? `PR #${esc(delivery.final_pr_number)}` : "no final PR", `
@@ -1042,6 +1380,28 @@
                   <div class="box-v">${childStates.length} child · ${followUpStates.length} follow-up</div>
                   <div class="tiny">${childStates.map(([, state]) => state).join(", ") || "no child tasks recorded"}</div>
                 </div>
+                <div class="repair-box">
+                  <div class="box-k">Observation</div>
+                  <div class="box-v">${activeIssue.observation_due_at ? esc(formatRemaining(((activeIssue.observation_due_at && Date.parse(activeIssue.observation_due_at)) ? Math.floor((Date.parse(activeIssue.observation_due_at) - Date.now()) / 1000) : null))) : "inactive"}</div>
+                  <div class="tiny">${activeIssue.observation_due_at ? `due ${esc(formatTs(activeIssue.observation_due_at))}` : "no active NEW-6 window"}</div>
+                </div>
+                <div class="repair-box">
+                  <div class="box-k">Deliberations</div>
+                  <div class="box-v">${esc((repair.deliberations || []).length)}</div>
+                  <div class="tiny">${(repair.deliberations || []).slice(-1)[0] ? `${esc((repair.deliberations || []).slice(-1)[0].stage || "-")} · ${esc((repair.deliberations || []).slice(-1)[0].verdict || "-")}` : "none recorded"}</div>
+                </div>
+              </div>
+              <div class="task-list" style="margin-top:8px">
+                ${(repair.deliberations || []).slice(-3).map(item => `
+                  <div class="task-row">
+                    <div class="task-head">
+                      <div class="task-id">${esc(item.stage || "deliberation")}</div>
+                      <div><span class="state-chip state-${esc(item.verdict || "pending")}">${esc(item.verdict || "-")}</span></div>
+                    </div>
+                    <div class="task-summary">${esc(item.summary || "")}</div>
+                    <div class="tiny">${esc(formatTs(item.ts || item.created_at))} · ${((item.panel || []).join(", "))}</div>
+                  </div>
+                `).join("") || `<div class="empty">No self-repair deliberations recorded.</div>`}
               </div>
             `, sectionIsOpen(feature.feature_id, "Repair", false))}
             ${featureSection("Tasks", `${tasks.length} task${tasks.length === 1 ? "" : "s"}`, `
@@ -1053,7 +1413,7 @@
                       <div class="task-head">
                         <div>
                           <div class="task-id">${esc(task.task_id)}</div>
-                          <div class="tiny">${esc(task.kind)} · ${esc(task.role || "-")} · ${esc(task.engine || "-")}</div>
+                          <div class="tiny">${esc(task.kind)} · ${esc(task.role || "-")} · ${esc(task.engine || "-")}${task.parent_task_id ? ` · parent ${esc(task.parent_task_id)}` : ""}${task.braid_template ? ` · ${esc(task.braid_template)}` : ""}</div>
                         </div>
                         <div>
                           <span class="state-chip state-${esc(task.state || "queued")}">${esc(task.state || "-")}</span>
@@ -1177,6 +1537,7 @@
           <div class="tab" data-tab="review">Review</div>
           <div class="tab" data-tab="qa">QA Scope</div>
           <div class="tab" data-tab="delivery">Delivery</div>
+          <div class="tab" data-tab="council">Council</div>
         </div>
 
         <div class="tab-panel active" data-panel="timeline">
@@ -1225,6 +1586,16 @@
           </div>
           ${evidence ? `<div class="section-title" style="margin-top:12px">Resolved Thread Evidence</div><div class="evidence-list">${evidence}</div>` : ""}
         </div>
+
+        <div class="tab-panel" data-panel="council">
+          <div class="kv-grid">
+            <div class="k">panel</div><div>${(task.review_council_panel || []).length ? task.review_council_panel.map(item => `<span class="pill-inline">${esc(item)}</span>`).join("") : "<span class='tiny'>none recorded</span>"}</div>
+            <div class="k">gate count</div><div>${esc((task.review_gates || []).length)}</div>
+            <div class="k">findings</div><div>${esc((task.policy_review_findings || []).length)}</div>
+          </div>
+          <div class="section-title" style="margin-top:12px">Gate Panels</div>
+          <div class="gate-list">${gates || `<div class="empty">No gate panel detail recorded.</div>`}</div>
+        </div>
       `;
       modal.querySelectorAll(".tab").forEach((tab) => {
         tab.addEventListener("click", () => {
@@ -1247,12 +1618,17 @@
       indexTasks(data);
       document.getElementById("timestamp").textContent = `updated ${formatTs(data.timestamp)}`;
       renderFilters();
+      renderFsFallback(data);
       renderScorecards(data);
+      renderHeartbeat(data);
+      renderReviewGates(data);
       renderAgents(data);
       renderAgentTasks();
       renderServer(data);
       renderBudget(data);
       renderCosts(data);
+      renderObservationWindow(data);
+      renderMemorySurface(data);
       renderQueue(data);
       renderBlockers(data);
       renderTransitions(data);
