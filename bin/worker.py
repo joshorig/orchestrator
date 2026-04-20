@@ -1499,6 +1499,7 @@ def _external_skill_context(project_name, *, task_id=None, gate_name=None, chang
     if not root.exists():
         return ""
     parts = []
+    used = []
     for skill_name in _requested_external_skills(
         project_name,
         gate_name=gate_name,
@@ -1518,6 +1519,22 @@ def _external_skill_context(project_name, *, task_id=None, gate_name=None, chang
         body = _read_text_if_exists(skill_dir / "SKILL.md", tail_lines=220, max_chars=7000)
         if body:
             parts.append(f"### trusted-skill/{skill_name}\n{body}")
+            used.append(skill_name)
+    if used and task_id:
+        o.append_event(
+            "skills",
+            "skill_context_used",
+            task_id=task_id,
+            details={"project": project_name, "gate_name": gate_name, "skills": used},
+        )
+        for skill_name in used:
+            o.append_metric(
+                "skills.context_used",
+                1,
+                metric_type="counter",
+                tags={"skill": skill_name, "project": project_name or "", "gate": gate_name or ""},
+                source="worker",
+            )
     return "\n\n".join(parts)
 
 
@@ -1570,17 +1587,19 @@ def _format_token_savior_rows(rows, *, limit=5):
     return "\n".join(out)
 
 
-def _token_savior_context(project_name, project_path, *, role=None, query=None):
+def _token_savior_context(project_name, project_path, *, role=None, query=None, task_id=None):
     memory_db = _load_token_savior_memory()
     if memory_db is None:
         return ""
     project_root = str(pathlib.Path(project_path).resolve())
     query = (query or "").strip()
     parts = []
+    sections = []
     try:
         recent = memory_db.get_recent_index(project_root, limit=6)
         if recent:
             parts.append("### token-savior recent\n" + _format_token_savior_rows(recent, limit=6))
+            sections.append("recent")
     except Exception:
         pass
     if query:
@@ -1588,20 +1607,37 @@ def _token_savior_context(project_name, project_path, *, role=None, query=None):
             found = memory_db.observation_search(project_root, query, limit=6)
             if found:
                 parts.append("### token-savior search\n" + _format_token_savior_rows(found, limit=6))
+                sections.append("search")
         except Exception:
             pass
         try:
             reasoning = memory_db.reasoning_search(project_root, query, limit=3)
             if reasoning:
                 parts.append("### token-savior reasoning\n" + _format_token_savior_rows(reasoning, limit=3))
+                sections.append("reasoning")
         except Exception:
             pass
         try:
             sessions = memory_db.session_summary_search(project_root, query, limit=3)
             if sessions:
                 parts.append("### token-savior session summaries\n" + _format_token_savior_rows(sessions, limit=3))
+                sections.append("sessions")
         except Exception:
             pass
+    if parts and task_id:
+        o.append_event(
+            "skills",
+            "token_savior_used",
+            task_id=task_id,
+            details={"project": project_name, "role": role, "query": query, "sections": sections},
+        )
+        o.append_metric(
+            "token_savior.context_used",
+            1,
+            metric_type="counter",
+            tags={"project": project_name or "", "role": role or "", "sections": ",".join(sections)},
+            source="worker",
+        )
     return "\n\n".join(parts)
 
 
@@ -1722,7 +1758,7 @@ def read_memory_context(project_name, project_path, *, role=None, query=None, ga
     )
     if policy:
         parts.append(f"### POLICY\n{policy}")
-    token_ctx = _token_savior_context(project_name, project_path, role=role, query=query)
+    token_ctx = _token_savior_context(project_name, project_path, role=role, query=query, task_id=task_id)
     if token_ctx:
         parts.append(token_ctx)
     return "\n\n".join(parts) if parts else "(no memory observations or policy context available)"

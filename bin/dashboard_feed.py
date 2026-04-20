@@ -495,6 +495,37 @@ def _skills():
         except Exception:
             latest_scan = None
     scan_counts = (latest_scan or {}).get("counts") or {}
+    recent_events = []
+    usage_counter = Counter()
+    token_savior_count = 0
+    for row in o.read_events(role="skills", limit=200):
+        event = row.get("event")
+        details = row.get("details") or {}
+        if event == "skill_context_used":
+            for name in details.get("skills") or []:
+                usage_counter[name] += 1
+            recent_events.append(
+                {
+                    "ts": row.get("ts"),
+                    "event": event,
+                    "task_id": row.get("task_id"),
+                    "project": details.get("project"),
+                    "skills": list(details.get("skills") or []),
+                    "gate_name": details.get("gate_name"),
+                }
+            )
+        elif event == "token_savior_used":
+            token_savior_count += 1
+            recent_events.append(
+                {
+                    "ts": row.get("ts"),
+                    "event": event,
+                    "task_id": row.get("task_id"),
+                    "project": details.get("project"),
+                    "role": details.get("role"),
+                    "sections": list(details.get("sections") or []),
+                }
+            )
     rows = []
     for item in trusted:
         rows.append(
@@ -505,12 +536,15 @@ def _skills():
                 "upstream_path": item.get("upstream_path"),
                 "scan_status": "accepted" if latest_scan and latest_scan.get("accepted") else ("unknown" if not latest_scan else "rejected"),
                 "scan_counts": scan_counts,
+                "usage_7d": usage_counter.get(item.get("name"), 0),
             }
         )
     return {
         "count": len(rows),
         "latest_scan_at": (latest_scan or {}).get("scanned_at"),
         "latest_scan_counts": scan_counts,
+        "token_savior_usage_7d": token_savior_count,
+        "recent_usage": recent_events[-12:],
         "skills": rows,
     }
 

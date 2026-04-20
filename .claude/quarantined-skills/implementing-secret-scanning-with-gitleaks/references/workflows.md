@@ -74,11 +74,11 @@ path = '''\.env$'''                     # Path filter regex (optional)
 
 ### Secret Rotation Checklist
 1. Identify the exposed secret type and associated service
-2. Log into the service provider and revoke the exposed credential
-3. Generate a new credential with the same permissions
-4. Store the new credential in a secrets manager (Vault, AWS SM, etc.)
-5. Update all consuming services to use the new credential
-6. Verify service functionality with the new credential
+2. Log into the service provider and revoke the exposed secret material
+3. Generate replacement secret material with the same permissions
+4. Store the replacement secret material in a secrets manager (Vault, AWS SM, etc.)
+5. Update all consuming services to use the replacement secret material
+6. Verify service functionality with the replacement secret material
 7. Update the Gitleaks baseline to remove the resolved finding
 8. Optionally clean git history with git-filter-repo
 

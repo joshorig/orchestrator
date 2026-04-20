@@ -51,11 +51,11 @@ Scans input against 20+ compiled regex patterns for known injection signatures.
 **Returns:** Tuple of (score, matched_pattern_names). Score is min(1.0, match_count * 0.25).
 
 **Pattern Categories:**
-- `system_prompt_override` -- "ignore previous instructions" and variants
+- `system_prompt_override` -- instruction-replacement phrases and close variants
 - `role_play_escape` -- "you are now", "act as", "pretend to be"
 - `instruction_hijack` -- "do not follow", "new instructions", "instead do"
 - `delimiter_escape` -- Markdown code fences with system/assistant roles, XML instruction tags
-- `data_exfiltration` -- Attempts to extract system prompts, keys, credentials
+- `data_exfiltration` -- Attempts to reveal hidden control text or access material
 - `encoding_obfuscation` -- Base64/ROT13/hex encoding references
 - `sql_injection_via_prompt` -- SQL payloads embedded in prompts
 - `command_injection_via_prompt` -- Shell command payloads
@@ -84,7 +84,7 @@ Computes an anomaly score from seven structural features.
 | `capitalization_ratio` | 0.10 | Proportion of uppercase alphabetic characters |
 | `line_structure_anomaly` | 0.10 | Many short lines indicating structured payloads |
 | `unicode_anomaly` | 0.15 | Zero-width and control character presence |
-| `repetition_score` | 0.10 | Low unique-word ratio indicating repetitive overrides |
+| `repetition_score` | 0.10 | Low unique-word ratio indicating repetitive replacement language |
 
 ---
 

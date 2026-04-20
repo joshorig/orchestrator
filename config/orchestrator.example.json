@@ -1,8 +1,15 @@
 {
   "slots": {
-    "claude": { "timeout_sec": 3600, "max_budget_usd": 0.5 },
-    "codex": { "timeout_sec": 7200 },
-    "qa": { "timeout_sec": 1800 }
+    "claude": {
+      "timeout_sec": 3600,
+      "max_budget_usd": 0.5
+    },
+    "codex": {
+      "timeout_sec": 7200
+    },
+    "qa": {
+      "timeout_sec": 1800
+    }
   },
   "budgets": {
     "claude_default_usd": 0.5,
@@ -45,7 +52,9 @@
     "get_char_limit": 1800,
     "label_primed_query": {
       "enabled": true,
-      "review_gates": ["security-review-pass"]
+      "review_gates": [
+        "security-review-pass"
+      ]
     }
   },
   "skills": {
@@ -57,13 +66,6 @@
         "sha": "3960661ae5bd81ef3af1ac56e83b042fe3a6bfea",
         "install_path": "performance-profiler",
         "upstream_path": "engineering/performance-profiler"
-      },
-      {
-        "name": "env-secrets-manager",
-        "source": "github:alirezarezvani/claude-skills",
-        "sha": "3960661ae5bd81ef3af1ac56e83b042fe3a6bfea",
-        "install_path": "env-secrets-manager",
-        "upstream_path": "engineering/env-secrets-manager"
       },
       {
         "name": "code-reviewer",
@@ -85,27 +87,6 @@
         "sha": "c0ab6cfccb0ad151d130b1c243a05af6120861ff",
         "install_path": "analyzing-sbom-for-supply-chain-vulnerabilities",
         "upstream_path": "skills/analyzing-sbom-for-supply-chain-vulnerabilities"
-      },
-      {
-        "name": "implementing-secret-scanning-with-gitleaks",
-        "source": "github:mukul975/Anthropic-Cybersecurity-Skills",
-        "sha": "c0ab6cfccb0ad151d130b1c243a05af6120861ff",
-        "install_path": "implementing-secret-scanning-with-gitleaks",
-        "upstream_path": "skills/implementing-secret-scanning-with-gitleaks"
-      },
-      {
-        "name": "detecting-ai-model-prompt-injection-attacks",
-        "source": "github:mukul975/Anthropic-Cybersecurity-Skills",
-        "sha": "c0ab6cfccb0ad151d130b1c243a05af6120861ff",
-        "install_path": "detecting-ai-model-prompt-injection-attacks",
-        "upstream_path": "skills/detecting-ai-model-prompt-injection-attacks"
-      },
-      {
-        "name": "testing-api-security-with-owasp-top-10",
-        "source": "github:mukul975/Anthropic-Cybersecurity-Skills",
-        "sha": "c0ab6cfccb0ad151d130b1c243a05af6120861ff",
-        "install_path": "testing-api-security-with-owasp-top-10",
-        "upstream_path": "skills/testing-api-security-with-owasp-top-10"
       }
     ]
   },
@@ -150,16 +131,44 @@
   "self_repair": {
     "enabled": true,
     "project": "devmini-orchestrator",
-    "verifier_panel": ["socrates", "kahneman", "ada"],
-    "approval_panel": ["feynman", "meadows", "torvalds"]
+    "verifier_panel": [
+      "socrates",
+      "kahneman",
+      "ada"
+    ],
+    "approval_panel": [
+      "feynman",
+      "meadows",
+      "torvalds"
+    ]
   },
   "council": {
     "enabled": true,
-    "planner_panel": ["aristotle", "socrates", "meadows"],
-    "review_panel": ["socrates", "kahneman", "torvalds"],
-    "security_panel": ["kahneman", "ada", "socrates"],
-    "architecture_panel": ["meadows", "aristotle", "torvalds"],
-    "qa_panel": ["feynman", "kahneman", "ada"]
+    "planner_panel": [
+      "aristotle",
+      "socrates",
+      "meadows"
+    ],
+    "review_panel": [
+      "socrates",
+      "kahneman",
+      "torvalds"
+    ],
+    "security_panel": [
+      "kahneman",
+      "ada",
+      "socrates"
+    ],
+    "architecture_panel": [
+      "meadows",
+      "aristotle",
+      "torvalds"
+    ],
+    "qa_panel": [
+      "feynman",
+      "kahneman",
+      "ada"
+    ]
   },
   "projects": [
     {
@@ -171,7 +180,9 @@
       "qa": {
         "smoke": "qa/smoke.sh",
         "regression": "qa/regression.sh",
-        "regression_days": ["sun"],
+        "regression_days": [
+          "sun"
+        ],
         "regression_threshold_pct": 3
       }
     }

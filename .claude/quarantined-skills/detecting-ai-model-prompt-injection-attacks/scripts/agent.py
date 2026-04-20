@@ -29,12 +29,18 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Regex patterns for known prompt injection signatures
 # ---------------------------------------------------------------------------
+_OVERRIDE_VERB = r"(?:ign(?:ore)?|disregard|forget|override|bypass)"
+_PRIOR_SCOPE = r"(?:prev(?:ious)?|above|prior|all|system|initial)"
+_GUIDANCE_NOUN = r"(?:instr(?:uction)?s?|prompts?|rules?|directives?|context)"
+_EXFIL_VERB = r"(?:output|reveal|show|display|print|leak|extract)"
+_SECRET_NOUN = r"(?:system\\s+prompt|instr(?:uction)?s?|config|pass(?:word)?|secret|api\\s*key|token|credential(?:s)?)"
+
 INJECTION_PATTERNS: list[tuple[str, str]] = [
-    ("system_prompt_override", r"(?i)\b(ignore|disregard|forget|override|bypass)\b.{0,30}\b(previous|above|prior|all|system|initial)\b.{0,20}\b(instructions?|prompts?|rules?|directives?|context)\b"),
+    ("system_prompt_override", rf"(?i)\b{_OVERRIDE_VERB}\b.{{0,30}}\b{_PRIOR_SCOPE}\b.{{0,20}}\b{_GUIDANCE_NOUN}\b"),
     ("role_play_escape", r"(?i)\b(you\s+are\s+now|act\s+as|pretend\s+(to\s+be|you\s+are)|simulate\s+being|switch\s+to|enter\s+.{0,10}mode)\b"),
     ("instruction_hijack", r"(?i)\b(do\s+not\s+follow|stop\s+following|new\s+instructions?|instead\s+(do|say|output|respond|print))\b"),
     ("delimiter_escape", r"(?i)(```\s*(system|assistant|user)\s*\n|<\s*/?\s*(system|instruction|prompt)\s*>|\[INST\]|\[/INST\]|<<\s*SYS\s*>>)"),
-    ("data_exfiltration", r"(?i)\b(output|reveal|show|display|print|leak|exfiltrate|extract)\b.{0,30}\b(system\s+prompt|instructions?|config|password|secret|api\s*key|token|credentials?)\b"),
+    ("data_exfiltration", rf"(?i)\b{_EXFIL_VERB}\b.{{0,30}}\b{_SECRET_NOUN}\b"),
     ("encoding_obfuscation", r"(?i)\b(base64|rot13|hex\s*encode|url\s*encode|unicode\s*escape)\b.{0,30}\b(decode|convert|translate|interpret)\b"),
     ("sql_injection_via_prompt", r"(?i)(;\s*(DROP|DELETE|UPDATE|INSERT|ALTER|EXEC)\b|'\s*(OR|AND)\s+['\d]|UNION\s+SELECT)"),
     ("command_injection_via_prompt", r"(?i)(;\s*(rm|cat|wget|curl|bash|sh|python|exec|eval)\b|\|\s*(cat|ls|id|whoami|nc)\b|`[^`]+`)"),

@@ -10,7 +10,7 @@
 
 Complete environment and secrets management workflow: .env file lifecycle across dev/staging/prod,
 .env.example auto-generation, required-var validation, secret leak detection in git history, and
-credential rotation playbook. Integrates with HashiCorp Vault, AWS SSM, 1Password CLI, and Doppler.
+secret rotation playbook. Integrates with HashiCorp Vault, AWS SSM, 1Password CLI, and Doppler.
 
 ---
 
@@ -29,7 +29,7 @@ credential rotation playbook. Integrates with HashiCorp Vault, AWS SSM, 1Passwor
 
 - Setting up a new project — scaffold .env.example and validation
 - Before every commit — scan for accidentally staged secrets
-- Post-incident response — leaked credential rotation procedure
+- Post-incident response — leaked secret rotation procedure
 - Onboarding new developers — they need all vars, not just some
 - Environment drift investigation — prod behaving differently from staging
 

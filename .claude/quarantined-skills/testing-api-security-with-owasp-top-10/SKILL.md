@@ -284,7 +284,7 @@ done
 | Concept | Description |
 |---------|-------------|
 | **BOLA (API1)** | Broken Object Level Authorization - accessing objects belonging to other users |
-| **Broken Authentication (API2)** | Weak authentication mechanisms allowing credential stuffing or token manipulation |
+| **Broken Authentication (API2)** | Weak authentication mechanisms allowing account-stuffing or token manipulation |
 | **BOPLA (API3)** | Broken Object Property Level Authorization - excessive data exposure or mass assignment |
 | **Unrestricted Resource Consumption (API4)** | Missing rate limiting enabling DoS or brute-force attacks |
 | **Broken Function Level Auth (API5)** | Regular users accessing admin-level API functions |
@@ -313,7 +313,7 @@ User A can access User B's order details by changing the order ID in `/api/v1/or
 The user update endpoint accepts a `role` field in the JSON body. By adding `"role":"admin"` to a profile update request, a regular user escalates to administrator privileges.
 
 ### Scenario 3: Deprecated API Version Bypass
-The `/api/v2/users` endpoint has proper rate limiting, but `/api/v1/users` (still active) has no rate limiting. Attackers use the old version to brute-force credentials.
+The `/api/v2/users` endpoint has proper rate limiting, but `/api/v1/users` (still active) has no rate limiting. Attackers use the old version to brute-force account access.
 
 ### Scenario 4: GraphQL Introspection Data Leak
 GraphQL introspection is enabled in production, exposing the entire schema including internal queries, mutations, and sensitive field names that are not used in the frontend.
