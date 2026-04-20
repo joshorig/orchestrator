@@ -1,0 +1,9 @@
+{
+  "kind": "transitions_scale_100k",
+  "scenario_version": 1,
+  "rows": 100000,
+  "target_rows": 1000,
+  "task_id": "task-hot",
+  "max_ms": 100.0,
+  "wall_time_budget": 60.0
+}

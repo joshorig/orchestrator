@@ -33,6 +33,7 @@ DEFAULT_DB_BASENAME = "orchestrator.db"
 DEFAULT_MEMORY_VEC_DIMENSIONS = 24
 DEFAULT_MEMORY_RRF_K = 60
 DEFAULT_METRICS_RETENTION_DAYS = 14
+MAX_REASONABLE_FUTURE_EPOCH_SKEW = 30 * 24 * 3600
 REPO_MEMORY_SECTION_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
 
 
@@ -169,8 +170,12 @@ class StateEngine:
 
     def purge_old_metrics(self, *, cutoff_epoch: int, conn: sqlite3.Connection | None = None) -> int:
         conn = conn or self.connect()
+        future_cutoff = int(time.time()) + MAX_REASONABLE_FUTURE_EPOCH_SKEW
         with conn:
-            cur = conn.execute("DELETE FROM metrics WHERE created_at_epoch < ?", (int(cutoff_epoch),))
+            cur = conn.execute(
+                "DELETE FROM metrics WHERE created_at_epoch < ? OR created_at_epoch > ?",
+                (int(cutoff_epoch), future_cutoff),
+            )
         return int(cur.rowcount or 0)
 
     def backup_into(self, backup_path: str | pathlib.Path, *, conn: sqlite3.Connection | None = None) -> str:
@@ -516,7 +521,7 @@ class StateEngine:
             ).fetchone()
         if not row:
             return None
-        return str(row["state"]), json.loads(row["metadata_json"])
+        return str(row["state"]), _json_loads_or_default(row["metadata_json"], {}, field_name="tasks.metadata_json")
 
     def read_feature(self, feature_id: str, *, conn: sqlite3.Connection | None = None) -> dict[str, Any] | None:
         conn = conn or self.connect()
@@ -526,7 +531,7 @@ class StateEngine:
         ).fetchone()
         if not row:
             return None
-        return json.loads(row["metadata_json"])
+        return _json_loads_or_default(row["metadata_json"], {}, field_name="features.metadata_json")
 
     def read_features(self, *, status: str | None = None, conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
         conn = conn or self.connect()
@@ -539,7 +544,7 @@ class StateEngine:
             rows = conn.execute(
                 "SELECT metadata_json FROM features ORDER BY created_at_epoch ASC"
             ).fetchall()
-        return [json.loads(row["metadata_json"]) for row in rows]
+        return [_json_loads_or_default(row["metadata_json"], {}, field_name="features.metadata_json") for row in rows]
 
     def read_events(
         self,
@@ -578,10 +583,13 @@ class StateEngine:
         if task_id is not None:
             sql += " WHERE task_id = ?"
             params.append(task_id)
-        sql += " ORDER BY created_at_epoch ASC"
         if limit is not None and limit >= 0:
+            sql += " ORDER BY created_at_epoch DESC, id DESC"
             sql += f" LIMIT {int(limit)}"
-        rows = conn.execute(sql, params).fetchall()
+            rows = list(reversed(conn.execute(sql, params).fetchall()))
+        else:
+            sql += " ORDER BY created_at_epoch ASC, id ASC"
+            rows = conn.execute(sql, params).fetchall()
         return [
             {
                 "ts": row["created_at"],
@@ -600,10 +608,13 @@ class StateEngine:
         if name is not None:
             sql += " WHERE name = ?"
             params.append(name)
-        sql += " ORDER BY created_at_epoch ASC"
         if limit is not None and limit >= 0:
+            sql += " ORDER BY created_at_epoch DESC, id DESC"
             sql += f" LIMIT {int(limit)}"
-        rows = conn.execute(sql, params).fetchall()
+            rows = list(reversed(conn.execute(sql, params).fetchall()))
+        else:
+            sql += " ORDER BY created_at_epoch ASC, id ASC"
+            rows = conn.execute(sql, params).fetchall()
         out = []
         for row in rows:
             payload = json.loads(row["tags_json"] or "{}")
@@ -656,7 +667,7 @@ class StateEngine:
         if limit is not None and limit >= 0:
             sql += f" LIMIT {int(limit)}"
         rows = conn.execute(sql, params).fetchall()
-        return [json.loads(row["metadata_json"]) for row in rows]
+        return [_json_loads_or_default(row["metadata_json"], {}, field_name="tasks.metadata_json") for row in rows]
 
     def upsert_memory_observation(self, row: dict[str, Any], *, conn: sqlite3.Connection | None = None) -> int:
         conn = conn or self.connect()
@@ -1086,7 +1097,7 @@ class StateEngine:
             if not row:
                 conn.rollback()
                 return None
-            task = json.loads(row["metadata_json"])
+            task = _json_loads_or_default(row["metadata_json"], {}, field_name="tasks.metadata_json")
             task["state"] = "claimed"
             task["claimed_at"] = claimed_at
             task["claimed_slot"] = slot_engine
@@ -1151,14 +1162,32 @@ class StateEngine:
                 "SELECT project FROM memory_observations WHERE id = ? LIMIT 1",
                 (int(obs_id),),
             ).fetchone()
+            embedding = _semantic_embedding(text)
+            if len(embedding) != DEFAULT_MEMORY_VEC_DIMENSIONS:
+                raise sqlite3.DataError(
+                    f"vec_dimension_mismatch: expected {DEFAULT_MEMORY_VEC_DIMENSIONS}, got {len(embedding)}"
+                )
             conn.execute("DELETE FROM memory_vectors WHERE obs_id = ?", (int(obs_id),))
             conn.execute(
                 "INSERT INTO memory_vectors(obs_id, project, embedding) VALUES (?, ?, ?)",
-                (int(obs_id), project_row["project"] if project_row else None, json.dumps(_semantic_embedding(text))),
+                (int(obs_id), project_row["project"] if project_row else None, json.dumps(embedding)),
             )
         except sqlite3.Error as exc:
             self._vec_error = str(exc)
             self._vec_enabled = False
+
+    def rebuild_memory_vectors(self, *, conn: sqlite3.Connection | None = None) -> int:
+        conn = conn or self.connect()
+        if not self._vec_enabled:
+            return 0
+        rows = conn.execute("SELECT id, title, content FROM memory_observations ORDER BY id ASC").fetchall()
+        rebuilt = 0
+        with conn:
+            conn.execute("DELETE FROM memory_vectors")
+            for row in rows:
+                self._upsert_memory_vector(conn, int(row["id"]), f"{row['title']}\n{row['content']}")
+                rebuilt += 1
+        return rebuilt
 
     def _memory_row_to_dict(self, row: sqlite3.Row, *, full: bool) -> dict[str, Any]:
         data = {
@@ -1172,7 +1201,7 @@ class StateEngine:
             "access_count": int(row["access_count"]),
             "created_at": row["created_at"],
             "tags": json.loads(row["tags_json"] or "[]"),
-            "metadata": json.loads(row["metadata_json"] or "{}"),
+            "metadata": _json_loads_or_default(row["metadata_json"], {}, field_name="memory_observations.metadata_json"),
         }
         content = str(row["content"] or "")
         data["excerpt"] = content[:280] + ("..." if len(content) > 280 else "")
@@ -1375,6 +1404,15 @@ def _semantic_embedding(text: str, *, dims: int = DEFAULT_MEMORY_VEC_DIMENSIONS)
         vec[bucket] += 1.0
     norm = math.sqrt(sum(v * v for v in vec)) or 1.0
     return [round(v / norm, 6) for v in vec]
+
+
+def _json_loads_or_default(payload: str | None, default: Any, *, field_name: str = "json") -> Any:
+    if payload in (None, ""):
+        return default
+    try:
+        return json.loads(payload)
+    except (TypeError, json.JSONDecodeError):
+        return default
 
 
 def _float32_blob(values: Iterable[float]) -> bytes:

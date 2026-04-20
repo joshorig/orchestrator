@@ -1,0 +1,17 @@
+{
+  "kind": "memory_obs_scale_10k",
+  "scenario_version": 1,
+  "rows": 10000,
+  "limit": 6,
+  "project": "devmini-orchestrator",
+  "query": "Alpha Semantic Memory Title Hit",
+  "title_hit": "Alpha Semantic Memory Title Hit",
+  "semantic_titles": [
+    "Semantic Memory One",
+    "Semantic Memory Two",
+    "Semantic Memory Three"
+  ],
+  "semantic_content": "alpha semantic memory related recall and retrieval",
+  "max_ms": 200.0,
+  "wall_time_budget": 60.0
+}

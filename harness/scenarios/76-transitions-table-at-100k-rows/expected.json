@@ -1,0 +1,6 @@
+{
+  "row_count": 1000,
+  "within_budget": true,
+  "deterministic_first": true,
+  "deterministic_last": true
+}

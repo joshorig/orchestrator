@@ -888,7 +888,15 @@ def _allowlist_default():
 
 
 def load_operator_allowlist():
-    data = read_json(ALLOWLIST_PATH, None)
+    try:
+        data = read_json(ALLOWLIST_PATH, None)
+    except json.JSONDecodeError as exc:
+        append_event(
+            "telegram-bot",
+            "allowlist_corrupt",
+            details={"path": str(ALLOWLIST_PATH), "error": str(exc)[:200]},
+        )
+        data = None
     if not isinstance(data, dict):
         data = _allowlist_default()
     data.setdefault("approved", [])
@@ -3232,7 +3240,27 @@ def rotate_logs(now=None):
             pass
         victim.unlink(missing_ok=True)
         evicted += 1
+    _rotate_events_mirror(now_dt)
     return compressed, evicted, max(total, 0)
+
+
+def _rotate_events_mirror(now_dt=None, *, max_bytes=100 * 1024 * 1024):
+    now_dt = now_dt if isinstance(now_dt, dt.datetime) else dt.datetime.now()
+    if not EVENTS_LOG.exists():
+        return None
+    try:
+        size = EVENTS_LOG.stat().st_size
+    except OSError:
+        return None
+    if size <= max_bytes:
+        return None
+    archive_dir = RUNTIME_DIR / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = archive_dir / f"events-{now_dt.strftime('%Y%m%dT%H%M%S')}.jsonl.gz"
+    with EVENTS_LOG.open("rb") as src, gzip.open(archive_path, "wb") as dst:
+        shutil.copyfileobj(src, dst)
+    EVENTS_LOG.write_text("", encoding="utf-8")
+    return str(archive_path)
 
 
 def queue_dir(state):
@@ -7070,6 +7098,26 @@ def list_features(status=None):
         if status and f.get("status") != status:
             continue
         out.append(f)
+    return out
+
+
+def feature_ancestor_ids(feature_id, *, max_depth=100):
+    """Return parent feature ids without looping forever on cycles."""
+    out = []
+    seen = set()
+    current_id = feature_id
+    depth = 0
+    while current_id and depth < max_depth:
+        feature = read_feature(current_id)
+        if not feature:
+            break
+        parent_id = (feature.get("parent_feature_id") or (feature.get("metadata") or {}).get("parent_feature_id"))
+        if not parent_id or parent_id in seen:
+            break
+        out.append(parent_id)
+        seen.add(parent_id)
+        current_id = parent_id
+        depth += 1
     return out
 
 

@@ -1,0 +1,9 @@
+{
+  "kind": "metrics_scale_1m",
+  "scenario_version": 1,
+  "rows": 1000000,
+  "limit": 100,
+  "metric_name": "scenario.metric",
+  "max_ms": 500.0,
+  "wall_time_budget": 120.0
+}

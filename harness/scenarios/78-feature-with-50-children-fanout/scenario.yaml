@@ -1,0 +1,8 @@
+{
+  "kind": "feature_fanout_50",
+  "scenario_version": 1,
+  "feature_id": "feature-fanout",
+  "child_count": 50,
+  "max_ms": 50.0,
+  "wall_time_budget": 30.0
+}

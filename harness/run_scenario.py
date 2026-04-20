@@ -2791,6 +2791,801 @@ def _run_memory_vec_missing(repo_root, scenario):
         }
 
 
+def _run_metrics_scale_1m(repo_root, scenario):
+    state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
+    total_rows = int(scenario.get("rows") or 1_000_000)
+    limit = int(scenario.get("limit") or 100)
+    max_ms = float(scenario.get("max_ms") or 500.0)
+    query_name = scenario.get("metric_name") or "scenario.metric"
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        engine = state_engine.StateEngine(
+            state_engine.StateEngineConfig(
+                root=root,
+                db_path=root / "runtime" / "orchestrator.db",
+                migrations_dir=repo_root / "state" / "migrations",
+                mode="primary",
+            )
+        )
+        engine.initialize()
+        conn = engine.connect()
+        batch = []
+        for idx in range(total_rows):
+            name = query_name if idx % 2 == 0 else "noise.metric"
+            batch.append((name, float(idx), "gauge", idx + 1, "{}"))
+            if len(batch) >= 10_000:
+                with conn:
+                    conn.executemany(
+                        "INSERT INTO metrics(name, value, metric_type, created_at_epoch, tags_json) VALUES (?, ?, ?, ?, ?)",
+                        batch,
+                    )
+                batch.clear()
+        if batch:
+            with conn:
+                conn.executemany(
+                    "INSERT INTO metrics(name, value, metric_type, created_at_epoch, tags_json) VALUES (?, ?, ?, ?, ?)",
+                    batch,
+                )
+        started = time.perf_counter()
+        rows = engine.read_metrics(name=query_name, limit=limit)
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        values = [int(row["value"]) for row in rows]
+        return {
+            "row_count": len(rows),
+            "within_budget": elapsed_ms < max_ms,
+            "newest_window": values == sorted(values)[-limit:],
+        }
+
+
+def _run_transitions_scale_100k(repo_root, scenario):
+    state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
+    total_rows = int(scenario.get("rows") or 100_000)
+    target_rows = int(scenario.get("target_rows") or 1_000)
+    max_ms = float(scenario.get("max_ms") or 100.0)
+    task_id = scenario.get("task_id") or "task-hot"
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        engine = state_engine.StateEngine(
+            state_engine.StateEngineConfig(
+                root=root,
+                db_path=root / "runtime" / "orchestrator.db",
+                migrations_dir=repo_root / "state" / "migrations",
+                mode="primary",
+            )
+        )
+        engine.initialize()
+        conn = engine.connect()
+        batch = []
+        for idx in range(total_rows):
+            current_task = task_id if idx < target_rows else f"task-noise-{idx % 200}"
+            batch.append(
+                (
+                    current_task,
+                    "queued",
+                    "running",
+                    f"reason-{idx}",
+                    f"2026-01-01T00:00:{idx % 60:02d}",
+                    idx + 1,
+                )
+            )
+            if len(batch) >= 10_000:
+                with conn:
+                    conn.executemany(
+                        """
+                        INSERT INTO task_transitions(task_id, from_state, to_state, reason, created_at, created_at_epoch)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        batch,
+                    )
+                batch.clear()
+        if batch:
+            with conn:
+                conn.executemany(
+                    """
+                    INSERT INTO task_transitions(task_id, from_state, to_state, reason, created_at, created_at_epoch)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    batch,
+                )
+        started = time.perf_counter()
+        rows = engine.read_transitions(task_id=task_id, limit=target_rows)
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        reasons = [row["reason"] for row in rows]
+        return {
+            "row_count": len(rows),
+            "within_budget": elapsed_ms < max_ms,
+            "deterministic_first": reasons[0] == "reason-0",
+            "deterministic_last": reasons[-1] == f"reason-{target_rows - 1}",
+        }
+
+
+def _run_memory_obs_scale_10k(repo_root, scenario):
+    state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
+    total_rows = int(scenario.get("rows") or 10_000)
+    limit = int(scenario.get("limit") or 10)
+    max_ms = float(scenario.get("max_ms") or 200.0)
+    project = scenario.get("project") or "devmini-orchestrator"
+    semantic_titles = set(scenario.get("semantic_titles") or [])
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        engine = state_engine.StateEngine(
+            state_engine.StateEngineConfig(
+                root=root,
+                db_path=root / "runtime" / "orchestrator.db",
+                migrations_dir=repo_root / "state" / "migrations",
+                mode="primary",
+            )
+        )
+        engine.initialize()
+        semantic_ids = []
+        for idx in range(total_rows):
+            title = f"Observation {idx}"
+            if idx == total_rows - 1:
+                title = scenario["title_hit"]
+            if idx in (1, 7, 31):
+                title = scenario["semantic_titles"][len(semantic_ids)]
+            obs_id = engine.upsert_memory_observation(
+                {
+                    "project": project,
+                    "source_doc": "DECISIONS.md",
+                    "section_key": f"section-{idx}",
+                    "type": "decision",
+                    "title": title,
+                    "content": scenario["semantic_content"] if title in semantic_titles else f"noise content {idx}",
+                    "created_at": f"2026-01-01T00:{idx % 60:02d}:00",
+                    "importance": 5,
+                    "tags": ["memory"],
+                    "metadata": {},
+                }
+            )
+            if title in semantic_titles:
+                semantic_ids.append(obs_id)
+        engine.rebuild_memory_fts()
+        started = time.perf_counter()
+        rows = engine.memory_search(
+            scenario["query"],
+            project=project,
+            limit=limit,
+            semantic_candidates=semantic_ids,
+        )
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        titles = [row["title"] for row in rows]
+        return {
+            "row_count": len(rows),
+            "within_budget": elapsed_ms < max_ms,
+            "title_hit_first": bool(titles) and titles[0] == scenario["title_hit"],
+            "semantic_present": all(title in titles for title in semantic_titles),
+        }
+
+
+def _run_feature_fanout_50(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    feature_id = scenario.get("feature_id") or "feature-fanout"
+    child_count = int(scenario.get("child_count") or 50)
+    max_ms = float(scenario.get("max_ms") or 50.0)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        queue_root = root / "queue"
+        features_dir = root / "features"
+        runtime_dir = root / "runtime"
+        for state in orchestrator.STATES:
+            (queue_root / state).mkdir(parents=True, exist_ok=True)
+        features_dir.mkdir(parents=True, exist_ok=True)
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        old_env = {
+            "STATE_ENGINE_MODE": os.environ.get("STATE_ENGINE_MODE"),
+            "STATE_ENGINE_PATH": os.environ.get("STATE_ENGINE_PATH"),
+        }
+        old = {
+            "QUEUE_ROOT": orchestrator.QUEUE_ROOT,
+            "FEATURES_DIR": orchestrator.FEATURES_DIR,
+            "STATE_ROOT": orchestrator.STATE_ROOT,
+            "RUNTIME_DIR": orchestrator.RUNTIME_DIR,
+            "STATE_ENGINE_DB_PATH": orchestrator.STATE_ENGINE_DB_PATH,
+        }
+        os.environ["STATE_ENGINE_MODE"] = "primary"
+        os.environ["STATE_ENGINE_PATH"] = str(runtime_dir / "orchestrator.db")
+        orchestrator.QUEUE_ROOT = queue_root
+        orchestrator.FEATURES_DIR = features_dir
+        orchestrator.STATE_ROOT = root
+        orchestrator.RUNTIME_DIR = runtime_dir
+        orchestrator.STATE_ENGINE_DB_PATH = runtime_dir / "orchestrator.db"
+        orchestrator._STATE_ENGINE_CACHE = {"key": None, "engine": None}
+        try:
+            engine = orchestrator.get_state_engine()
+            engine.initialize()
+            created_at = "2026-01-01T00:00:00"
+            created_epoch = int(datetime.fromisoformat(created_at).timestamp())
+            metadata = {
+                "feature_id": feature_id,
+                "status": "open",
+                "project": "devmini-orchestrator",
+                "summary": "fanout",
+                "created_at": created_at,
+                "child_task_ids": [f"task-{idx:03d}" for idx in range(child_count)],
+            }
+            conn = engine.connect()
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO features(feature_id, created_at, created_at_epoch, status, project, metadata_json)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (feature_id, created_at, created_epoch, "open", "devmini-orchestrator", json.dumps(metadata, sort_keys=True)),
+                )
+                for idx in range(child_count):
+                    task_id = f"task-{idx:03d}"
+                    task_created = f"2026-01-01T00:{idx % 60:02d}:00"
+                    task_epoch = created_epoch + idx
+                    state = "done" if idx < child_count - 1 else "running"
+                    task = {
+                        "task_id": task_id,
+                        "state": state,
+                        "created_at": task_created,
+                        "state_updated_at": task_created,
+                        "engine": "codex",
+                        "role": "implementer",
+                        "project": "devmini-orchestrator",
+                        "feature_id": feature_id,
+                        "summary": f"child {idx}",
+                        "attempt": 1,
+                    }
+                    conn.execute(
+                        """
+                        INSERT INTO tasks(
+                            task_id, state, created_at, created_at_epoch, state_updated_at, engine, role, project, feature_id, summary, attempt, metadata_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            task_id,
+                            state,
+                            task_created,
+                            task_epoch,
+                            task_created,
+                            "codex",
+                            "implementer",
+                            "devmini-orchestrator",
+                            feature_id,
+                            f"child {idx}",
+                            1,
+                            json.dumps(task, sort_keys=True),
+                        ),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO feature_children(feature_id, task_id, role, order_idx, created_at)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (feature_id, task_id, "implementer", idx, task_created),
+                    )
+            started = time.perf_counter()
+            workflow = orchestrator.open_feature_workflow_summaries()[0]
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+        finally:
+            orchestrator._STATE_ENGINE_CACHE = {"key": None, "engine": None}
+            orchestrator.QUEUE_ROOT = old["QUEUE_ROOT"]
+            orchestrator.FEATURES_DIR = old["FEATURES_DIR"]
+            orchestrator.STATE_ROOT = old["STATE_ROOT"]
+            orchestrator.RUNTIME_DIR = old["RUNTIME_DIR"]
+            orchestrator.STATE_ENGINE_DB_PATH = old["STATE_ENGINE_DB_PATH"]
+            if old_env["STATE_ENGINE_MODE"] is None:
+                os.environ.pop("STATE_ENGINE_MODE", None)
+            else:
+                os.environ["STATE_ENGINE_MODE"] = old_env["STATE_ENGINE_MODE"]
+            if old_env["STATE_ENGINE_PATH"] is None:
+                os.environ.pop("STATE_ENGINE_PATH", None)
+            else:
+                os.environ["STATE_ENGINE_PATH"] = old_env["STATE_ENGINE_PATH"]
+        return {
+            "within_budget": elapsed_ms < max_ms,
+            "frontier_task_id": workflow["frontier"]["task_id"],
+            "child_state_count": len(workflow["child_states"]),
+            "planner_task_id": workflow["planner"]["task_id"],
+        }
+
+
+def _run_vec_dimension_mismatch(repo_root, scenario):
+    state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        engine = state_engine.StateEngine(
+            state_engine.StateEngineConfig(root=root, db_path=root / "runtime" / "orchestrator.db", migrations_dir=repo_root / "state" / "migrations", mode="primary")
+        )
+        status = engine.initialize()
+        if not status.get("vec_enabled"):
+            return {"vec_enabled": False, "dimension_error": True}
+        old_embed = state_engine._semantic_embedding
+        state_engine._semantic_embedding = lambda text, dims=state_engine.DEFAULT_MEMORY_VEC_DIMENSIONS: [0.1] * (dims + 1)
+        try:
+            engine.upsert_memory_observation(
+                {
+                    "project": "devmini-orchestrator",
+                    "source_doc": "DECISIONS.md",
+                    "section_key": "dim-drift",
+                    "type": "decision",
+                    "title": "dimension drift",
+                    "content": "dimension drift",
+                    "created_at": "2026-01-01T00:00:00",
+                    "importance": 5,
+                    "tags": [],
+                    "metadata": {},
+                }
+            )
+        finally:
+            state_engine._semantic_embedding = old_embed
+        return {
+            "vec_enabled": True,
+            "dimension_error": "vec_dimension_mismatch" in str(engine.status().get("vec_error") or ""),
+        }
+
+
+def _run_vec_rebuild_complete(repo_root, scenario):
+    state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        engine = state_engine.StateEngine(
+            state_engine.StateEngineConfig(root=root, db_path=root / "runtime" / "orchestrator.db", migrations_dir=repo_root / "state" / "migrations", mode="primary")
+        )
+        status = engine.initialize()
+        for idx in range(5):
+            engine.upsert_memory_observation(
+                {
+                    "project": "devmini-orchestrator",
+                    "source_doc": "DECISIONS.md",
+                    "section_key": f"vec-{idx}",
+                    "type": "decision",
+                    "title": f"vec {idx}",
+                    "content": f"vector rebuild {idx}",
+                    "created_at": f"2026-01-01T00:00:0{idx}",
+                    "importance": 5,
+                    "tags": [],
+                    "metadata": {},
+                }
+            )
+        conn = engine.connect()
+        before = after = rebuilt = 0
+        if status.get("vec_enabled"):
+            before = int(conn.execute("SELECT COUNT(*) FROM memory_vectors").fetchone()[0])
+            with conn:
+                conn.execute("DELETE FROM memory_vectors")
+            rebuilt = engine.rebuild_memory_vectors()
+            after = int(conn.execute("SELECT COUNT(*) FROM memory_vectors").fetchone()[0])
+        return {
+            "vec_enabled": bool(status.get("vec_enabled")),
+            "rebuilt_all": (not status.get("vec_enabled")) or (before == 5 and rebuilt == 5 and after == 5),
+        }
+
+
+def _run_vec_version_drift(repo_root, scenario):
+    state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        engine = state_engine.StateEngine(
+            state_engine.StateEngineConfig(root=root, db_path=root / "runtime" / "orchestrator.db", migrations_dir=repo_root / "state" / "migrations", mode="primary")
+        )
+        status = engine.initialize()
+        engine.upsert_memory_observation(
+            {
+                "project": "devmini-orchestrator",
+                "source_doc": "DECISIONS.md",
+                "section_key": "vec-version",
+                "type": "decision",
+                "title": "Version Drift Title",
+                "content": "Version drift query",
+                "created_at": "2026-01-01T00:00:00",
+                "importance": 5,
+                "tags": [],
+                "metadata": {},
+            }
+        )
+        engine.rebuild_memory_fts()
+        conn = engine.connect()
+
+        class ProxyConn:
+            def __init__(self, inner):
+                self.inner = inner
+            def execute(self, sql, params=()):
+                if "FROM memory_vectors" in sql:
+                    raise sqlite3.DatabaseError("sqlite-vec version mismatch on restore")
+                return self.inner.execute(sql, params)
+            def __enter__(self):
+                self.inner.__enter__()
+                return self
+            def __exit__(self, exc_type, exc, tb):
+                return self.inner.__exit__(exc_type, exc, tb)
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+
+        rows = engine.memory_search("Version Drift Title", project="devmini-orchestrator", limit=3, conn=ProxyConn(conn))
+        return {
+            "vec_enabled": bool(status.get("vec_enabled")),
+            "search_survived": bool(rows) and rows[0]["title"] == "Version Drift Title",
+            "warning_present": "version mismatch" in str(engine.status().get("vec_error") or ""),
+        }
+
+
+def _run_fts_shadow_corrupt(repo_root, scenario):
+    state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        engine = state_engine.StateEngine(
+            state_engine.StateEngineConfig(root=root, db_path=root / "runtime" / "orchestrator.db", migrations_dir=repo_root / "state" / "migrations", mode="primary")
+        )
+        engine.initialize()
+        engine.upsert_memory_observation(
+            {
+                "project": "devmini-orchestrator",
+                "source_doc": "DECISIONS.md",
+                "section_key": "fts-corrupt",
+                "type": "decision",
+                "title": "FTS Corrupt Title",
+                "content": "fts recovery",
+                "created_at": "2026-01-01T00:00:00",
+                "importance": 5,
+                "tags": [],
+                "metadata": {},
+            }
+        )
+        conn = engine.connect()
+        tripped = {"done": False}
+
+        class ProxyConn:
+            def __init__(self, inner):
+                self.inner = inner
+            def execute(self, sql, params=()):
+                if "memory_obs_fts MATCH" in sql and not tripped["done"]:
+                    tripped["done"] = True
+                    raise sqlite3.DatabaseError("database disk image is malformed")
+                return self.inner.execute(sql, params)
+            def __enter__(self):
+                self.inner.__enter__()
+                return self
+            def __exit__(self, exc_type, exc, tb):
+                return self.inner.__exit__(exc_type, exc, tb)
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+
+        rows = engine.memory_search("FTS Corrupt Title", project="devmini-orchestrator", limit=3, conn=ProxyConn(conn))
+        return {
+            "rebuild_retry_worked": bool(rows) and rows[0]["title"] == "FTS Corrupt Title",
+            "single_corruption_simulated": tripped["done"],
+        }
+
+
+def _run_fts_rebuild_during_search(repo_root, scenario):
+    state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        engine = state_engine.StateEngine(
+            state_engine.StateEngineConfig(root=root, db_path=root / "runtime" / "orchestrator.db", migrations_dir=repo_root / "state" / "migrations", mode="primary")
+        )
+        engine.initialize()
+        for idx in range(200):
+            engine.upsert_memory_observation(
+                {
+                    "project": "devmini-orchestrator",
+                    "source_doc": "DECISIONS.md",
+                    "section_key": f"fts-race-{idx}",
+                    "type": "decision",
+                    "title": f"Race Title {idx}",
+                    "content": "concurrent rebuild search",
+                    "created_at": f"2026-01-01T00:{idx % 60:02d}:00",
+                    "importance": 5,
+                    "tags": [],
+                    "metadata": {},
+                }
+            )
+        errors = []
+        results = []
+        barrier = threading.Barrier(2)
+
+        def do_search():
+            try:
+                barrier.wait()
+                results.extend(engine.memory_search("Race Title 199", project="devmini-orchestrator", limit=3))
+            except Exception as exc:
+                errors.append(str(exc))
+
+        def do_rebuild():
+            try:
+                barrier.wait()
+                engine.rebuild_memory_fts()
+            except Exception as exc:
+                errors.append(str(exc))
+
+        t1 = threading.Thread(target=do_search)
+        t2 = threading.Thread(target=do_rebuild)
+        t1.start(); t2.start(); t1.join(); t2.join()
+        return {
+            "no_errors": not errors,
+            "query_completed": bool(results),
+        }
+
+
+def _run_metadata_json_malformed(repo_root, scenario):
+    state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        engine = state_engine.StateEngine(
+            state_engine.StateEngineConfig(root=root, db_path=root / "runtime" / "orchestrator.db", migrations_dir=repo_root / "state" / "migrations", mode="primary")
+        )
+        engine.initialize()
+        conn = engine.connect()
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO tasks(task_id, state, created_at, created_at_epoch, state_updated_at, engine, role, project, summary, attempt, metadata_json)
+                VALUES ('task-bad-json', 'queued', '2026-01-01T00:00:00', 1, '2026-01-01T00:00:00', 'codex', 'implementer', 'demo', 'bad json', 1, '{incomplete')
+                """
+            )
+        found = engine.find_task("task-bad-json")
+        return {
+            "found": found is not None,
+            "metadata_defaulted": bool(found) and found[1] == {},
+        }
+
+
+def _run_timestamp_future_epoch(repo_root, scenario):
+    state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        engine = state_engine.StateEngine(
+            state_engine.StateEngineConfig(root=root, db_path=root / "runtime" / "orchestrator.db", migrations_dir=repo_root / "state" / "migrations", mode="primary")
+        )
+        engine.initialize()
+        conn = engine.connect()
+        with conn:
+            conn.execute("INSERT INTO metrics(name, value, metric_type, created_at_epoch, tags_json) VALUES ('old', 1, 'gauge', ?, '{}')", (1,))
+            conn.execute("INSERT INTO metrics(name, value, metric_type, created_at_epoch, tags_json) VALUES ('future', 1, 'gauge', ?, '{}')", (99999999999,))
+        deleted = engine.purge_old_metrics(cutoff_epoch=100)
+        names = [row["name"] for row in engine.read_metrics()]
+        return {
+            "deleted_count": deleted,
+            "future_removed": "future" not in names,
+        }
+
+
+def _run_blocker_code_missing(repo_root, scenario):
+    orchestrator = _load_module("orchestrator", repo_root / "bin" / "orchestrator.py")
+    dashboard = _load_module("dashboard_feed", repo_root / "bin" / "dashboard_feed.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        queue_root = root / "queue"
+        for state in orchestrator.STATES:
+            (queue_root / state).mkdir(parents=True, exist_ok=True)
+        old_queue = orchestrator.QUEUE_ROOT
+        old_dash_queue = dashboard.o.QUEUE_ROOT
+        old_env = os.environ.get("STATE_ENGINE_MODE")
+        orchestrator.QUEUE_ROOT = queue_root
+        dashboard.o.QUEUE_ROOT = queue_root
+        os.environ["STATE_ENGINE_MODE"] = "off"
+        try:
+            orchestrator.write_json_atomic(
+                queue_root / "blocked" / "task-unknown.json",
+                {
+                    "task_id": "task-unknown",
+                    "state": "blocked",
+                    "blocker": {"code": "new_unknown_blocker", "summary": "unknown blocker"},
+                },
+            )
+            rows = dashboard._blocker_codes()
+        finally:
+            orchestrator.QUEUE_ROOT = old_queue
+            dashboard.o.QUEUE_ROOT = old_dash_queue
+            if old_env is None:
+                os.environ.pop("STATE_ENGINE_MODE", None)
+            else:
+                os.environ["STATE_ENGINE_MODE"] = old_env
+        return {
+            "surface_unknown_blocker": any(row["code"] == "new_unknown_blocker" for row in rows),
+        }
+
+
+def _run_circular_feature_lineage(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        feats = pathlib.Path(tmp)
+        old = orchestrator.FEATURES_DIR
+        orchestrator.FEATURES_DIR = feats
+        try:
+            orchestrator.write_json_atomic(feats / "A.json", {"feature_id": "A", "parent_feature_id": "B"})
+            orchestrator.write_json_atomic(feats / "B.json", {"feature_id": "B", "parent_feature_id": "A"})
+            lineage = orchestrator.feature_ancestor_ids("A", max_depth=10)
+        finally:
+            orchestrator.FEATURES_DIR = old
+        return {
+            "terminated": lineage == ["B", "A"],
+        }
+
+
+def _run_same_epoch_ordering(repo_root, scenario):
+    state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        engine = state_engine.StateEngine(
+            state_engine.StateEngineConfig(root=root, db_path=root / "runtime" / "orchestrator.db", migrations_dir=repo_root / "state" / "migrations", mode="primary")
+        )
+        engine.initialize()
+        conn = engine.connect()
+        with conn:
+            conn.execute("INSERT INTO task_transitions(task_id, from_state, to_state, reason, created_at, created_at_epoch) VALUES ('task-same', 'queued', 'running', 'first', '2026-01-01T00:00:00', 1)")
+            conn.execute("INSERT INTO task_transitions(task_id, from_state, to_state, reason, created_at, created_at_epoch) VALUES ('task-same', 'running', 'done', 'second', '2026-01-01T00:00:00', 1)")
+        reasons = [row["reason"] for row in engine.read_transitions(task_id="task-same")]
+        return {"deterministic_order": reasons == ["first", "second"]}
+
+
+def _run_epoch_2038(repo_root, scenario):
+    state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
+    future_epoch = 2**31 + 1000
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        engine = state_engine.StateEngine(
+            state_engine.StateEngineConfig(root=root, db_path=root / "runtime" / "orchestrator.db", migrations_dir=repo_root / "state" / "migrations", mode="primary")
+        )
+        engine.initialize()
+        conn = engine.connect()
+        with conn:
+            conn.execute("INSERT INTO metrics(name, value, metric_type, created_at_epoch, tags_json) VALUES ('epoch2038', 1, 'gauge', ?, '{}')", (future_epoch,))
+        rows = engine.read_metrics(name="epoch2038", limit=1)
+        return {
+            "row_found": len(rows) == 1,
+            "future_ts_rendered": bool(rows) and rows[0]["ts"].startswith("2038"),
+        }
+
+
+def _run_vacuum_bloat(repo_root, scenario):
+    state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
+    total_rows = int(scenario.get("rows") or 100_000)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        db_path = root / "runtime" / "orchestrator.db"
+        engine = state_engine.StateEngine(
+            state_engine.StateEngineConfig(root=root, db_path=db_path, migrations_dir=repo_root / "state" / "migrations", mode="primary")
+        )
+        engine.initialize()
+        conn = engine.connect()
+        def total_size():
+            total = 0
+            for suffix in ("", "-wal", "-shm"):
+                path = pathlib.Path(f"{db_path}{suffix}")
+                if path.exists():
+                    total += path.stat().st_size
+            return total
+        batch = []
+        for idx in range(total_rows):
+            batch.append((f"metric-{idx}", float(idx), "gauge", idx + 1, "{}"))
+            if len(batch) >= 10000:
+                with conn:
+                    conn.executemany("INSERT INTO metrics(name, value, metric_type, created_at_epoch, tags_json) VALUES (?, ?, ?, ?, ?)", batch)
+                batch.clear()
+        if batch:
+            with conn:
+                conn.executemany("INSERT INTO metrics(name, value, metric_type, created_at_epoch, tags_json) VALUES (?, ?, ?, ?, ?)", batch)
+        before = total_size()
+        with conn:
+            conn.execute("DELETE FROM metrics WHERE id % 2 = 0")
+        engine.checkpoint(conn=conn)
+        mid = total_size()
+        conn.execute("VACUUM")
+        engine.checkpoint(conn=conn)
+        after = total_size()
+        return {
+            "shrunk_gt_10pct": after < (mid * 0.9),
+            "reads_correct": len(engine.read_metrics(limit=10)) == 10,
+        }
+
+
+def _run_events_rotation(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        runtime = root / "runtime"
+        runtime.mkdir(parents=True)
+        events = runtime / "events.jsonl"
+        events.write_text("x" * int(scenario.get("size_bytes") or (101 * 1024 * 1024)), encoding="utf-8")
+        old_runtime = orchestrator.RUNTIME_DIR
+        old_events = orchestrator.EVENTS_LOG
+        orchestrator.RUNTIME_DIR = runtime
+        orchestrator.EVENTS_LOG = events
+        try:
+            archive = orchestrator._rotate_events_mirror(max_bytes=int(scenario.get("threshold_bytes") or (100 * 1024 * 1024)))
+        finally:
+            orchestrator.RUNTIME_DIR = old_runtime
+            orchestrator.EVENTS_LOG = old_events
+        return {
+            "archived": bool(archive),
+            "mirror_truncated": events.exists() and events.stat().st_size == 0,
+        }
+
+
+def _run_nfs_wal_contention_spec(repo_root, scenario):
+    return {"hardware_gated": True, "executed": False}
+
+
+def _run_cross_process_claim(repo_root, scenario):
+    script = """
+import json, pathlib, sqlite3, sys
+repo_root = pathlib.Path(sys.argv[1])
+db_path = pathlib.Path(sys.argv[2])
+task_id = sys.argv[3]
+sys.path.insert(0, str(repo_root / 'bin'))
+import state_engine
+engine = state_engine.StateEngine(state_engine.StateEngineConfig(root=db_path.parent.parent, db_path=db_path, migrations_dir=repo_root / 'state' / 'migrations', mode='primary'))
+engine.initialize()
+task = engine.claim_task(task_id, slot_engine='codex', claimed_at='2026-01-01T00:00:00')
+print(json.dumps({'claimed': bool(task), 'task_id': task.get('task_id') if task else None}))
+"""
+    state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        db_path = root / "runtime" / "orchestrator.db"
+        engine = state_engine.StateEngine(
+            state_engine.StateEngineConfig(root=root, db_path=db_path, migrations_dir=repo_root / "state" / "migrations", mode="primary")
+        )
+        engine.initialize()
+        conn = engine.connect()
+        with conn:
+            for idx in range(4):
+                task_id = f"task-{idx}"
+                task = {
+                    "task_id": task_id,
+                    "state": "queued",
+                    "created_at": "2026-01-01T00:00:00",
+                    "state_updated_at": "2026-01-01T00:00:00",
+                    "engine": "codex",
+                    "role": "implementer",
+                    "project": "demo",
+                    "summary": "queued",
+                    "attempt": 1,
+                }
+                conn.execute(
+                    "INSERT INTO tasks(task_id, state, created_at, created_at_epoch, state_updated_at, engine, role, project, summary, attempt, metadata_json) VALUES (?, 'queued', '2026-01-01T00:00:00', ?, '2026-01-01T00:00:00', 'codex', 'implementer', 'demo', 'queued', 1, ?)",
+                    (task_id, idx + 1, json.dumps(task, sort_keys=True)),
+                )
+        procs = [
+            subprocess.run([sys.executable, "-c", script, str(repo_root), str(db_path), "task-0"], capture_output=True, text=True, check=False)
+            for _ in range(2)
+        ]
+        claimed = [json.loads(p.stdout or "{}") for p in procs]
+        winners = [row for row in claimed if row.get("claimed")]
+        return {
+            "single_winner": len(winners) == 1,
+            "winner_task_id": winners[0]["task_id"] if winners else None,
+        }
+
+
+def _run_allowlist_corrupt(repo_root, scenario):
+    orchestrator = _load_module("orchestrator", repo_root / "bin" / "orchestrator.py")
+    telegram = _load_module("telegram_bot", repo_root / "bin" / "telegram_bot.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        allowlist = root / "runtime" / "allowlist.json"
+        allowlist.parent.mkdir(parents=True, exist_ok=True)
+        allowlist.write_text("{broken", encoding="utf-8")
+        config = root / "config" / "telegram.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(json.dumps({"bot_token": "token"}), encoding="utf-8")
+        events = []
+        old = {
+            "ALLOWLIST_PATH": orchestrator.ALLOWLIST_PATH,
+            "append_event": orchestrator.append_event,
+            "CONFIG_PATH": telegram.CONFIG_PATH,
+        }
+        orchestrator.ALLOWLIST_PATH = allowlist
+        orchestrator.append_event = lambda *args, **kwargs: events.append({"args": args, "kwargs": kwargs})
+        telegram.CONFIG_PATH = config
+        try:
+            cfg = telegram.load_bot_config()
+        finally:
+            orchestrator.ALLOWLIST_PATH = old["ALLOWLIST_PATH"]
+            orchestrator.append_event = old["append_event"]
+            telegram.CONFIG_PATH = old["CONFIG_PATH"]
+        return {
+            "bot_refused": cfg is None,
+            "typed_alert_emitted": any(row["args"][1] == "allowlist_corrupt" for row in events),
+        }
+
+
 def _run_runner_fixture_restore(repo_root, scenario_dir, scenario):
     def _trial(workspace_dir, index):
         seeded = workspace_dir / "state" / "runtime" / "seed.txt"
@@ -3261,6 +4056,46 @@ def main(argv):
         actual = _run_memory_hybrid(repo_root, scenario)
     elif kind == "memory_vec_missing_fallback":
         actual = _run_memory_vec_missing(repo_root, scenario)
+    elif kind == "metrics_scale_1m":
+        actual = _run_metrics_scale_1m(repo_root, scenario)
+    elif kind == "transitions_scale_100k":
+        actual = _run_transitions_scale_100k(repo_root, scenario)
+    elif kind == "memory_obs_scale_10k":
+        actual = _run_memory_obs_scale_10k(repo_root, scenario)
+    elif kind == "feature_fanout_50":
+        actual = _run_feature_fanout_50(repo_root, scenario)
+    elif kind == "vec_dimension_mismatch":
+        actual = _run_vec_dimension_mismatch(repo_root, scenario)
+    elif kind == "vec_rebuild_complete":
+        actual = _run_vec_rebuild_complete(repo_root, scenario)
+    elif kind == "vec_version_drift":
+        actual = _run_vec_version_drift(repo_root, scenario)
+    elif kind == "fts5_shadow_corrupt":
+        actual = _run_fts_shadow_corrupt(repo_root, scenario)
+    elif kind == "fts_rebuild_during_search":
+        actual = _run_fts_rebuild_during_search(repo_root, scenario)
+    elif kind == "json_malformed_field":
+        actual = _run_metadata_json_malformed(repo_root, scenario)
+    elif kind == "timestamp_future_epoch":
+        actual = _run_timestamp_future_epoch(repo_root, scenario)
+    elif kind == "blocker_code_missing":
+        actual = _run_blocker_code_missing(repo_root, scenario)
+    elif kind == "circular_feature_lineage":
+        actual = _run_circular_feature_lineage(repo_root, scenario)
+    elif kind == "same_epoch_ordering":
+        actual = _run_same_epoch_ordering(repo_root, scenario)
+    elif kind == "epoch_2038":
+        actual = _run_epoch_2038(repo_root, scenario)
+    elif kind == "vacuum_bloat":
+        actual = _run_vacuum_bloat(repo_root, scenario)
+    elif kind == "events_rotation":
+        actual = _run_events_rotation(repo_root, scenario)
+    elif kind == "wal_nfs_contention":
+        actual = _run_nfs_wal_contention_spec(repo_root, scenario)
+    elif kind == "cross_process_claim":
+        actual = _run_cross_process_claim(repo_root, scenario)
+    elif kind == "allowlist_corrupt":
+        actual = _run_allowlist_corrupt(repo_root, scenario)
     elif kind == "runner_fixture_restore":
         actual = _run_runner_fixture_restore(repo_root, scenario_dir, scenario)
     elif kind == "runner_trace_dirs":
