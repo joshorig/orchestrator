@@ -1,0 +1,542 @@
+[
+  {
+    "id": 1867,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "planning",
+    "verdict": "planned",
+    "panel": "[\"socrates\", \"feynman\", \"ada\", \"torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1868,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "replan",
+    "panel": "[]",
+    "summary": ""
+  },
+  {
+    "id": 1869,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "planning",
+    "verdict": "planned",
+    "panel": "[\"socrates\", \"feynman\", \"ada\", \"torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1870,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "approve",
+    "panel": "[\"socrates\", \"feynman\", \"ada\", \"torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1871,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "approve",
+    "panel": "[\"Socrates\", \"Feynman\", \"Ada Lovelace\", \"Linus Torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1872,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "blocker_verifier",
+    "verdict": "change_strategy",
+    "panel": "[\"Socrates\", \"Kahneman\", \"Ada\"]",
+    "summary": ""
+  },
+  {
+    "id": 1873,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "blocker_verifier",
+    "verdict": "change_strategy",
+    "panel": "[\"Socrates\", \"Kahneman\", \"Ada\"]",
+    "summary": ""
+  },
+  {
+    "id": 1874,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "planning",
+    "verdict": "planned",
+    "panel": "[\"socrates\", \"feynman\", \"ada\", \"torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1875,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "approve",
+    "panel": "[\"Socrates\", \"Feynman\", \"Ada Lovelace\", \"Linus Torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1876,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "approve",
+    "panel": "[\"socrates\", \"feynman\", \"ada\", \"torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1877,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "approve",
+    "panel": "[\"socrates\", \"feynman\", \"ada\", \"torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1878,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "approve",
+    "panel": "[\"socrates\", \"feynman\", \"ada\", \"torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1879,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "blocker_verifier",
+    "verdict": "replan",
+    "panel": "[]",
+    "summary": ""
+  },
+  {
+    "id": 1880,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "planning",
+    "verdict": "planned",
+    "panel": "[\"socrates\", \"feynman\", \"ada\", \"torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1881,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "approve",
+    "panel": "[\"Socrates\", \"Feynman\", \"Ada Lovelace\", \"Linus Torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1882,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "approve",
+    "panel": "[\"socrates\", \"feynman\", \"ada\", \"torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1883,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "planning",
+    "verdict": "planned",
+    "panel": "[\"socrates\", \"feynman\", \"ada\", \"torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1884,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "approve",
+    "panel": "[\"Socrates\", \"Feynman\", \"Ada Lovelace\", \"Linus Torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1885,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "approve",
+    "panel": "[\"socrates\", \"feynman\", \"ada\", \"torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1886,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "approve",
+    "panel": "[\"socrates\", \"feynman\", \"ada\", \"torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1887,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "blocker_verifier",
+    "verdict": "replan",
+    "panel": "[]",
+    "summary": ""
+  },
+  {
+    "id": 1888,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "planning",
+    "verdict": "planned",
+    "panel": "[\"socrates\", \"feynman\", \"ada\", \"torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1889,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "approve",
+    "panel": "[\"socrates\", \"feynman\", \"ada\", \"torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1890,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "final_adjudication",
+    "verdict": "approve",
+    "panel": "[\"feynman\", \"meadows\", \"torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1891,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "approve",
+    "panel": "[\"socrates\", \"feynman\", \"ada\", \"torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1892,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "approve",
+    "panel": "[\"socrates\", \"feynman\", \"ada\", \"torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1893,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "approve",
+    "panel": "[\"Socrates\", \"Feynman\", \"Ada Lovelace\", \"Linus Torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1894,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "approve",
+    "panel": "[\"socrates\", \"feynman\", \"ada\", \"torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1895,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "approve",
+    "panel": "[\"socrates\", \"feynman\", \"ada\", \"torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1896,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "blocker_verifier",
+    "verdict": "replan",
+    "panel": "[]",
+    "summary": ""
+  },
+  {
+    "id": 1897,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "planning",
+    "verdict": "planned",
+    "panel": "[\"socrates\", \"feynman\", \"ada\", \"torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1898,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "approve",
+    "panel": "[\"socrates\", \"feynman\", \"ada\", \"torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1899,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "approve",
+    "panel": "[\"socrates\", \"feynman\", \"ada\", \"torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1900,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "approve",
+    "panel": "[\"Socrates\", \"Feynman\", \"Ada Lovelace\", \"Linus Torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1901,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "approve",
+    "panel": "[\"Socrates\", \"Feynman\", \"Ada\", \"Torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1902,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "approve",
+    "panel": "[\"socrates\", \"feynman\", \"ada\", \"torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1903,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "approve",
+    "panel": "[\"socrates\", \"feynman\", \"ada\", \"torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1904,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "planning",
+    "verdict": "planned",
+    "panel": "[\"socrates\", \"feynman\", \"ada\", \"torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1905,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "approve",
+    "panel": "[\"socrates\", \"feynman\", \"ada\"]",
+    "summary": ""
+  },
+  {
+    "id": 1906,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "approve",
+    "panel": "[\"Socrates\", \"Feynman\", \"Ada\"]",
+    "summary": ""
+  },
+  {
+    "id": 1907,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "approve",
+    "panel": "[\"Socrates\", \"Feynman\", \"Ada Lovelace\", \"Linus Torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1908,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "blocker_verifier",
+    "verdict": "replan",
+    "panel": "[]",
+    "summary": ""
+  },
+  {
+    "id": 1909,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "approve",
+    "panel": "[\"socrates\", \"feynman\", \"ada\", \"torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1910,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "planning",
+    "verdict": "planned",
+    "panel": "[\"socrates\", \"feynman\", \"ada\", \"torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1911,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "approve",
+    "panel": "[\"socrates\", \"feynman\", \"ada\", \"torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1912,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "blocker_verifier",
+    "verdict": "replan",
+    "panel": "[]",
+    "summary": ""
+  },
+  {
+    "id": 1913,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "approve",
+    "panel": "[\"Socrates\", \"Feynman\", \"Ada Lovelace\", \"Linus Torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1914,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "planning",
+    "verdict": "planned",
+    "panel": "[\"socrates\", \"feynman\", \"ada\", \"torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1915,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "approve",
+    "panel": "[\"socrates\", \"feynman\", \"ada\", \"torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1916,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "approve",
+    "panel": "[\"Socrates\", \"Feynman\", \"Ada Lovelace\", \"Linus Torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1917,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "blocker_verifier",
+    "verdict": "replan",
+    "panel": "[]",
+    "summary": ""
+  },
+  {
+    "id": 1918,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "pre_execute",
+    "verdict": "approve",
+    "panel": "[\"socrates\", \"feynman\", \"ada\"]",
+    "summary": ""
+  },
+  {
+    "id": 1919,
+    "issue_id": "task:task-20260416-233109-452e8d:blocked:template_refine_exhausted",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "planning",
+    "verdict": "planned",
+    "panel": "[\"socrates\", \"feynman\", \"ada\", \"torvalds\"]",
+    "summary": ""
+  },
+  {
+    "id": 1920,
+    "issue_id": "task:task-20260416-124111-bf73ca:failed:false_blocker_claim",
+    "created_at": "",
+    "created_at_epoch": 0,
+    "stage": "manual_reopen",
+    "verdict": "replan",
+    "panel": "[]",
+    "summary": ""
+  }
+]

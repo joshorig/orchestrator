@@ -1,0 +1,67 @@
+[
+  {
+    "id": 1,
+    "ts": "2026-04-20T20:54:40",
+    "ts_epoch": 1776718480,
+    "task_id": "task-20260420-004404-55a0f8",
+    "engine": "claude",
+    "model": "sonnet",
+    "input_tokens": 9,
+    "output_tokens": 2274,
+    "cache_tokens": 0,
+    "search_tokens": 0,
+    "cost_usd": 0.126028
+  },
+  {
+    "id": 2,
+    "ts": "2026-04-20T20:55:43",
+    "ts_epoch": 1776718543,
+    "task_id": "task-20260420-205342-51f030",
+    "engine": "claude",
+    "model": "opus",
+    "input_tokens": 9,
+    "output_tokens": 3758,
+    "cache_tokens": 0,
+    "search_tokens": 0,
+    "cost_usd": 0.18734975
+  },
+  {
+    "id": 3,
+    "ts": "2026-04-20T20:56:21",
+    "ts_epoch": 1776718581,
+    "task_id": "task-20260420-013958-879b9d",
+    "engine": "codex",
+    "model": "gpt-5.4",
+    "input_tokens": 815415,
+    "output_tokens": 5943,
+    "cache_tokens": 777600,
+    "search_tokens": 0,
+    "cost_usd": 0.3780825
+  },
+  {
+    "id": 4,
+    "ts": "2026-04-20T20:58:50",
+    "ts_epoch": 1776718730,
+    "task_id": "task-20260420-015220-8e0c67",
+    "engine": "codex",
+    "model": "gpt-5.4",
+    "input_tokens": 577817,
+    "output_tokens": 6209,
+    "cache_tokens": 519424,
+    "search_tokens": 0,
+    "cost_usd": 0.3689735
+  },
+  {
+    "id": 5,
+    "ts": "2026-04-20T21:03:09",
+    "ts_epoch": 1776718989,
+    "task_id": "task-20260420-210037-241327",
+    "engine": "codex",
+    "model": "gpt-5.4",
+    "input_tokens": 591366,
+    "output_tokens": 5724,
+    "cache_tokens": 512512,
+    "search_tokens": 0,
+    "cost_usd": 0.411123
+  }
+]
