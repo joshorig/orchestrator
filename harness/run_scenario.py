@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from datetime import datetime, timezone
 
 
@@ -59,6 +60,49 @@ def _trace_workspace_snapshot(trial_dir, label, workspace_dir):
     if snap_dir.exists():
         shutil.rmtree(snap_dir)
     _copy_tree_contents(workspace_dir, snap_dir)
+
+
+def _normalize_scenario_contract(scenario):
+    out = dict(scenario)
+    out.setdefault("scenario_version", 1)
+    return out
+
+
+def _extract_token_usage(actual):
+    if isinstance(actual.get("token_usage"), int):
+        return int(actual["token_usage"])
+    if isinstance(actual.get("token_usage"), dict):
+        value = actual["token_usage"].get("total")
+        if isinstance(value, int):
+            return value
+    if isinstance(actual.get("total_tokens"), int):
+        return int(actual["total_tokens"])
+    return None
+
+
+def _budget_report(actual, scenario, elapsed_seconds):
+    report = {
+        "scenario_version": int(scenario.get("scenario_version") or 1),
+        "wall_time_seconds": elapsed_seconds,
+        "wall_time_budget": scenario.get("wall_time_budget"),
+        "token_budget": scenario.get("token_budget"),
+        "token_usage": _extract_token_usage(actual),
+        "wall_time_budget_exceeded": False,
+        "token_budget_exceeded": False,
+        "token_budget_check": "not_requested",
+    }
+    wall = scenario.get("wall_time_budget")
+    if wall is not None:
+        report["wall_time_budget_exceeded"] = elapsed_seconds > float(wall)
+    tokens = scenario.get("token_budget")
+    if tokens is not None:
+        usage = report["token_usage"]
+        if usage is None:
+            report["token_budget_check"] = "unavailable"
+        else:
+            report["token_budget_check"] = "enforced"
+            report["token_budget_exceeded"] = usage > int(tokens)
+    return report
 
 
 def _copy_tree_contents(src, dst):
@@ -2261,6 +2305,16 @@ def _run_runner_trace_dirs(repo_root, scenario_dir, scenario):
     }
 
 
+def _run_runner_version_budgets(repo_root, scenario_dir, scenario):
+    delay = float(scenario.get("sleep_seconds") or 0.0)
+    if delay > 0:
+        time.sleep(delay)
+    return {
+        "token_usage": int(scenario.get("reported_token_usage") or 0),
+        "marker": "ok",
+    }
+
+
 def _run_self_repair_observation(repo_root, scenario):
     orchestrator, _ = _load_repo_modules(repo_root)
     with tempfile.TemporaryDirectory() as tmp:
@@ -2537,13 +2591,14 @@ def main(argv):
     if len(argv) != 2:
         raise SystemExit("usage: harness/run_scenario.py <scenario-dir>")
     scenario_dir = pathlib.Path(argv[1]).resolve()
-    scenario = json.loads((scenario_dir / "scenario.yaml").read_text())
+    scenario = _normalize_scenario_contract(json.loads((scenario_dir / "scenario.yaml").read_text()))
     expected = json.loads((scenario_dir / "expected.json").read_text())
     repo_root = scenario_dir.parents[2]
     trace_root = _new_trace_root(repo_root, scenario_dir)
     trace_root.mkdir(parents=True, exist_ok=True)
     os.environ["HARNESS_TRACE_ROOT"] = str(trace_root)
     kind = scenario["kind"]
+    start_time = time.perf_counter()
     if kind == "attempt_cap":
         actual = _run_attempt_cap(repo_root, scenario_dir, scenario)
     elif kind == "fix2_reopen_after_manual_abandon":
@@ -2616,6 +2671,8 @@ def main(argv):
         actual = _run_runner_fixture_restore(repo_root, scenario_dir, scenario)
     elif kind == "runner_trace_dirs":
         actual = _run_runner_trace_dirs(repo_root, scenario_dir, scenario)
+    elif kind == "runner_version_budgets":
+        actual = _run_runner_version_budgets(repo_root, scenario_dir, scenario)
     elif kind == "self_repair_observation":
         actual = _run_self_repair_observation(repo_root, scenario)
     elif kind == "telegram_surface":
@@ -2631,14 +2688,25 @@ def main(argv):
     else:
         raise SystemExit(f"unknown scenario kind: {kind}")
 
+    elapsed_seconds = round(time.perf_counter() - start_time, 6)
+    budget_report = _budget_report(actual, scenario, elapsed_seconds)
     trace_root = pathlib.Path(os.environ["HARNESS_TRACE_ROOT"]) if os.environ.get("HARNESS_TRACE_ROOT") else None
     if trace_root is not None:
         _write_json(trace_root / "scenario.json", scenario)
         _write_json(trace_root / "expected.json", expected)
         _write_json(trace_root / "actual.json", actual)
-        _write_json(trace_root / "result.json", {"passed": actual == expected, "scenario_kind": kind})
-    if actual != expected:
-        print(json.dumps({"expected": expected, "actual": actual}, indent=2))
+        _write_json(
+            trace_root / "result.json",
+            {
+                "passed": actual == expected and not budget_report["wall_time_budget_exceeded"] and not budget_report["token_budget_exceeded"],
+                "scenario_kind": kind,
+                "budget_report": budget_report,
+            },
+        )
+    budget_failed = budget_report["wall_time_budget_exceeded"] or budget_report["token_budget_exceeded"]
+    if actual != expected or budget_failed:
+        payload = {"expected": expected, "actual": actual, "budget_report": budget_report}
+        print(json.dumps(payload, indent=2))
         raise SystemExit(1)
     print(json.dumps(actual, indent=2))
 

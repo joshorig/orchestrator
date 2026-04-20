@@ -1,0 +1,8 @@
+{
+  "kind": "runner_version_budgets",
+  "scenario_version": 1,
+  "token_budget": 10,
+  "wall_time_budget": 0.5,
+  "reported_token_usage": 5,
+  "sleep_seconds": 0.01
+}
