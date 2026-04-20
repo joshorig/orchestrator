@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import shutil
 import signal
 import sqlite3
 import subprocess
@@ -23,6 +24,46 @@ def _load_repo_modules(repo_root):
     orchestrator = _load_module("orchestrator", repo_root / "bin" / "orchestrator.py")
     worker = _load_module("worker", repo_root / "bin" / "worker.py")
     return orchestrator, worker
+
+
+def _copy_tree_contents(src, dst):
+    if not src.exists():
+        return
+    dst.mkdir(parents=True, exist_ok=True)
+    for child in src.iterdir():
+        target = dst / child.name
+        if child.is_dir():
+            shutil.copytree(child, target)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(child, target)
+
+
+def _clear_dir_contents(path):
+    if not path.exists():
+        return
+    for child in path.iterdir():
+        if child.is_dir():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+
+
+def _run_trials_with_fixture_snapshot(scenario_dir, scenario, fn):
+    fixture_dir = scenario_dir / "fixture"
+    trial_count = int(scenario.get("trial_count") or 1)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        snapshot_dir = root / "_snapshot"
+        workspace_dir = root / "workspace"
+        _copy_tree_contents(fixture_dir, snapshot_dir)
+        results = []
+        for index in range(trial_count):
+            workspace_dir.mkdir(parents=True, exist_ok=True)
+            _clear_dir_contents(workspace_dir)
+            _copy_tree_contents(snapshot_dir, workspace_dir)
+            results.append(fn(workspace_dir, index))
+        return results
 
 
 def _run_attempt_cap(repo_root, scenario_dir, scenario):
@@ -2135,6 +2176,28 @@ def _run_memory_vec_missing(repo_root, scenario):
         }
 
 
+def _run_runner_fixture_restore(repo_root, scenario_dir, scenario):
+    def _trial(workspace_dir, index):
+        seeded = workspace_dir / "state" / "runtime" / "seed.txt"
+        dirty = workspace_dir / "state" / "runtime" / "dirty.txt"
+        initial_seed = seeded.read_text(encoding="utf-8").strip()
+        dirty_exists_before = dirty.exists()
+        seeded.write_text(f"mutated-{index}\n", encoding="utf-8")
+        dirty.write_text(f"dirty-{index}\n", encoding="utf-8")
+        return {
+            "initial_seed": initial_seed,
+            "dirty_exists_before": dirty_exists_before,
+        }
+
+    trials = _run_trials_with_fixture_snapshot(scenario_dir, scenario, _trial)
+    return {
+        "trial_count": len(trials),
+        "all_seeded": all(t["initial_seed"] == "seed" for t in trials),
+        "dirty_exists_before_any": any(t["dirty_exists_before"] for t in trials),
+        "mutations_isolated": len({t["initial_seed"] for t in trials}) == 1,
+    }
+
+
 def _run_self_repair_observation(repo_root, scenario):
     orchestrator, _ = _load_repo_modules(repo_root)
     with tempfile.TemporaryDirectory() as tmp:
@@ -2483,6 +2546,8 @@ def main(argv):
         actual = _run_memory_hybrid(repo_root, scenario)
     elif kind == "memory_vec_missing_fallback":
         actual = _run_memory_vec_missing(repo_root, scenario)
+    elif kind == "runner_fixture_restore":
+        actual = _run_runner_fixture_restore(repo_root, scenario_dir, scenario)
     elif kind == "self_repair_observation":
         actual = _run_self_repair_observation(repo_root, scenario)
     elif kind == "telegram_surface":
