@@ -7518,9 +7518,7 @@ def tick_self_repair_resolution():
         if feature.get("status") not in ("open", "finalizing"):
             continue
         if is_self_repair_feature(feature):
-            feature, normalized = _normalize_self_repair_feature_issues(feature["feature_id"], cfg=cfg)
-            if normalized and feature["feature_id"] not in changed_features:
-                changed_features.append(feature["feature_id"])
+            feature, _normalized = _normalize_self_repair_feature_issues(feature["feature_id"], cfg=cfg)
         issues = ((feature.get("self_repair") or {}).get("issues") or [])
         mutated = False
         for issue in issues:
@@ -7575,7 +7573,7 @@ def tick_self_repair_resolution():
         if mutated:
             _write_feature_record(feature)
             changed_features.append(feature["feature_id"])
-    return {"resolved": resolved, "stalled": stalled, "features": changed_features}
+    return {"resolved": resolved, "stalled": stalled, "features": list(dict.fromkeys(changed_features))}
 
 
 def tick_self_repair_observation_window():
