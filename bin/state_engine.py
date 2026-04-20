@@ -176,6 +176,7 @@ class StateEngine:
 
     def apply_migrations(self, conn: sqlite3.Connection | None = None) -> int:
         conn = conn or self.connect()
+        self.validate_migrations(conn=conn)
         applied = self._applied_migrations(conn)
         count = 0
         for item in self.discover_migrations():
@@ -194,6 +195,21 @@ class StateEngine:
                 )
             count += 1
         return count
+
+    def validate_migrations(self, conn: sqlite3.Connection | None = None) -> None:
+        conn = conn or self.connect()
+        discovered = {item["version"]: item for item in self.discover_migrations()}
+        applied = self._applied_migration_rows(conn)
+        unknown = sorted(set(applied) - set(discovered))
+        if unknown:
+            raise RuntimeError(f"state engine migration forward drift: {', '.join(unknown)}")
+        mismatched = [
+            version
+            for version, row in applied.items()
+            if version in discovered and str(row.get("sha256") or "") not in ("", discovered[version]["sha256"])
+        ]
+        if mismatched:
+            raise RuntimeError(f"state engine migration sha mismatch: {', '.join(sorted(mismatched))}")
 
     def seed_blocker_codes(self, codes: Iterable[str], *, conn: sqlite3.Connection | None = None) -> int:
         conn = conn or self.connect()
@@ -1149,6 +1165,17 @@ class StateEngine:
     def _applied_migrations(self, conn: sqlite3.Connection) -> set[str]:
         rows = conn.execute("SELECT version FROM schema_migrations").fetchall()
         return {str(row["version"]) for row in rows}
+
+    def _applied_migration_rows(self, conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+        rows = conn.execute("SELECT version, sha256, applied_at_epoch FROM schema_migrations").fetchall()
+        return {
+            str(row["version"]): {
+                "version": str(row["version"]),
+                "sha256": row["sha256"],
+                "applied_at_epoch": row["applied_at_epoch"],
+            }
+            for row in rows
+        }
 
 
 def main(argv: list[str] | None = None) -> int:

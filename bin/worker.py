@@ -3154,15 +3154,18 @@ def _run_self_repair_council(
         "--max-budget-usd", _claude_budget_flag("review", cfg=o.load_config(), task=task),
         "--no-session-persistence",
     ]
-    proc = _run_bounded(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=timeout,
-        env=_claude_subprocess_env(),
-        cwd=str(worktree),
-    )
+    try:
+        proc = _run_bounded(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+            env=_claude_subprocess_env(),
+            cwd=str(worktree),
+        )
+    except subprocess.TimeoutExpired:
+        return {"error": f"council timeout {timeout}s", "blocker_code": "council_timeout"}
     _record_task_costs_from_text(task.get("task_id"), "claude", model, proc.stdout or "")
     try:
         payload = json.loads(proc.stdout or "")

@@ -144,6 +144,7 @@ BLOCKER_CODES = (
     "runtime_unknown_project",
     "runtime_precondition_failed",
     "review_gate_protocol_error",
+    "council_timeout",
     "review_feedback_exhausted",
     "claude_budget_exhausted",
     "slot_paused",

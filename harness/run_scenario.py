@@ -198,6 +198,68 @@ def _run_r16_override(repo_root, scenario):
     }
 
 
+def _run_migration_forward_drift(repo_root, scenario):
+    state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        migrations = root / "migrations"
+        migrations.mkdir(parents=True, exist_ok=True)
+        (migrations / "0001_initial.sql").write_text("CREATE TABLE demo(id INTEGER PRIMARY KEY);\n", encoding="utf-8")
+        engine = state_engine.StateEngine(
+            state_engine.StateEngineConfig(
+                root=root,
+                db_path=root / "runtime" / "orchestrator.db",
+                migrations_dir=migrations,
+                mode="mirror",
+            )
+        )
+        engine.initialize()
+        conn = engine.connect()
+        with conn:
+            conn.execute(
+                "INSERT INTO schema_migrations (version, sha256, applied_at_epoch) VALUES (?, ?, ?)",
+                ("0004_future", "deadbeef", 1),
+            )
+        error = None
+        try:
+            engine.validate_migrations(conn=conn)
+        except Exception as exc:
+            error = str(exc)
+        return {
+            "error_has_forward_drift": "forward drift" in (error or ""),
+            "mentions_version": "0004_future" in (error or ""),
+        }
+
+
+def _run_migration_sha_mismatch(repo_root, scenario):
+    state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        migrations = root / "migrations"
+        migrations.mkdir(parents=True, exist_ok=True)
+        path = migrations / "0001_initial.sql"
+        path.write_text("CREATE TABLE demo(id INTEGER PRIMARY KEY);\n", encoding="utf-8")
+        engine = state_engine.StateEngine(
+            state_engine.StateEngineConfig(
+                root=root,
+                db_path=root / "runtime" / "orchestrator.db",
+                migrations_dir=migrations,
+                mode="mirror",
+            )
+        )
+        engine.initialize()
+        path.write_text("CREATE TABLE demo(id INTEGER PRIMARY KEY, name TEXT);\n", encoding="utf-8")
+        error = None
+        try:
+            engine.validate_migrations(conn=engine.connect())
+        except Exception as exc:
+            error = str(exc)
+        return {
+            "error_has_sha_mismatch": "sha mismatch" in (error or ""),
+            "mentions_version": "0001_initial" in (error or ""),
+        }
+
+
 def _run_self_repair_resolution(repo_root, scenario):
     orchestrator, _ = _load_repo_modules(repo_root)
     with tempfile.TemporaryDirectory() as tmp:
@@ -1252,13 +1314,16 @@ def _run_atomic_claim_concurrency(repo_root, scenario):
         root = pathlib.Path(tmp)
         queue_root = root / "queue"
         claims_dir = root / "state" / "runtime" / "claims"
+        runtime_dir = root / "state" / "runtime"
         for state in orchestrator.STATES:
             (queue_root / state).mkdir(parents=True, exist_ok=True)
         claims_dir.mkdir(parents=True, exist_ok=True)
         old = {
+            "STATE_ROOT": orchestrator.STATE_ROOT,
             "QUEUE_ROOT": orchestrator.QUEUE_ROOT,
             "RUNTIME_DIR": orchestrator.RUNTIME_DIR,
             "CLAIMS_DIR": orchestrator.CLAIMS_DIR,
+            "STATE_ENGINE_DB_PATH": orchestrator.STATE_ENGINE_DB_PATH,
             "now_iso": orchestrator.now_iso,
             "project_environment_ok": orchestrator.project_environment_ok,
             "project_hard_stopped": orchestrator.project_hard_stopped,
@@ -1266,16 +1331,25 @@ def _run_atomic_claim_concurrency(repo_root, scenario):
             "crash_loop_guard_status": orchestrator.crash_loop_guard_status,
             "slot_paused": orchestrator.slot_paused,
         }
+        old_env = {name: os.environ.get(name) for name in ("STATE_ENGINE_MODE", "STATE_ENGINE_PATH")}
+        cache_old = dict(orchestrator._STATE_ENGINE_CACHE)
+        orchestrator.STATE_ROOT = root
         orchestrator.QUEUE_ROOT = queue_root
-        orchestrator.RUNTIME_DIR = root / "state" / "runtime"
+        orchestrator.RUNTIME_DIR = runtime_dir
         orchestrator.CLAIMS_DIR = claims_dir
+        orchestrator.STATE_ENGINE_DB_PATH = runtime_dir / "orchestrator.db"
         orchestrator.now_iso = lambda: "2026-04-19T20:10:00"
         orchestrator.project_environment_ok = lambda *args, **kwargs: True
         orchestrator.project_hard_stopped = lambda *args, **kwargs: False
         orchestrator.load_braid_index = lambda: {}
         orchestrator.crash_loop_guard_status = lambda *args, **kwargs: {"suppressed": False, "crashes": [], "window_seconds": 180, "max_crashes": 2}
         orchestrator.slot_paused = lambda *args, **kwargs: None
+        os.environ["STATE_ENGINE_MODE"] = "primary"
+        os.environ["STATE_ENGINE_PATH"] = str(orchestrator.STATE_ENGINE_DB_PATH)
+        orchestrator._STATE_ENGINE_CACHE["key"] = None
+        orchestrator._STATE_ENGINE_CACHE["engine"] = None
         try:
+            orchestrator.get_state_engine().initialize()
             task_count = int(scenario["task_count"])
             worker_count = int(scenario["worker_count"])
             for idx in range(task_count):
@@ -1328,6 +1402,13 @@ def _run_atomic_claim_concurrency(repo_root, scenario):
         finally:
             for key, value in old.items():
                 setattr(orchestrator, key, value)
+            orchestrator._STATE_ENGINE_CACHE.clear()
+            orchestrator._STATE_ENGINE_CACHE.update(cache_old)
+            for name, value in old_env.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
         duplicate_state_tasks = sorted(task_id for task_id, states in states_seen.items() if len(states) > 1)
         return {
             "claimed_count": len(claimed_ids),
@@ -1339,6 +1420,10 @@ def _run_atomic_claim_concurrency(repo_root, scenario):
             "duplicate_state_tasks": duplicate_state_tasks,
             "claim_states": sorted(set(claim_states)),
         }
+
+
+def _run_atomic_claim_concurrency_10(repo_root, scenario):
+    return _run_atomic_claim_concurrency(repo_root, {"task_count": 10, "worker_count": 10, "engine": scenario["engine"]})
 
 
 def _run_kill9_integrity(repo_root, scenario):
@@ -1953,6 +2038,38 @@ def _run_restore_active_rejected(repo_root, scenario):
                     os.environ[name] = value
 
 
+def _run_council_timeout(repo_root, scenario):
+    _, worker = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        task = {"task_id": "task-57", "engine_args": {}}
+        old = {
+            "_run_bounded": worker._run_bounded,
+            "_claude_subprocess_env": worker._claude_subprocess_env,
+            "_claude_budget_flag": worker._claude_budget_flag,
+        }
+        worker._run_bounded = lambda *args, **kwargs: (_ for _ in ()).throw(subprocess.TimeoutExpired(cmd=["claude"], timeout=60))
+        worker._claude_subprocess_env = lambda: {}
+        worker._claude_budget_flag = lambda *args, **kwargs: "1.0"
+        try:
+            out = worker._run_self_repair_council(
+                task=task,
+                stage="pre_execute",
+                panel=("socrates",),
+                prompt_body="Decide.",
+                worktree=root,
+                timeout=60,
+                last_msg_path=None,
+            )
+        finally:
+            for key, value in old.items():
+                setattr(worker, key, value)
+        return {
+            "error_has_timeout": "timeout" in (out.get("error") or ""),
+            "blocker_code": out.get("blocker_code"),
+        }
+
+
 def _run_memory_hybrid(repo_root, scenario):
     state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
     with tempfile.TemporaryDirectory() as tmp:
@@ -2304,6 +2421,12 @@ def main(argv):
         actual = _run_fix2_reopen(repo_root, scenario)
     elif kind == "r16_override":
         actual = _run_r16_override(repo_root, scenario)
+    elif kind == "migration_forward_drift":
+        actual = _run_migration_forward_drift(repo_root, scenario)
+    elif kind == "migration_sha_mismatch":
+        actual = _run_migration_sha_mismatch(repo_root, scenario)
+    elif kind == "council_timeout":
+        actual = _run_council_timeout(repo_root, scenario)
     elif kind == "self_repair_resolution":
         actual = _run_self_repair_resolution(repo_root, scenario)
     elif kind == "review_feedback_exhaustion":
@@ -2334,6 +2457,8 @@ def main(argv):
         actual = _run_fs_to_engine_migration(repo_root, scenario)
     elif kind == "atomic_claim_concurrency":
         actual = _run_atomic_claim_concurrency(repo_root, scenario)
+    elif kind == "atomic_claim_concurrency_10":
+        actual = _run_atomic_claim_concurrency_10(repo_root, scenario)
     elif kind == "kill9_integrity":
         actual = _run_kill9_integrity(repo_root, scenario)
     elif kind == "orphan_recovery_log":
