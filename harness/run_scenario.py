@@ -51,6 +51,7 @@ def _scenario_cluster(name, scenario_kind):
         "eio_read", "db_deleted", "restore_active_rejected", "wal_growth_stalls", "migration_forward_drift",
         "migration_sha_mismatch", "migration_partial", "migration_idempotence", "fts5_recovery",
         "vector_rowid_divergence", "checkpoint_starved", "retention_purge_safe", "fk_constraint_violation",
+        "clean_state_wipe_and_restart",
     }:
         return "state-engine"
     if scenario_kind in {"telegram_surface", "task_cost_capture", "supply_chain_gate", "security_secret_gate", "untrusted_skill_refusal"}:
@@ -2726,6 +2727,164 @@ def _run_state_engine_reconnect_after_replace(repo_root, scenario):
         }
 
 
+def _run_clean_state_wipe_and_restart(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        state_root = root / "state"
+        runtime = state_root / "runtime"
+        features_dir = state_root / "features"
+        queue_root = root / "queue"
+        claims_dir = runtime / "claims"
+        agent_scans = runtime / "agent_scans"
+        mcp_audits = runtime / "mcp_audits"
+        runtime.mkdir(parents=True, exist_ok=True)
+        features_dir.mkdir(parents=True, exist_ok=True)
+        claims_dir.mkdir(parents=True, exist_ok=True)
+        agent_scans.mkdir(parents=True, exist_ok=True)
+        mcp_audits.mkdir(parents=True, exist_ok=True)
+        for state in orchestrator.STATES:
+            (queue_root / state).mkdir(parents=True, exist_ok=True)
+
+        db_path = runtime / "orchestrator.db"
+        old = {
+            name: orchestrator.state_engine_wipe_runtime_state.__globals__[name]
+            for name in (
+                "STATE_ROOT", "RUNTIME_DIR", "FEATURES_DIR", "QUEUE_ROOT", "CLAIMS_DIR",
+                "EVENTS_LOG", "METRICS_LOG", "TRANSITIONS_LOG", "ALLOWLIST_PATH",
+                "AGENT_SCAN_DIR", "MCP_AUDIT_DIR", "STATE_ENGINE_DB_PATH",
+                "_active_orchestrator_launch_agent_labels",
+            )
+        }
+        old_env = {
+            "STATE_ENGINE_MODE": os.environ.get("STATE_ENGINE_MODE"),
+            "STATE_ENGINE_PATH": os.environ.get("STATE_ENGINE_PATH"),
+        }
+        os.environ["STATE_ENGINE_MODE"] = "primary"
+        os.environ["STATE_ENGINE_PATH"] = str(db_path)
+        orchestrator._STATE_ENGINE_CACHE = {"key": None, "engine": None}
+        orchestrator.STATE_ROOT = root
+        orchestrator.RUNTIME_DIR = runtime
+        orchestrator.FEATURES_DIR = features_dir
+        orchestrator.QUEUE_ROOT = queue_root
+        orchestrator.CLAIMS_DIR = claims_dir
+        orchestrator.EVENTS_LOG = runtime / "events.jsonl"
+        orchestrator.METRICS_LOG = runtime / "metrics.jsonl"
+        orchestrator.TRANSITIONS_LOG = runtime / "transitions.log"
+        orchestrator.ALLOWLIST_PATH = runtime / "allowlist.json"
+        orchestrator.AGENT_SCAN_DIR = agent_scans
+        orchestrator.MCP_AUDIT_DIR = mcp_audits
+        orchestrator.STATE_ENGINE_DB_PATH = db_path
+        orchestrator._active_orchestrator_launch_agent_labels = lambda: []
+        try:
+            cfg = orchestrator.load_config()
+            engine = orchestrator.get_state_engine(cfg=cfg)
+            engine.initialize()
+            engine.seed_blocker_codes(orchestrator.BLOCKER_CODES)
+            engine.upsert_memory_observation({
+                "project": "devmini-orchestrator",
+                "source_doc": "DECISIONS.md",
+                "section_key": "wipe-74",
+                "type": "decision",
+                "title": "Preserved memory",
+                "content": "This observation survives the runtime wipe.",
+                "importance": 5,
+                "created_at": "2026-04-21T00:00:00",
+            })
+            conn = engine.connect()
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO tasks(task_id, state, created_at, created_at_epoch, state_updated_at, engine, role, project, summary, metadata_json)
+                    VALUES ('task-74', 'queued', '2026-04-21T00:00:00', 1, '2026-04-21T00:00:00', 'codex', 'implementer', 'demo', 'wipe me', '{}')
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO task_transitions(task_id, from_state, to_state, reason, created_at, created_at_epoch)
+                    VALUES ('task-74', 'new', 'queued', 'seed', '2026-04-21T00:00:00', 1)
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO features(feature_id, created_at, created_at_epoch, status, project, metadata_json)
+                    VALUES ('feature-74', '2026-04-21T00:00:00', 1, 'open', 'demo', '{}')
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO feature_children(feature_id, task_id, role, order_idx, created_at)
+                    VALUES ('feature-74', 'task-74', 'implementer', 0, '2026-04-21T00:00:00')
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO self_repair_issues(issue_id, feature_id, created_at, created_at_epoch, status, metadata_json)
+                    VALUES ('issue-74', 'feature-74', '2026-04-21T00:00:00', 1, 'planned', '{}')
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO self_repair_deliberations(issue_id, created_at, created_at_epoch, stage, verdict, panel, summary)
+                    VALUES ('issue-74', '2026-04-21T00:00:01', 2, 'triage', 'approve', 'council', 'seed')
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO artifacts(task_id, kind, file_path, created_at)
+                    VALUES ('task-74', 'patch', 'artifacts/task-74.patch', '2026-04-21T00:00:00')
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO events(kind, created_at, created_at_epoch, payload_json)
+                    VALUES ('seed', '2026-04-21T00:00:00', 1, '{}')
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO metrics(name, value, metric_type, created_at_epoch, tags_json)
+                    VALUES ('seed.metric', 1.0, 'gauge', 1, '{}')
+                    """
+                )
+            engine.record_task_cost(ts="2026-04-21T00:00:02", task_id="task-74", engine="codex", model="gpt-5.4", input_tokens=10, output_tokens=5, cost_usd=0.12)
+            engine.record_environment_check(ts="2026-04-21T00:00:03", project="demo", result="blocked", blocker_summary="seed")
+            engine.record_orphan_recovery(ts="2026-04-21T00:00:04", task_id="task-74", from_state="claimed", age_seconds=120)
+            engine.record_task_bypass(ts="2026-04-21T00:00:05", task_id="task-74", gate="env", reason="self_repair")
+
+            orchestrator.write_json_atomic(queue_root / "queued" / "task-74.json", {"task_id": "task-74", "state": "queued"})
+            orchestrator.write_json_atomic(features_dir / "feature-74.json", {"feature_id": "feature-74", "status": "open"})
+            orchestrator.TRANSITIONS_LOG.write_text("task-74 seed\n", encoding="utf-8")
+            orchestrator.EVENTS_LOG.write_text("{\"kind\":\"seed\"}\n", encoding="utf-8")
+            orchestrator.METRICS_LOG.write_text("{\"name\":\"seed.metric\"}\n", encoding="utf-8")
+            orchestrator.ALLOWLIST_PATH.write_text("{\"operators\": [1]}\n", encoding="utf-8")
+            (claims_dir / "task-74.pid").write_text("99999\n", encoding="utf-8")
+            (agent_scans / "scan.json").write_text("{\"accepted\": true}\n", encoding="utf-8")
+            (mcp_audits / "audit.json").write_text("{\"ok\": true}\n", encoding="utf-8")
+
+            result = orchestrator.state_engine_wipe_runtime_state(cfg=cfg)
+            status = orchestrator.state_engine_status(cfg=cfg)
+            hits = engine.memory_search("preserved memory", project="devmini-orchestrator", limit=3)
+        finally:
+            for key, value in old.items():
+                orchestrator.state_engine_wipe_runtime_state.__globals__[key] = value
+            orchestrator._STATE_ENGINE_CACHE = {"key": None, "engine": None}
+            if old_env["STATE_ENGINE_MODE"] is None:
+                os.environ.pop("STATE_ENGINE_MODE", None)
+            else:
+                os.environ["STATE_ENGINE_MODE"] = old_env["STATE_ENGINE_MODE"]
+            if old_env["STATE_ENGINE_PATH"] is None:
+                os.environ.pop("STATE_ENGINE_PATH", None)
+            else:
+                os.environ["STATE_ENGINE_PATH"] = old_env["STATE_ENGINE_PATH"]
+        return {
+            "runtime_state_wiped": bool(result.get("wiped")) and result["after"]["tasks"] == 0 and result["after"]["features"] == 0,
+            "knowledge_preserved": result["after"]["memory_observations"] == 1 and result["after"]["schema_migrations"] >= 1 and result["after"]["blocker_codes"] >= 1 and bool(hits),
+            "fs_mirror_wiped": result["fs_queue_count"] == 0 and result["fs_feature_count"] == 0 and not result["transitions_log_exists"] and not result["events_log_exists"] and not result["metrics_log_exists"],
+            "restart_status_clean": status.get("integrity_check") == "ok" and result["allowlist_preserved"] and result["agent_scans_preserved"] and result["mcp_audits_preserved"],
+        }
+
+
 def _run_memory_hybrid(repo_root, scenario):
     state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
     with tempfile.TemporaryDirectory() as tmp:
@@ -4052,6 +4211,8 @@ def main(argv):
         actual = _run_council_deleted_task_ref(repo_root, scenario)
     elif kind == "state_engine_reconnect_after_replace":
         actual = _run_state_engine_reconnect_after_replace(repo_root, scenario)
+    elif kind == "clean_state_wipe_and_restart":
+        actual = _run_clean_state_wipe_and_restart(repo_root, scenario)
     elif kind == "memory_hybrid_rrf":
         actual = _run_memory_hybrid(repo_root, scenario)
     elif kind == "memory_vec_missing_fallback":

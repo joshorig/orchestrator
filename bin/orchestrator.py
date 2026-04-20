@@ -1872,6 +1872,95 @@ def state_engine_restore(*, cfg=None, backup_path=None):
     }
 
 
+def state_engine_wipe_runtime_state(*, cfg=None):
+    cfg = cfg or load_config()
+    engine = get_state_engine(cfg=cfg)
+    status = engine.initialize()
+    if not status.get("enabled"):
+        return {"enabled": False, "mode": status.get("mode"), "wiped": False}
+    active_labels = _active_orchestrator_launch_agent_labels()
+    if active_labels:
+        return {
+            "enabled": True,
+            "mode": status.get("mode"),
+            "wiped": False,
+            "error": "state_engine_wipe_active_runtime",
+            "active_labels": active_labels,
+        }
+    conn = engine.connect()
+    before = {
+        "tasks": engine.count_table("tasks", conn=conn),
+        "features": engine.count_table("features", conn=conn),
+        "memory_observations": engine.count_table("memory_observations", conn=conn),
+        "schema_migrations": engine.count_table("schema_migrations", conn=conn),
+        "blocker_codes": engine.count_table("blocker_codes", conn=conn),
+    }
+    with conn:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("DELETE FROM tasks")
+        conn.execute("DELETE FROM task_transitions")
+        conn.execute("DELETE FROM features")
+        conn.execute("DELETE FROM feature_children")
+        conn.execute("DELETE FROM self_repair_issues")
+        conn.execute("DELETE FROM self_repair_deliberations")
+        conn.execute("DELETE FROM artifacts")
+        conn.execute("DELETE FROM events")
+        conn.execute("DELETE FROM metrics")
+        conn.execute("DELETE FROM task_costs")
+        conn.execute("DELETE FROM environment_check_log")
+        conn.execute("DELETE FROM orphan_recovery_log")
+        conn.execute("DELETE FROM task_bypass_log")
+        conn.execute("PRAGMA foreign_keys = ON")
+    try:
+        conn.execute("VACUUM")
+    except sqlite3.OperationalError:
+        pass
+    for state in STATES:
+        queue_dir = QUEUE_ROOT / state
+        if queue_dir.exists():
+            for path in queue_dir.glob("*.json"):
+                path.unlink()
+    if FEATURES_DIR.exists():
+        for path in FEATURES_DIR.glob("*.json"):
+            path.unlink()
+    for path in (TRANSITIONS_LOG, EVENTS_LOG, METRICS_LOG):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+    if CLAIMS_DIR.exists():
+        for path in CLAIMS_DIR.glob("*.pid"):
+            path.unlink()
+    _STATE_ENGINE_CACHE["key"] = None
+    _STATE_ENGINE_CACHE["engine"] = None
+    restarted = get_state_engine(cfg=cfg)
+    restarted_status = restarted.initialize()
+    after_conn = restarted.connect()
+    after = {
+        "tasks": restarted.count_table("tasks", conn=after_conn),
+        "features": restarted.count_table("features", conn=after_conn),
+        "memory_observations": restarted.count_table("memory_observations", conn=after_conn),
+        "schema_migrations": restarted.count_table("schema_migrations", conn=after_conn),
+        "blocker_codes": restarted.count_table("blocker_codes", conn=after_conn),
+    }
+    return {
+        "enabled": True,
+        "mode": restarted_status.get("mode"),
+        "wiped": True,
+        "before": before,
+        "after": after,
+        "integrity_check": restarted.integrity_check(),
+        "fs_queue_count": sum(1 for state in STATES for _ in (QUEUE_ROOT / state).glob("*.json")) if QUEUE_ROOT.exists() else 0,
+        "fs_feature_count": sum(1 for _ in FEATURES_DIR.glob("*.json")) if FEATURES_DIR.exists() else 0,
+        "transitions_log_exists": TRANSITIONS_LOG.exists(),
+        "events_log_exists": EVENTS_LOG.exists(),
+        "metrics_log_exists": METRICS_LOG.exists(),
+        "allowlist_preserved": ALLOWLIST_PATH.exists(),
+        "agent_scans_preserved": AGENT_SCAN_DIR.exists(),
+        "mcp_audits_preserved": MCP_AUDIT_DIR.exists(),
+    }
+
+
 def _state_engine_maybe_reconcile(*, cfg=None):
     cfg = cfg or load_config()
     if not _state_engine_write_enabled(cfg=cfg):
@@ -11982,6 +12071,7 @@ def main(argv=None):
     p_state_backup.add_argument("--path", default=None)
     p_state_restore = sub.add_parser("state-engine-restore")
     p_state_restore.add_argument("--path", default=None)
+    sub.add_parser("state-engine-wipe-runtime-state")
     p_agent_scan = sub.add_parser("agent-scan")
     p_agent_scan.add_argument("action", choices=("scan",))
     p_agent_scan.add_argument("--skills", action="append", default=[])
@@ -12137,6 +12227,8 @@ def main(argv=None):
         print(json.dumps(state_engine_backup(backup_path=args.path), sort_keys=True))
     elif args.cmd == "state-engine-restore":
         print(json.dumps(state_engine_restore(backup_path=args.path), sort_keys=True))
+    elif args.cmd == "state-engine-wipe-runtime-state":
+        print(json.dumps(state_engine_wipe_runtime_state(), sort_keys=True))
     elif args.cmd == "agent-scan":
         if args.action == "scan":
             if args.skills:
