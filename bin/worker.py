@@ -1387,6 +1387,23 @@ def deploy_self_repair(target, project, worktree, log_path, *, restart_launch_ag
     return (True, "ok", info)
 
 
+def _self_repair_deploy_mode(task, project_name):
+    """Resolve self-repair deployment mode with canonical-main protection.
+
+    >>> _self_repair_deploy_mode({"engine_args": {"self_repair": {"deploy_mode": "local-main"}}}, "devmini-orchestrator")
+    'branch-pr'
+    >>> _self_repair_deploy_mode({"engine_args": {"self_repair": {"deploy_mode": "local-main"}}}, "demo-project")
+    'local-main'
+    >>> _self_repair_deploy_mode({"engine_args": {"self_repair": {}}}, "devmini-orchestrator")
+    'branch-pr'
+    """
+    repair = ((task.get("engine_args") or {}).get("self_repair") or {})
+    mode = str(repair.get("deploy_mode") or "branch-pr").strip() or "branch-pr"
+    if project_name == "devmini-orchestrator" and mode == "local-main":
+        return "branch-pr"
+    return mode
+
+
 # --- memory context ---------------------------------------------------------
 
 CONTEXT_RULE_FILES = ("AGENTS.md", "CLAUDE.md", "CODEX.md", "WARP.md")
@@ -6402,7 +6419,8 @@ def run_qa_slot(task, cfg):
                                 reason=f"semantic qa scope inadequate for {target_id}", mutator=mut_driver_scope_fail)
                     return
 
-                if self_repair_meta.get("enabled"):
+                deploy_mode = _self_repair_deploy_mode(target, project["name"])
+                if self_repair_meta.get("enabled") and deploy_mode == "local-main":
                     deploy_ok, deploy_reason, deploy_info = deploy_self_repair(
                         target,
                         project,

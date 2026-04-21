@@ -687,7 +687,7 @@ CONFIG_DEFAULTS = {
     "self_repair": {
         "enabled": True,
         "project": "devmini-orchestrator",
-        "deploy_mode": "local-main",
+        "deploy_mode": "branch-pr",
         "council_members": ("socrates", "feynman", "ada", "torvalds"),
         "verifier_panel": ("socrates", "kahneman", "ada"),
         "approval_panel": ("feynman", "meadows", "torvalds"),
@@ -7897,7 +7897,7 @@ def _enqueue_self_repair_issue_task(feature, issue):
                 "enabled": True,
                 "issue_kind": issue.get("issue_kind") or repair_cfg.get("issue_kind") or "runtime_bug",
                 "source": issue.get("source") or repair_cfg.get("source") or "manual",
-                "deploy_mode": repair_cfg.get("deploy_mode", "local-main"),
+                "deploy_mode": repair_cfg.get("deploy_mode", "branch-pr"),
                 "council_members": list(repair_cfg.get("council_members") or ()),
                 "restart_launch_agents": bool(repair_cfg.get("restart_launch_agents", True)),
             },
@@ -9582,7 +9582,7 @@ def enqueue_self_repair(*, summary, evidence, issue_kind="runtime_bug", source="
                 "enabled": True,
                 "issue_kind": issue_kind,
                 "source": source,
-                "deploy_mode": repair_cfg.get("deploy_mode", "local-main"),
+                "deploy_mode": repair_cfg.get("deploy_mode", "branch-pr"),
                 "council_members": list(repair_cfg.get("council_members") or ()),
                 "restart_launch_agents": bool(repair_cfg.get("restart_launch_agents", True)),
                 "issues": [{
