@@ -7516,6 +7516,13 @@ def _self_repair_has_active_work(feature):
     return False
 
 
+def _self_repair_active_issue(feature):
+    for issue in (((feature or {}).get("self_repair") or {}).get("issues") or []):
+        if _self_repair_issue_live(issue):
+            return issue
+    return None
+
+
 def _self_repair_mark_issue(feature_id, issue_key, **updates):
     def mut(feature):
         sr = feature.setdefault("self_repair", {})
@@ -7525,6 +7532,126 @@ def _self_repair_mark_issue(feature_id, issue_key, **updates):
                 issue.update(updates)
                 break
     return update_feature(feature_id, mut)
+
+
+def _append_self_repair_update_to_live_tasks(feature_id, issue_key, *, target_issue_key=None):
+    """Append a newly attached self-repair issue to the active live task(s).
+
+    The active repair lane should absorb new evidence instead of spawning
+    parallel codex slices for the same feature.
+
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     feats = root / "features"; feats.mkdir()
+    ...     queue_root = root / "queue"
+    ...     for state in STATES:
+    ...         (queue_root / state).mkdir(parents=True, exist_ok=True)
+    ...     feature = {
+    ...         "feature_id": "feature-sr",
+    ...         "self_repair": {"enabled": True, "issues": [
+    ...             {"issue_key": "live", "status": "executing", "summary": "live summary", "evidence": "live evidence", "execution_task_ids": ["task-live"]},
+    ...             {"issue_key": "new", "status": "pending", "summary": "new summary", "evidence": "new evidence", "source": "workflow-check"},
+    ...         ]},
+    ...     }
+    ...     write_json_atomic(feats / "feature-sr.json", feature)
+    ...     write_json_atomic((queue_root / "running" / "task-live.json"), {"task_id": "task-live", "state": "running", "engine_args": {"issue_summary": "live summary", "evidence": "live evidence"}})
+    ...     old = {
+    ...         "FEATURES_DIR": _append_self_repair_update_to_live_tasks.__globals__["FEATURES_DIR"],
+    ...         "QUEUE_ROOT": _append_self_repair_update_to_live_tasks.__globals__["QUEUE_ROOT"],
+    ...     }
+    ...     _append_self_repair_update_to_live_tasks.__globals__["FEATURES_DIR"] = feats
+    ...     _append_self_repair_update_to_live_tasks.__globals__["QUEUE_ROOT"] = queue_root
+    ...     out = _append_self_repair_update_to_live_tasks("feature-sr", "new")
+    ...     saved_feature = read_json(feats / "feature-sr.json", {})
+    ...     saved_task = read_json(queue_root / "running" / "task-live.json", {})
+    ...     _append_self_repair_update_to_live_tasks.__globals__["FEATURES_DIR"] = old["FEATURES_DIR"]
+    ...     _append_self_repair_update_to_live_tasks.__globals__["QUEUE_ROOT"] = old["QUEUE_ROOT"]
+    >>> out["appended"], out["target_issue_key"], saved_feature["self_repair"]["issues"][1]["status"]
+    (1, 'live', 'appended')
+    >>> saved_task["engine_args"]["self_repair_updates"][0]["issue_key"]
+    'new'
+    """
+    feature = read_feature(feature_id)
+    if not feature:
+        return {"appended": 0, "reason": "feature_missing", "feature_id": feature_id}
+    issues = (((feature or {}).get("self_repair") or {}).get("issues") or [])
+    source_issue = next((issue for issue in issues if issue.get("issue_key") == issue_key), None)
+    if not source_issue:
+        return {"appended": 0, "reason": "issue_missing", "feature_id": feature_id, "issue_key": issue_key}
+    target_issue = next((issue for issue in issues if issue.get("issue_key") == target_issue_key), None) if target_issue_key else _self_repair_active_issue(feature)
+    if not target_issue:
+        return {"appended": 0, "reason": "no_active_issue", "feature_id": feature_id, "issue_key": issue_key}
+    target_key = target_issue.get("issue_key")
+    update_payload = {
+        "issue_key": issue_key,
+        "summary": source_issue.get("summary") or "",
+        "evidence": source_issue.get("evidence") or "",
+        "source": source_issue.get("source") or "",
+        "attached_at": source_issue.get("attached_at") or now_iso(),
+        "appended_at": now_iso(),
+    }
+    appended = 0
+    for task_id in [target_issue.get("planner_task_id"), *(target_issue.get("execution_task_ids") or [])]:
+        if not task_id:
+            continue
+        found = find_task(task_id, states=("queued", "claimed", "running"))
+        if not found:
+            continue
+        state, _task = found
+        path = task_path(task_id, state)
+        def mut(task):
+            eargs = task.setdefault("engine_args", {})
+            updates = eargs.setdefault("self_repair_updates", [])
+            if any((row.get("issue_key") == issue_key) for row in updates):
+                return
+            updates.append(dict(update_payload))
+            extra = (
+                f"[APPENDED SELF-REPAIR UPDATE]\n"
+                f"issue_key: {issue_key}\n"
+                f"summary: {source_issue.get('summary') or ''}\n"
+                f"source: {source_issue.get('source') or ''}\n"
+                f"evidence:\n{source_issue.get('evidence') or '(none)'}\n"
+            )
+            existing_evidence = (eargs.get("evidence") or "").strip()
+            eargs["evidence"] = (existing_evidence + "\n\n" + extra).strip() if existing_evidence else extra
+            base_summary = (eargs.get("issue_summary") or task.get("summary") or "").strip()
+            if source_issue.get("summary") and source_issue["summary"] not in base_summary:
+                eargs["issue_summary"] = (base_summary + f" [appended: {source_issue['summary'][:120]}]").strip()
+            task["self_repair_material_update_at"] = now_iso()
+        update_task_in_place(path, mut)
+        appended += 1
+
+    def mut_feature(f):
+        sr = f.setdefault("self_repair", {})
+        sr["material_update_pending"] = False
+        sr["last_material_update_at"] = now_iso()
+        sr["last_material_update_issue_key"] = issue_key
+        issues = sr.setdefault("issues", [])
+        for issue in issues:
+            if issue.get("issue_key") == issue_key:
+                issue["status"] = "appended"
+                issue["appended_to_issue_key"] = target_key
+                issue["appended_at"] = now_iso()
+                issue["execution_task_ids"] = []
+                break
+        for issue in issues:
+            if issue.get("issue_key") == target_key:
+                appended_updates = list(issue.get("appended_updates") or [])
+                if not any((row.get("issue_key") == issue_key) for row in appended_updates):
+                    appended_updates.append(dict(update_payload))
+                issue["appended_updates"] = appended_updates
+                issue["last_seen_at"] = now_iso()
+                break
+    update_feature(feature_id, mut_feature)
+    append_event(
+        "self-repair",
+        "issue_appended_to_live_task",
+        feature_id=feature_id,
+        task_id=target_issue.get("planner_task_id"),
+        details={"issue_key": issue_key, "target_issue_key": target_key, "appended_tasks": appended},
+    )
+    return {"appended": appended, "feature_id": feature_id, "issue_key": issue_key, "target_issue_key": target_key}
 
 
 def _self_repair_issue_observation_target(issue):
@@ -9593,6 +9720,22 @@ def enqueue_self_repair(*, summary, evidence, issue_kind="runtime_bug", source="
                 source=source,
                 issue_key=resolved_issue_key,
             )
+            active_issue = _self_repair_active_issue(updated)
+            if active_issue:
+                appended = _append_self_repair_update_to_live_tasks(
+                    updated["feature_id"],
+                    resolved_issue_key,
+                    target_issue_key=active_issue.get("issue_key"),
+                )
+                return {
+                    "enqueued": 0,
+                    "reason": "appended_to_active",
+                    "feature_id": updated["feature_id"],
+                    "task_id": active_issue.get("planner_task_id"),
+                    "issue_key": resolved_issue_key,
+                    "target_issue_key": active_issue.get("issue_key"),
+                    "appended": appended.get("appended", 0),
+                }
             if _self_repair_issue_live(issue):
                 return {
                     "enqueued": 0,

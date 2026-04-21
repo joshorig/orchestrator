@@ -4055,7 +4055,12 @@ def run_claude_planner(task, cfg, timeout, log_path):
         }
     elif council_meta["panel"]:
         shared_engine_args = {"council": council_meta}
-    for idx, s in enumerate(slices[:3]):
+    candidate_slices = slices[:3]
+    if planner_mode == "self-repair-plan":
+        candidate_slices = candidate_slices[:1]
+        if len(slices) > 1:
+            dropped.append(("self-repair-plan", task.get("summary", "")[:80], f"extra self-repair slices suppressed: {len(slices) - 1}"))
+    for idx, s in enumerate(candidate_slices):
         raw_tpl = s.get("braid_template")
         summ = s.get("summary", "")
         if raw_tpl not in TEMPLATE_ROLE:
@@ -6087,6 +6092,7 @@ def run_codex_slot(task, cfg):
 def build_codex_prompt(task, graph_body, memory_ctx):
     engine_args = task.get("engine_args") or {}
     evidence = (engine_args.get("evidence") or "").strip()
+    updates = list(engine_args.get("self_repair_updates") or [])
     council = engine_args.get("council") or {}
     return (
         "[BRAID REASONING GRAPH — traverse deterministically. If you cannot, "
@@ -6098,6 +6104,16 @@ def build_codex_prompt(task, graph_body, memory_ctx):
         "[TASK]\n"
         f"{task.get('summary','')}\n\n"
         + (f"[ISSUE EVIDENCE]\n{evidence}\n\n" if evidence else "")
+        + (
+            "[APPENDED SELF-REPAIR UPDATES]\n"
+            + "\n\n".join(
+                f"- issue_key: {row.get('issue_key')}\n  summary: {row.get('summary') or '-'}\n  source: {row.get('source') or '-'}\n  evidence: {row.get('evidence') or '-'}"
+                for row in updates
+            )
+            + "\n\n"
+            if updates else
+            ""
+        )
         + (
             "[COUNCIL DECISION]\n"
             f"panel: {', '.join(council.get('panel') or [])}\n"
