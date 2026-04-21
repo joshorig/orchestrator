@@ -9414,11 +9414,11 @@ def tick_canary_workflows(force=False, *, project_override=None, fallback_from=N
         return {"enqueued": 0, "reason": "disabled"}
 
     outstanding = engine_outstanding()
-    backed_up = {}
-    for engine, count in outstanding.items():
-        threshold = 2 if engine == "codex" else 1
-        if count > threshold:
-            backed_up[engine] = count
+    backed_up = {
+        engine: count
+        for engine, count in outstanding.items()
+        if engine != "codex" and count > 1
+    }
     if backed_up:
         msg = "Gated — backlog busy: " + ", ".join(f"{e}={n}" for e, n in sorted(backed_up.items()))
         write_agent_status("canary", "gated", msg)
