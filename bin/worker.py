@@ -423,6 +423,44 @@ def _newer_review_feedback_exists(feature_id, target_id, current_task_id, curren
     return False
 
 
+def _review_feedback_target_state(target_id):
+    """Classify the current state of a review-feedback target task.
+
+    Stable targets are safe to inspect/edit. In-flight targets indicate another
+    worker still owns the worktree and this feedback task should stand down
+    instead of reporting a false missing-target blocker.
+
+    >>> old = o.find_task
+    >>> calls = []
+    >>> def fake_find_task(target_id, states=None):
+    ...     calls.append(tuple(states or ()))
+    ...     if tuple(states or ()) == ("queued", "awaiting-review", "awaiting-qa", "done", "failed"):
+    ...         return None
+    ...     if tuple(states or ()) == ("claimed", "running"):
+    ...         return ("running", {"task_id": target_id})
+    ...     return None
+    >>> o.find_task = fake_find_task
+    >>> _review_feedback_target_state("task-1")
+    ('inflight', 'running', {'task_id': 'task-1'})
+    >>> calls
+    [('queued', 'awaiting-review', 'awaiting-qa', 'done', 'failed'), ('claimed', 'running')]
+    >>> o.find_task = old
+    """
+    stable = o.find_task(target_id, states=("queued", "awaiting-review", "awaiting-qa", "done", "failed"))
+    if stable:
+        state, target = stable
+        return "usable", state, target
+    inflight = o.find_task(target_id, states=("claimed", "running"))
+    if inflight:
+        state, target = inflight
+        return "inflight", state, target
+    abandoned = o.find_task(target_id, states=("abandoned",))
+    if abandoned:
+        state, target = abandoned
+        return "abandoned", state, target
+    return "missing", None, None
+
+
 # --- git worktree management ------------------------------------------------
 
 def base_branch_for_task(task):
@@ -4781,8 +4819,26 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
                   blocker_code="runtime_precondition_failed", summary="review-feedback missing target_task_id", retryable=False)
         return
 
-    found = o.find_task(target_id, states=("queued", "awaiting-review", "awaiting-qa", "done", "failed"))
-    if not found:
+    target_status, target_state, target = _review_feedback_target_state(target_id)
+    if target_status == "inflight":
+        o.move_task(
+            task_id,
+            "claimed",
+            "abandoned",
+            reason=f"review-feedback target in-flight: {target_id}",
+            mutator=lambda t: t.update({"finished_at": o.now_iso(), "abandoned_reason": f"in-flight target {target_id}"}),
+        )
+        return
+    if target_status == "abandoned":
+        o.move_task(
+            task_id,
+            "claimed",
+            "abandoned",
+            reason=f"review-feedback target abandoned: {target_id}",
+            mutator=lambda t: t.update({"finished_at": o.now_iso(), "abandoned_reason": f"abandoned target {target_id}"}),
+        )
+        return
+    if target_status == "missing":
         feature = o.read_feature(task.get("feature_id")) if task.get("feature_id") else None
         if (
             (feature and feature.get("status") == "finalizing")
@@ -4822,7 +4878,6 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
         fail_task(task_id, "claimed", f"review-feedback: target {target_id} not found in queue",
                   blocker_code="qa_target_missing", summary="review-feedback target missing", retryable=True)
         return
-    target_state, target = found
 
     wt_str = task.get("worktree") or target.get("worktree")
     if not wt_str or not pathlib.Path(wt_str).exists():
