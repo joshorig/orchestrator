@@ -1653,6 +1653,10 @@ def _record_environment_check(project_name, blockers, *, cfg=None):
         return False
     engine = get_state_engine(cfg=cfg)
     engine.initialize()
+    if isinstance(project_name, dict):
+        project_name = project_name.get("name")
+    if project_name is not None:
+        project_name = str(project_name)
     summary = "; ".join(
         f"{issue.get('code')}:{issue.get('summary')}"
         for issue in (blockers or [])
@@ -2555,6 +2559,8 @@ def environment_health(*, refresh=False):
 
 
 def project_environment_blockers(project_name, *, refresh=False):
+    if isinstance(project_name, dict):
+        project_name = project_name.get("name")
     rows = []
     for issue in environment_health(refresh=refresh).get("issues", []):
         if issue.get("severity") != "error":
