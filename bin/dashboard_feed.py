@@ -568,11 +568,15 @@ def _skills():
         costs = []
         projects = Counter()
         for task_id in sorted(skill_tasks.get(name) or []):
-            task = o.find_task(task_id)
-            if not task:
+            found = o.find_task(task_id)
+            if not found:
                 error_count += 1
                 continue
-            state = str(task.get("state") or "")
+            if isinstance(found, tuple) and len(found) == 2:
+                state, task = found
+            else:
+                task = found
+                state = str((task or {}).get("state") or "")
             projects[str(task.get("project") or "unknown")] += 1
             if state == "done":
                 pass_count += 1

@@ -162,7 +162,16 @@ class StateEngine:
         row = conn.execute("PRAGMA integrity_check").fetchone()
         if not row:
             return "unknown"
-        return str(row[0])
+        result = str(row[0])
+        if "memory_obs_fts" in result or "fts5:" in result:
+            try:
+                self.rebuild_memory_fts(conn=conn)
+                row = conn.execute("PRAGMA integrity_check").fetchone()
+                if row:
+                    result = str(row[0])
+            except sqlite3.Error:
+                pass
+        return result
 
     def checkpoint(self, *, conn: sqlite3.Connection | None = None) -> tuple[Any, ...]:
         conn = conn or self.connect()
