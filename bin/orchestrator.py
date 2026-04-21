@@ -6788,6 +6788,14 @@ def cleanup_worktrees(dry_run=False):
                 f["status"] = "abandoned"
 
         feature = update_feature(feature["feature_id"], mut_feature)
+        if state == "MERGED" and project_name == "devmini-orchestrator":
+            sync = _sync_project_main_to_origin(project)
+            append_event(
+                "cleanup-worktrees",
+                "canonical_main_sync",
+                feature_id=feature.get("feature_id"),
+                details={"project": project_name, **sync},
+            )
         if state == "MERGED" and feature.get("roadmap_entry_id"):
             historian = new_task(
                 role="historian",
@@ -10534,6 +10542,54 @@ def _repair_project_main_checkout(project):
             return {"fixed": False, "detail": (proc.stderr or proc.stdout or "git repair failed").strip()[:240], "changes": changes}
     fixed = _project_main_preflight_issue(project) is None
     return {"fixed": fixed, "detail": "project main checkout repaired" if fixed else "project main checkout still dirty", "changes": changes}
+
+
+def _sync_project_main_to_origin(project):
+    """Fast-forward a clean canonical checkout to origin/main.
+
+    >>> import pathlib, tempfile, subprocess
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     remote = root / "remote.git"
+    ...     canonical = root / "canonical"
+    ...     clone = root / "clone"
+    ...     _ = subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
+    ...     _ = subprocess.run(["git", "clone", str(remote), str(clone)], check=True, capture_output=True, text=True)
+    ...     _ = subprocess.run(["git", "-C", str(clone), "checkout", "-b", "main"], check=True, capture_output=True, text=True)
+    ...     _ = subprocess.run(["git", "-C", str(clone), "config", "user.name", "Doctest"], check=True, capture_output=True, text=True)
+    ...     _ = subprocess.run(["git", "-C", str(clone), "config", "user.email", "doctest@example.com"], check=True, capture_output=True, text=True)
+    ...     _ = (clone / "a.txt").write_text("one")
+    ...     _ = subprocess.run(["git", "-C", str(clone), "add", "a.txt"], check=True, capture_output=True, text=True)
+    ...     _ = subprocess.run(["git", "-C", str(clone), "commit", "-m", "one"], check=True, capture_output=True, text=True)
+    ...     _ = subprocess.run(["git", "-C", str(clone), "push", "-u", "origin", "main"], check=True, capture_output=True, text=True)
+    ...     _ = subprocess.run(["git", "clone", str(remote), str(canonical)], check=True, capture_output=True, text=True)
+    ...     _ = subprocess.run(["git", "-C", str(canonical), "checkout", "main"], check=True, capture_output=True, text=True)
+    ...     _ = (clone / "a.txt").write_text("two")
+    ...     _ = subprocess.run(["git", "-C", str(clone), "commit", "-am", "two"], check=True, capture_output=True, text=True)
+    ...     _ = subprocess.run(["git", "-C", str(clone), "push"], check=True, capture_output=True, text=True)
+    ...     out = _sync_project_main_to_origin({"path": str(canonical), "name": "demo"})
+    ...     out["fixed"], "origin/main" in (out["changes"] or [])[0]
+    (True, True)
+    """
+    repo_path = pathlib.Path(project["path"])
+    branch = repo_status(repo_path).get("branch")
+    if branch and branch != "main":
+        return {"fixed": False, "detail": f"refusing to sync non-main branch: {branch}"}
+    dirty = repo_status(repo_path).get("dirty")
+    if dirty:
+        return {"fixed": False, "detail": "canonical main dirty; refusing auto-sync"}
+    changes = []
+    for cmd, desc in (
+        (["git", "-C", str(repo_path), "fetch", "origin", "main"], "git fetch origin main"),
+        (["git", "-C", str(repo_path), "checkout", "main"], "git checkout main"),
+        (["git", "-C", str(repo_path), "reset", "--hard", "origin/main"], "git reset --hard origin/main"),
+    ):
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False)
+        if proc.returncode != 0:
+            return {"fixed": False, "detail": (proc.stderr or proc.stdout or "git sync failed").strip()[:240], "changes": changes}
+        changes.append(desc)
+    fixed = _project_main_preflight_issue(project) is None
+    return {"fixed": fixed, "detail": "project main synced to origin/main" if fixed else "project main still not clean after sync", "changes": changes}
 
 
 def _repair_qa_contract(task):
