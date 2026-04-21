@@ -776,7 +776,7 @@ def _observation_window(features):
 def _memory_observations():
     engine, conn = _conn()
     if not engine or not conn:
-        return {"total_count": 0, "by_project": []}
+        return {"total_count": 0, "by_project": [], "token_savior": {"usage_7d": 0, "by_project": [], "recent": []}}
     rows = conn.execute(
         """
         SELECT
@@ -790,6 +790,35 @@ def _memory_observations():
         """
     ).fetchall()
     total = engine.memory_count()
+    since_dt = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=7)
+    token_savior_by_project = Counter()
+    token_savior_sections = Counter()
+    token_savior_recent = []
+    for row in o.read_events(role="skills", limit=500):
+        if row.get("event") != "token_savior_used":
+            continue
+        try:
+            row_dt = dt.datetime.fromisoformat(str(row.get("ts") or "").replace("Z", "+00:00"))
+        except Exception:
+            row_dt = None
+        if row_dt and row_dt.tzinfo is None:
+            row_dt = row_dt.replace(tzinfo=dt.timezone.utc)
+        if row_dt and row_dt < since_dt:
+            continue
+        details = row.get("details") or {}
+        project = str(details.get("project") or "unknown")
+        token_savior_by_project[project] += 1
+        for section in details.get("sections") or []:
+            token_savior_sections[str(section)] += 1
+        token_savior_recent.append(
+            {
+                "ts": row.get("ts"),
+                "project": project,
+                "task_id": row.get("task_id"),
+                "role": details.get("role"),
+                "sections": list(details.get("sections") or []),
+            }
+        )
     return {
         "total_count": total,
         "by_project": [
@@ -800,6 +829,18 @@ def _memory_observations():
             }
             for row in rows
         ],
+        "token_savior": {
+            "usage_7d": sum(token_savior_by_project.values()),
+            "by_project": [
+                {"project": project, "count": count}
+                for project, count in token_savior_by_project.most_common(6)
+            ],
+            "top_sections": [
+                {"section": section, "count": count}
+                for section, count in token_savior_sections.most_common(6)
+            ],
+            "recent": token_savior_recent[-8:],
+        },
     }
 
 

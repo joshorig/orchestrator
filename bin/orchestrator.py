@@ -3788,11 +3788,61 @@ def atomic_claim(slot_engine):
         )
         return None
 
+    feature_cache = {}
+
+    def _task_feature(task):
+        feature_id = str(task.get("feature_id") or "").strip()
+        if not feature_id:
+            return None
+        if feature_id not in feature_cache:
+            feature_cache[feature_id] = read_feature(feature_id)
+        return feature_cache[feature_id]
+
+    def _task_is_canary(task):
+        engine_args = task.get("engine_args") or {}
+        if isinstance(engine_args, dict) and isinstance(engine_args.get("canary"), dict):
+            if engine_args.get("canary", {}).get("enabled"):
+                return True
+        if str(task.get("source") or "").startswith("tick-canary"):
+            return True
+        feature = _task_feature(task)
+        return bool((feature or {}).get("canary", {}).get("enabled"))
+
+    def _task_sort_key(task):
+        created_epoch = task.get("created_at_epoch")
+        try:
+            created_epoch = int(created_epoch)
+        except (TypeError, ValueError):
+            created_epoch = None
+        created_at = str(task.get("created_at") or "")
+        task_id = str(task.get("task_id") or "")
+        return (
+            0 if _task_is_canary(task) else 1,
+            created_epoch if created_epoch is not None else 10**18,
+            created_at,
+            task_id,
+        )
+
     if _state_engine_read_enabled():
-        candidates = iter_tasks(states=("queued",), engine=slot_engine)
+        candidates = sorted(
+            (dict(candidate or {}) for candidate in iter_tasks(states=("queued",), engine=slot_engine)),
+            key=_task_sort_key,
+        )
     else:
         queued = queue_dir("queued")
-        candidates = sorted(queued.glob("*.json"), key=lambda p: p.stat().st_mtime)
+        candidates = []
+        for src_path in sorted(queued.glob("*.json"), key=lambda p: p.stat().st_mtime):
+            try:
+                task = read_json(src_path)
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not task:
+                continue
+            if task.get("engine") != slot_engine:
+                continue
+            task["_src_path"] = src_path
+            candidates.append(task)
+        candidates.sort(key=_task_sort_key)
     busy_features = in_flight_feature_ids() if slot_engine == "codex" else set()
     paused_templates = {
         name for name, entry in load_braid_index().items()
@@ -3803,14 +3853,9 @@ def atomic_claim(slot_engine):
             task = dict(candidate or {})
             src = task_path(task.get("task_id"), "queued")
         else:
-            src = candidate
-            try:
-                task = read_json(src)
-            except (OSError, json.JSONDecodeError):
-                continue
-            if task is None:
-                continue
-            if task.get("engine") != slot_engine:
+            task = dict(candidate or {})
+            src = task.pop("_src_path", None)
+            if not src:
                 continue
         if slot_engine in ("claude", "codex") and project_hard_stopped(task.get("project")):
             continue
@@ -9369,7 +9414,11 @@ def tick_canary_workflows(force=False, *, project_override=None, fallback_from=N
         return {"enqueued": 0, "reason": "disabled"}
 
     outstanding = engine_outstanding()
-    backed_up = {engine: n for engine, n in outstanding.items() if n > 1}
+    backed_up = {}
+    for engine, count in outstanding.items():
+        threshold = 2 if engine == "codex" else 1
+        if count > threshold:
+            backed_up[engine] = count
     if backed_up:
         msg = "Gated — backlog busy: " + ", ".join(f"{e}={n}" for e, n in sorted(backed_up.items()))
         write_agent_status("canary", "gated", msg)

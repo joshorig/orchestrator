@@ -1681,12 +1681,13 @@
     function renderMemorySurface(data) {
       const rows = (data.memory_observations || {}).by_project || [];
       const totalCount = (data.memory_observations || {}).total_count || 0;
+      const tokenSavior = (data.memory_observations || {}).token_savior || {};
       const now = Date.now();
-      document.getElementById("memorySurface").innerHTML = rows.length ? `
+      document.getElementById("memorySurface").innerHTML = `
         <div class="mini-row">
           <div class="mini-top"><strong>Total observations</strong><span class="tiny">${esc(totalCount)} rows</span></div>
         </div>
-        ${rows.map(row => {
+        ${rows.length ? rows.map(row => {
           const ageDays = row.latest_at ? Math.max(0, Math.floor((now - Date.parse(row.latest_at)) / 86400000)) : null;
           const ageClass = ageDays == null ? "" : ageDays <= 3 ? "ok" : ageDays <= 7 ? "warn" : "crit";
           return `
@@ -1699,8 +1700,33 @@
               <div class="tiny ${ageClass}">${ageDays == null ? "unknown age" : `${ageDays}d stale`}</div>
             </div>
           `;
-        }).join("")}
-      ` : `<div class="empty">No memory observations recorded.</div>`;
+        }).join("") : `<div class="empty">No memory observations recorded.</div>`}
+        <div class="section-title" style="margin-top:12px">Token Savior</div>
+        <div class="mini-row">
+          <div class="mini-top"><strong>Usage in 7d</strong><span class="tiny">${esc(tokenSavior.usage_7d || 0)} assists</span></div>
+          <div class="mini-detail">${esc((tokenSavior.top_sections || []).map(row => `${row.section} ${row.count}`).join(" · ") || "No section usage yet")}</div>
+        </div>
+        ${(tokenSavior.by_project || []).length ? `
+          ${(tokenSavior.by_project || []).map(row => `
+            <div class="memory-row" onclick="setFilter('project','${escAttr(row.project)}')">
+              <div class="row-head">
+                <span class="row-title">${esc(row.project)}</span>
+                <span class="row-meta">${esc(row.count)} assists</span>
+              </div>
+            </div>
+          `).join("")}
+        ` : `<div class="empty" style="margin-top:10px">No token-savior usage yet.</div>`}
+        ${(tokenSavior.recent || []).length ? `
+          <div class="section-title" style="margin-top:12px">Recent assists</div>
+          ${(tokenSavior.recent || []).slice().reverse().map(row => `
+            <div class="mini-row">
+              <div class="mini-top"><strong>${esc(row.project || "unknown")}</strong><span class="tiny">${esc(formatTs(row.ts))}</span></div>
+              <div class="mini-detail">${esc((row.sections || []).join(", ") || row.role || "-")}</div>
+              <div class="tiny">${esc(row.task_id || "-")}</div>
+            </div>
+          `).join("")}
+        ` : ""}
+      `;
     }
 
     function renderEnvironmentPanel(data) {
