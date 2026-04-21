@@ -703,6 +703,76 @@
       font-size: 10px;
       font-weight: 500;
     }
+    .skill-summary-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .skill-stat {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 12px;
+      background: rgba(15, 23, 42, 0.34);
+    }
+    .skill-stat .lbl {
+      color: var(--dim);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 10px;
+      margin-bottom: 4px;
+    }
+    .skill-stat .val {
+      font-size: 18px;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+    }
+    .skill-card-list {
+      display: grid;
+      gap: 10px;
+    }
+    .skill-card {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      background: rgba(15, 23, 42, 0.34);
+    }
+    .skill-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      color: var(--dim);
+      font-size: 11px;
+      margin-top: 4px;
+    }
+    .skill-bar {
+      margin-top: 8px;
+      height: 10px;
+      width: 100%;
+      border-radius: 999px;
+      overflow: hidden;
+      background: rgba(148, 163, 184, 0.14);
+      display: flex;
+    }
+    .skill-seg.pass { background: var(--emerald); }
+    .skill-seg.fail { background: var(--amber); }
+    .skill-seg.error { background: var(--rose); }
+    .skill-seg.pending { background: var(--cyan); }
+    .skill-breakdown {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 6px;
+      margin-top: 8px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .skill-breakdown .k { color: var(--dim); display: block; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; }
+    .skill-recent {
+      margin-top: 10px;
+      display: grid;
+      gap: 6px;
+    }
+    .skill-recent .tiny { overflow-wrap: anywhere; }
     .env-check { text-align: center; font-weight: 700; }
     .env-check.ok { color: var(--emerald); }
     .env-check.warn { color: var(--amber); }
@@ -1710,27 +1780,83 @@
     function renderSkillsPanel(data) {
       const skills = (data.skills || {}).skills || [];
       const latestScan = (data.skills || {}).latest_scan_counts || {};
+      const active7d = skills.filter(row => Number(row.usage_7d || 0) > 0).length;
+      const tokenSavior = Number((data.skills || {}).token_savior_usage_7d || 0);
+      const totalPass = skills.reduce((sum, row) => sum + Number(row.pass_count || 0), 0);
+      const totalFail = skills.reduce((sum, row) => sum + Number(row.fail_count || 0), 0);
+      const totalError = skills.reduce((sum, row) => sum + Number(row.error_count || 0), 0);
+      const recent = (data.skills || {}).recent_usage || [];
+      function seg(width, cls) {
+        return width > 0 ? `<div class="skill-seg ${cls}" style="width:${width}%"></div>` : "";
+      }
       document.getElementById("skillPanel").innerHTML = `
+        <div class="skill-summary-grid">
+          <div class="skill-stat"><div class="lbl">installed</div><div class="val">${esc((data.skills || {}).count || 0)}</div></div>
+          <div class="skill-stat"><div class="lbl">active 7d</div><div class="val">${esc(active7d)}</div></div>
+          <div class="skill-stat"><div class="lbl">token-savior</div><div class="val">${esc(tokenSavior)}</div></div>
+          <div class="skill-stat"><div class="lbl">scan</div><div class="val">${esc(`H${latestScan.high || 0}/M${latestScan.medium || 0}/L${latestScan.low || 0}`)}</div></div>
+        </div>
         <div class="mini-row">
-          <div class="mini-top"><strong>Trusted skills</strong><span class="tiny">${esc((data.skills || {}).count || 0)} installed</span></div>
-          <div class="mini-detail">latest agent-scan: high ${esc(latestScan.high || 0)} · medium ${esc(latestScan.medium || 0)} · low ${esc(latestScan.low || 0)}</div>
-          <div class="tiny">${esc(formatTs((data.skills || {}).latest_scan_at))}</div>
+          <div class="mini-top"><strong>Outcome totals</strong><span class="tiny">${esc(formatTs((data.skills || {}).latest_scan_at))}</span></div>
+          <div class="mini-detail">pass ${esc(totalPass)} · fail ${esc(totalFail)} · error ${esc(totalError)}</div>
+          <div class="tiny">driven by skill-context events joined to task outcomes and task costs</div>
         </div>
         ${skills.length ? `
-          <table class="skill-table">
-            <thead><tr><th>skill</th><th>status</th><th>source</th></tr></thead>
-            <tbody>
-              ${skills.map(row => `
-                <tr>
-                  <td>${esc(row.name || "-")}</td>
-                  <td>${esc(row.scan_status || "unknown")}</td>
-                  <td>${esc((row.source || "").replace("github:", ""))}</td>
-                </tr>
-                <tr><td colspan="3" class="tiny">${esc((row.sha || "").slice(0, 12))}${row.upstream_path ? ` · ${esc(row.upstream_path)}` : ""}</td></tr>
-              `).join("")}
-            </tbody>
-          </table>
+          <div class="skill-card-list">
+            ${skills.map(row => {
+              const pass = Number(row.pass_count || 0);
+              const fail = Number(row.fail_count || 0);
+              const error = Number(row.error_count || 0);
+              const pending = Number(row.pending_count || 0);
+              const total = pass + fail + error + pending;
+              const passPct = total ? (pass / total) * 100 : 0;
+              const failPct = total ? (fail / total) * 100 : 0;
+              const errorPct = total ? (error / total) * 100 : 0;
+              const pendingPct = total ? (pending / total) * 100 : 0;
+              const projectMix = (row.project_mix || []).map(item => `${item.project} ${item.count}`).join(" · ");
+              return `
+                <div class="skill-card">
+                  <div class="row-head">
+                    <span class="row-title">${esc(row.name || "-")}</span>
+                    <span class="count">${esc(row.usage_7d || 0)} uses</span>
+                  </div>
+                  <div class="skill-meta">
+                    <span>${esc((row.source || "").replace("github:", "").replace("local:sanitized-from-github:", "sanitized "))}</span>
+                    <span>${esc(row.scan_status || "unknown")}</span>
+                    <span>${esc((row.sha || "").slice(0, 12))}</span>
+                    <span>${esc(formatTs(row.last_used_at))}</span>
+                  </div>
+                  <div class="skill-bar">
+                    ${seg(passPct, "pass")}
+                    ${seg(failPct, "fail")}
+                    ${seg(errorPct, "error")}
+                    ${seg(pendingPct, "pending")}
+                  </div>
+                  <div class="skill-breakdown">
+                    <div><span class="k">pass</span>${esc(pass)}</div>
+                    <div><span class="k">fail</span>${esc(fail)}</div>
+                    <div><span class="k">error</span>${esc(error)}</div>
+                    <div><span class="k">median $</span>$${esc(Number(row.median_cost_usd || 0).toFixed(4))}</div>
+                    <div><span class="k">one-shot</span><span class="${toneForRate(Number(row.pass_rate || 0))}">${esc(Number(row.pass_rate || 0).toFixed(1))}%</span></div>
+                  </div>
+                  <div class="tiny">${esc(projectMix || "No project mix yet")}${row.upstream_path ? ` · ${esc(row.upstream_path)}` : ""}</div>
+                </div>
+              `;
+            }).join("")}
+          </div>
         ` : `<div class="empty">No trusted skills configured.</div>`}
+        ${recent.length ? `
+          <div class="skill-recent">
+            <div class="section-title" style="margin-top:12px">Recent usage</div>
+            ${recent.slice().reverse().map(row => `
+              <div class="mini-row">
+                <div class="mini-top"><strong>${esc(row.event)}</strong><span class="tiny">${esc(formatTs(row.ts))}</span></div>
+                <div class="mini-detail">${esc((row.skills || []).join(", ") || (row.sections || []).join(", ") || row.project || "-")}</div>
+                <div class="tiny">${esc(row.task_id || "-")} ${row.gate_name ? `· ${esc(row.gate_name)}` : ""}</div>
+              </div>
+            `).join("")}
+          </div>
+        ` : ""}
       `;
     }
 

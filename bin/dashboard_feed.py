@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import statistics
 import sys
 import datetime as dt
 from collections import Counter, defaultdict
@@ -485,6 +486,7 @@ def _runtime_audit():
 def _skills():
     cfg = o.load_config()
     trusted = list(o.skills_config(cfg=cfg)["trusted_skills"])
+    engine, conn = _conn()
     scans = []
     if o.AGENT_SCAN_DIR.exists():
         scans = sorted(o.AGENT_SCAN_DIR.glob("skills-audit-*.json"))[-8:]
@@ -498,12 +500,26 @@ def _skills():
     recent_events = []
     usage_counter = Counter()
     token_savior_count = 0
-    for row in o.read_events(role="skills", limit=200):
+    skill_tasks = defaultdict(set)
+    last_used_at = {}
+    since_dt = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=7)
+    for row in o.read_events(role="skills", limit=500):
         event = row.get("event")
         details = row.get("details") or {}
+        try:
+            row_dt = dt.datetime.fromisoformat(str(row.get("ts") or "").replace("Z", "+00:00"))
+        except Exception:
+            row_dt = None
+        if row_dt and row_dt.tzinfo is None:
+            row_dt = row_dt.replace(tzinfo=dt.timezone.utc)
+        if row_dt and row_dt < since_dt:
+            continue
         if event == "skill_context_used":
             for name in details.get("skills") or []:
                 usage_counter[name] += 1
+                if row.get("task_id"):
+                    skill_tasks[name].add(row.get("task_id"))
+                last_used_at[name] = max(str(row.get("ts") or ""), last_used_at.get(name, ""))
             recent_events.append(
                 {
                     "ts": row.get("ts"),
@@ -526,19 +542,70 @@ def _skills():
                     "sections": list(details.get("sections") or []),
                 }
             )
+    task_cost_by_task = {}
+    if engine and conn:
+        for row in engine.read_task_costs(limit=500, conn=conn):
+            ts = str(row.get("ts") or "")
+            try:
+                row_dt = dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            except Exception:
+                row_dt = None
+            if row_dt and row_dt.tzinfo is None:
+                row_dt = row_dt.replace(tzinfo=dt.timezone.utc)
+            if row_dt and row_dt < since_dt:
+                continue
+            task_id = row.get("task_id")
+            if not task_id:
+                continue
+            task_cost_by_task[task_id] = task_cost_by_task.get(task_id, 0.0) + float(row.get("cost_usd") or 0.0)
     rows = []
     for item in trusted:
+        name = item.get("name")
+        pass_count = 0
+        fail_count = 0
+        error_count = 0
+        pending_count = 0
+        costs = []
+        projects = Counter()
+        for task_id in sorted(skill_tasks.get(name) or []):
+            task = o.find_task(task_id)
+            if not task:
+                error_count += 1
+                continue
+            state = str(task.get("state") or "")
+            projects[str(task.get("project") or "unknown")] += 1
+            if state == "done":
+                pass_count += 1
+            elif state == "failed":
+                fail_count += 1
+            elif state in {"abandoned", "blocked"}:
+                error_count += 1
+            else:
+                pending_count += 1
+            if task_id in task_cost_by_task:
+                costs.append(float(task_cost_by_task[task_id]))
+        median_cost = statistics.median(costs) if costs else 0.0
+        total_outcomes = pass_count + fail_count + error_count
         rows.append(
             {
-                "name": item.get("name"),
+                "name": name,
                 "source": item.get("source"),
                 "sha": item.get("sha"),
                 "upstream_path": item.get("upstream_path"),
                 "scan_status": "accepted" if latest_scan and latest_scan.get("accepted") else ("unknown" if not latest_scan else "rejected"),
                 "scan_counts": scan_counts,
-                "usage_7d": usage_counter.get(item.get("name"), 0),
+                "usage_7d": usage_counter.get(name, 0),
+                "pass_count": pass_count,
+                "fail_count": fail_count,
+                "error_count": error_count,
+                "pending_count": pending_count,
+                "median_cost_usd": round(median_cost, 4),
+                "project_mix": [{"project": project, "count": count} for project, count in projects.most_common(3)],
+                "last_used_at": last_used_at.get(name),
+                "pass_rate": round((pass_count / total_outcomes) * 100.0, 1) if total_outcomes else 0.0,
             }
         )
+    rows.sort(key=lambda row: (-int(row.get("usage_7d") or 0), row.get("name") or ""))
     return {
         "count": len(rows),
         "latest_scan_at": (latest_scan or {}).get("scanned_at"),
