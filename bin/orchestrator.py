@@ -2109,6 +2109,7 @@ def register_project(
     project_type="application",
     playwright=False,
     auto_push=False,
+    auto_merge_main_prs=False,
     smoke="qa/smoke.sh",
     regression="qa/regression.sh",
     regression_days=None,
@@ -2150,6 +2151,7 @@ def register_project(
         "type": project_type,
         "playwright": bool(playwright),
         "auto_push": bool(auto_push),
+        "auto_merge_main_prs": bool(auto_merge_main_prs),
         "qa": {
             "smoke": smoke,
             "regression": regression,
@@ -6051,6 +6053,44 @@ def pr_sweep(dry_run=False):
                 "last_merge_state": info.get("mergeStateStatus", ""),
             }))
             fb_enqueued += 1
+            continue
+
+        auto_merge_main = (
+            bool(project.get("auto_merge_main_prs"))
+            and info.get("baseRefName") == "main"
+            and mergeable == "MERGEABLE"
+        )
+        if auto_merge_main:
+            if dry_run:
+                print(f"DRY-RUN pr-sweep feature {feature_id}: would auto-merge final PR #{pr_number} into main")
+                continue
+            mp = subprocess.run(
+                ["gh", "pr", "merge", str(pr_number), "--squash", "--delete-branch"],
+                cwd=repo_path,
+                capture_output=True, text=True, timeout=60,
+            )
+            if mp.returncode != 0:
+                reason = (mp.stderr or "").strip()[:300]
+                print(f"pr-sweep feature {feature_id}: gh pr merge failed: {reason}")
+                update_feature(feature_id, stamp_feature_sweep({
+                    "last_mergeable": mergeable,
+                    "last_merge_state": merge_state,
+                    "last_merge_error": reason,
+                    "last_review_decision": info.get("reviewDecision", ""),
+                    "unresolved_bot_threads": len(unresolved_bot_threads),
+                    "failing_checks": [c["name"] for c in failed_checks],
+                }))
+                skipped += 1
+                continue
+            update_feature(feature_id, stamp_feature_sweep({
+                "auto_merged": True,
+                "auto_merged_at": now_iso(),
+                "last_mergeable": mergeable,
+                "last_merge_state": merge_state,
+                "last_review_decision": info.get("reviewDecision", ""),
+            }))
+            merged += 1
+            print(f"pr-sweep auto-merged feature {feature_id} pr=#{pr_number} into main")
             continue
 
         update_feature(feature_id, stamp_feature_sweep({
@@ -12208,6 +12248,7 @@ def main(argv=None):
     p_reg_proj.add_argument("--type", default="application")
     p_reg_proj.add_argument("--playwright", action="store_true")
     p_reg_proj.add_argument("--auto-push", action="store_true")
+    p_reg_proj.add_argument("--auto-merge-main-prs", action="store_true")
     p_reg_proj.add_argument("--smoke", default="qa/smoke.sh")
     p_reg_proj.add_argument("--regression", default="qa/regression.sh")
     p_reg_proj.add_argument("--regression-day", action="append", dest="regression_days")
@@ -12375,6 +12416,7 @@ def main(argv=None):
             project_type=args.type,
             playwright=args.playwright,
             auto_push=args.auto_push,
+            auto_merge_main_prs=args.auto_merge_main_prs,
             smoke=args.smoke,
             regression=args.regression,
             regression_days=args.regression_days,

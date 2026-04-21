@@ -205,6 +205,7 @@
       "type": "application",
       "playwright": true,
       "auto_push": false,
+      "auto_merge_main_prs": false,
       "qa": {
         "smoke": "qa/smoke.sh",
         "regression": "qa/regression.sh",
