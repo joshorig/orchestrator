@@ -3970,6 +3970,29 @@ def _run_patch_anchor_failures_trigger_topology(repo_root, scenario):
     }
 
 
+def _run_ull_lock_guard_findings(repo_root, scenario):
+    _, worker = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
+        path = root / "core" / "src" / "main" / "java" / "Demo.java"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("class Demo { void ok() {} }\n")
+        subprocess.run(["git", "add", "."], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-m", "base"], cwd=root, check=True, capture_output=True)
+        path.write_text(
+            "import java.util.concurrent.locks.ReentrantLock;\n"
+            "class Demo { private final ReentrantLock lock = new ReentrantLock(); synchronized void bad() {} }\n"
+        )
+        findings = worker._ull_lock_guard_findings("lvc-standard", str(root), "HEAD")
+        return {
+            "has_synchronized": any("synchronized" in item for item in findings),
+            "has_reentrant_lock": any("ReentrantLock" in item for item in findings),
+        }
+
+
 def _run_circular_feature_lineage(repo_root, scenario):
     orchestrator, _ = _load_repo_modules(repo_root)
     with tempfile.TemporaryDirectory() as tmp:
@@ -4729,6 +4752,8 @@ def main(argv):
         actual = _run_planner_depends_on_ids(repo_root, scenario)
     elif kind == "patch_anchor_failures_trigger_topology":
         actual = _run_patch_anchor_failures_trigger_topology(repo_root, scenario)
+    elif kind == "ull_lock_guard_findings":
+        actual = _run_ull_lock_guard_findings(repo_root, scenario)
     elif kind == "circular_feature_lineage":
         actual = _run_circular_feature_lineage(repo_root, scenario)
     elif kind == "same_epoch_ordering":

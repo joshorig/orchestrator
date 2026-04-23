@@ -2160,17 +2160,28 @@ def _policy_findings_for_diff(project_name, worktree, base_ref):
     findings = []
     if project_name not in ULL_PROJECTS:
         return findings
+    blocking_patterns = [
+        (re.compile(r"\bsynchronized\b"), "contains `synchronized`; ULL/hot-path code must avoid monitor-based locking."),
+        (re.compile(r"\bReentrantLock\b"), "contains `ReentrantLock`; ULL/hot-path code must avoid blocking lock primitives."),
+        (re.compile(r"\bReadWriteLock\b|\bReentrantReadWriteLock\b"), "contains read/write lock primitive; ULL hot paths must stay lock-free."),
+        (re.compile(r"\bStampedLock\b"), "contains `StampedLock`; ULL hot paths must avoid lock-based coordination."),
+        (re.compile(r"\bBlockingQueue\b|\bArrayBlockingQueue\b|\bLinkedBlockingQueue\b"), "contains blocking queue primitive; ULL hot paths must avoid blocking coordination."),
+        (re.compile(r"\bCountDownLatch\b|\bCyclicBarrier\b|\bSemaphore\b"), "contains blocking coordination primitive; ULL hot paths must avoid blocking synchronization."),
+    ]
     for rel in _changed_java_files(worktree, base_ref):
         path = pathlib.Path(worktree) / rel
         try:
             body = path.read_text(errors="replace")
         except OSError:
             continue
-        if re.search(r"\bsynchronized\b", body):
-            findings.append(
-                f"{rel}: contains `synchronized`; ULL/hot-path code must avoid monitor-based locking."
-            )
+        for pattern, message in blocking_patterns:
+            if pattern.search(body):
+                findings.append(f"{rel}: {message}")
     return findings
+
+
+def _ull_lock_guard_findings(project_name, worktree, base_ref):
+    return _policy_findings_for_diff(project_name, worktree, base_ref)
 
 
 _HIGH_CONFIDENCE_SECRET_TYPES = {
@@ -6157,6 +6168,32 @@ def run_codex_slot(task, cfg):
 
         if trailer.startswith("BRAID_OK"):
             o.braid_template_record_use(bt, topology_error=False)
+            ull_lock_findings = _ull_lock_guard_findings(project["name"], str(wt_path), base_branch)
+            if ull_lock_findings:
+                detail = "; ".join(ull_lock_findings)[:500]
+                def mut_fail_lock(t):
+                    t["finished_at"] = o.now_iso()
+                    t["failure"] = "ULL lock guard violated"
+                    t["policy_review_findings"] = list(t.get("policy_review_findings") or []) + ull_lock_findings
+                    o.set_task_blocker(
+                        t,
+                        "runtime_precondition_failed",
+                        summary="ULL lock guard violated",
+                        detail=detail,
+                        source="worker",
+                        retryable=True,
+                    )
+                fail_task(
+                    task_id,
+                    "running",
+                    "ULL lock guard violated",
+                    blocker_code="runtime_precondition_failed",
+                    summary="ULL lock guard violated",
+                    detail=detail,
+                    retryable=True,
+                    mutator=mut_fail_lock,
+                )
+                return
             ok, info = _autocommit_worktree(pathlib.Path(wt_path), task, log_path)
             if not ok:
                 if "repo-memory secret-scan hit" in info:
