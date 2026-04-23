@@ -10637,7 +10637,7 @@ def _feature_child_metadata_complete(feature, workflow=None):
 
 def _live_workflow_issue_count(config, *, workflows=None, health=None):
     health = health or environment_health()
-    count = len(_environment_health_issues(health))
+    count = len([issue for issue in health.get("issues", []) if issue.get("severity") == "error"])
     if _canary_freshness_issue(config):
         count += 1
     if workflows is None:
