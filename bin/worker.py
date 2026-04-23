@@ -4144,6 +4144,17 @@ def _extract_json_fragment(raw, kind="object"):
     return parsed
 
 
+_STRICT_JSON_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL)
+
+
+def _unwrap_exact_json_fence(raw):
+    text = str(raw or "")
+    match = _STRICT_JSON_FENCE_RE.match(text)
+    if not match:
+        return text
+    return match.group(1).strip()
+
+
 def _normalize_council_payload(parsed, *, panel, stage=None):
     if not isinstance(parsed, dict):
         raise ValueError("council output must decode to a JSON object")
@@ -4166,7 +4177,8 @@ def _normalize_council_payload(parsed, *, panel, stage=None):
 
 
 def _parse_planner_output(raw, *, council_members, self_repair=False):
-    plan = _normalize_council_payload(_extract_json_fragment(raw, "object"), panel=council_members)
+    normalized_raw = _unwrap_exact_json_fence(raw)
+    plan = _normalize_council_payload(_extract_json_fragment(normalized_raw, "object"), panel=council_members)
     slices = plan.get("slices")
     if not isinstance(slices, list):
         if self_repair:

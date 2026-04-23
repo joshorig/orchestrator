@@ -4499,6 +4499,18 @@ def _run_planner_prompt_json_contract(repo_root, scenario):
     }
 
 
+def _run_planner_fenced_json_normalization(repo_root, scenario):
+    _, worker = _load_repo_modules(repo_root)
+    raw = """```json
+{"execution_path":"slice-1 -> slice-2","slices":[{"id":"slice-1","summary":"writer","braid_template":"lvc-implement-operator"}]}
+```"""
+    plan, slices = worker._parse_planner_output(raw, council_members=("aristotle",), self_repair=False)
+    return {
+        "execution_path": plan.get("execution_path"),
+        "slice_id": slices[0].get("id"),
+    }
+
+
 def _run_patch_anchor_failures_trigger_topology(repo_root, scenario):
     _, worker = _load_repo_modules(repo_root)
     trailer = worker._synthesize_patch_anchor_topology_error(
@@ -5318,6 +5330,8 @@ def main(argv):
         actual = _run_handoff_writer_contract_audit(repo_root, scenario)
     elif kind == "planner_prompt_json_contract":
         actual = _run_planner_prompt_json_contract(repo_root, scenario)
+    elif kind == "planner_fenced_json_normalization":
+        actual = _run_planner_fenced_json_normalization(repo_root, scenario)
     elif kind == "feature_finalize_planner_live_no_children":
         actual = _run_feature_finalize_planner_live_no_children(repo_root, scenario)
     elif kind == "feature_finalize_untracked_live_no_children":
