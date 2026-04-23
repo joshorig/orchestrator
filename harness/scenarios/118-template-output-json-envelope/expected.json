@@ -1,4 +1,5 @@
 {
   "wrapped_graph": "flowchart TD\n  A-->B",
-  "fallback_graph": "flowchart LR\n  Start-->End"
+  "fallback_graph": null,
+  "fallback_error": "invalid json object: Expecting value"
 }

@@ -1,4 +1,5 @@
 {
   "structured": "hello from structured output",
-  "plain": "plain text output"
+  "plain": null,
+  "plain_error": "invalid json object: Expecting value"
 }

@@ -1928,10 +1928,7 @@ def extract_mermaid(text):
 
 
 def _extract_template_graph(raw):
-    try:
-        payload = _extract_json_fragment(raw, "object")
-    except Exception:
-        payload = None
+    payload = _extract_json_fragment(raw, "object")
     if isinstance(payload, dict):
         for key in ("mermaid", "graph", "template", "flowchart", "candidate"):
             value = payload.get(key)
@@ -1939,7 +1936,7 @@ def _extract_template_graph(raw):
                 graph = extract_mermaid(value)
                 if graph:
                     return graph
-    return extract_mermaid(raw)
+    return None
 
 
 def _braid_output_contract_prompt(*, ok_verdicts=None):
@@ -2095,13 +2092,17 @@ def run_claude_memory_synthesis(task, cfg, timeout, log_path):
                       blocker_code="llm_timeout", summary="claude timeout", retryable=True)
             return
         logf.write(f"\n# exit: {proc.returncode}\n# stdout:\n{proc.stdout or ''}\n")
-    _record_task_costs_from_text(task_id, "claude", "sonnet", proc.stdout or "")
-    raw_text = _extract_claude_result_text(proc.stdout or "")
-
     if proc.returncode != 0:
-        _pause_claude_slot_if_needed(raw_text or proc.stdout or f"claude exit {proc.returncode}", task=task)
+        _pause_claude_slot_if_needed(proc.stdout or f"claude exit {proc.returncode}", task=task)
         fail_task(task_id, "running", f"claude exit {proc.returncode}",
                   blocker_code="llm_exit_error", summary="claude exit error", retryable=True)
+        return
+    _record_task_costs_from_text(task_id, "claude", "sonnet", proc.stdout or "")
+    try:
+        raw_text = _extract_claude_result_text(proc.stdout or "")
+    except ValueError as exc:
+        fail_task(task_id, "running", str(exc),
+                  blocker_code="model_output_invalid", summary="claude result invalid", retryable=False)
         return
 
     candidate = extract_markdown_document(raw_text)
@@ -2633,7 +2634,12 @@ def _run_review_agent(kind, *, prompt, worktree, timeout, logf, last_msg_path):
         structured = proc.stdout or ""
         logf.write(structured)
         _record_task_costs_from_text(last_msg_path.stem.split(".")[0], "claude", "sonnet", structured)
-        raw = _extract_claude_result_text(structured)
+        raw = ""
+        if proc.returncode == 0:
+            try:
+                raw = _extract_claude_result_text(structured)
+            except ValueError as exc:
+                return {"error": f"claude result invalid: {exc}", "raw": structured}
         last_msg_path.write_text(raw)
     else:
         if proc.stderr:
@@ -2895,16 +2901,25 @@ def run_claude_template_gen(task, cfg, task_type, timeout, log_path):
         logf.write(f"\n# exit: {proc.returncode}\n")
         logf.write("# stdout:\n")
         logf.write(proc.stdout or "")
-    _record_task_costs_from_text(task_id, "claude", "opus", proc.stdout or "")
-    raw_text = _extract_claude_result_text(proc.stdout or "")
-
     if proc.returncode != 0:
-        _pause_claude_slot_if_needed(raw_text or proc.stdout or f"claude exit {proc.returncode}", task=task)
+        _pause_claude_slot_if_needed(proc.stdout or f"claude exit {proc.returncode}", task=task)
         fail_task(task_id, "running", f"claude exit {proc.returncode}",
                   blocker_code="llm_exit_error", summary="claude exit error", retryable=True)
         return
+    _record_task_costs_from_text(task_id, "claude", "opus", proc.stdout or "")
+    try:
+        raw_text = _extract_claude_result_text(proc.stdout or "")
+    except ValueError as exc:
+        fail_task(task_id, "running", str(exc),
+                  blocker_code="model_output_invalid", summary="template-gen result invalid", retryable=False)
+        return
 
-    graph = _extract_template_graph(raw_text)
+    try:
+        graph = _extract_template_graph(raw_text)
+    except ValueError as exc:
+        fail_task(task_id, "running", str(exc),
+                  blocker_code="model_output_invalid", summary="template-gen output invalid", retryable=False)
+        return
     if not graph:
         fail_task(task_id, "running", "no mermaid block in output",
                   blocker_code="model_output_invalid", summary="template-gen output invalid", retryable=False)
@@ -3008,16 +3023,25 @@ def run_claude_template_refine(task, cfg, task_type, timeout, log_path):
                       blocker_code="llm_timeout", summary="claude timeout", retryable=True)
             return
         logf.write(f"\n# exit: {proc.returncode}\n# stdout:\n{proc.stdout or ''}\n")
-    _record_task_costs_from_text(task_id, "claude", "opus", proc.stdout or "")
-    raw_text = _extract_claude_result_text(proc.stdout or "")
-
     if proc.returncode != 0:
-        _pause_claude_slot_if_needed(raw_text or proc.stdout or f"claude exit {proc.returncode}", task=task)
+        _pause_claude_slot_if_needed(proc.stdout or f"claude exit {proc.returncode}", task=task)
         fail_task(task_id, "running", f"claude exit {proc.returncode}",
                   blocker_code="llm_exit_error", summary="claude exit error", retryable=True)
         return
+    _record_task_costs_from_text(task_id, "claude", "opus", proc.stdout or "")
+    try:
+        raw_text = _extract_claude_result_text(proc.stdout or "")
+    except ValueError as exc:
+        fail_task(task_id, "running", str(exc),
+                  blocker_code="model_output_invalid", summary="template-refine result invalid", retryable=False)
+        return
 
-    candidate = _extract_template_graph(raw_text)
+    try:
+        candidate = _extract_template_graph(raw_text)
+    except ValueError as exc:
+        fail_task(task_id, "running", str(exc),
+                  blocker_code="model_output_invalid", summary="template-refine output invalid", retryable=False)
+        return
     if not candidate:
         fail_task(task_id, "running", "no mermaid block in refine output",
                   blocker_code="model_output_invalid", summary="template-refine output invalid", retryable=False)
@@ -3331,7 +3355,10 @@ def _run_self_repair_council(
     except subprocess.TimeoutExpired:
         return {"error": f"council timeout {timeout}s", "blocker_code": "council_timeout"}
     _record_task_costs_from_text(task.get("task_id"), "claude", model, proc.stdout or "")
-    raw = _extract_claude_result_text(proc.stdout or "")
+    try:
+        raw = _extract_claude_result_text(proc.stdout or "")
+    except ValueError as exc:
+        return {"error": f"claude result invalid: {exc}", "blocker_code": "review_gate_protocol_error"}
     if last_msg_path:
         last_msg_path.write_text(raw)
     if proc.returncode != 0:
@@ -3977,14 +4004,7 @@ def parse_braid_refine(trailer):
 
 
 def _find_braid_trailer(lines):
-    structured = _extract_braid_result_trailer("\n".join([str(line) for line in lines[-40:]]))
-    if structured:
-        return structured
-    for raw_line in reversed(lines[-20:]):
-        line = _normalize_braid_verdict_line(raw_line)
-        if line.startswith("BRAID_OK") or line.startswith("BRAID_TOPOLOGY_ERROR") or line.startswith("BRAID_REFINE"):
-            return line
-    return ""
+    return _extract_braid_result_trailer("\n".join([str(line) for line in lines[-40:]]))
 
 
 def _normalize_braid_verdict_line(line):
@@ -4003,11 +4023,10 @@ def _normalize_braid_verdict_line(line):
 
 
 def _extract_claude_result_text(stdout):
-    try:
-        payload = json.loads(stdout or "")
-        return str(payload.get("result") or "")
-    except json.JSONDecodeError:
-        return stdout or ""
+    payload = _extract_json_fragment(stdout, "object")
+    if not isinstance(payload, dict) or "result" not in payload:
+        raise ValueError("claude output missing result field")
+    return str(payload.get("result") or "")
 
 
 def _normalize_braid_status(value):
@@ -4074,11 +4093,13 @@ def _extract_braid_result_trailer(raw):
 
 
 def _extract_json_fragment(raw, kind="object"):
-    pattern = r"\{.*\}" if kind == "object" else r"\[.*\]"
-    match = re.search(pattern, raw or "", re.DOTALL)
-    if not match:
-        raise ValueError(f"no json {kind} in output")
-    parsed = json.loads(match.group(0))
+    text = str(raw or "").strip()
+    if not text:
+        raise ValueError(f"empty json {kind} output")
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid json {kind}: {exc.msg}") from exc
     if kind == "object" and not isinstance(parsed, dict):
         raise ValueError("json fragment must decode to object")
     if kind == "array" and not isinstance(parsed, list):
@@ -4108,24 +4129,12 @@ def _normalize_council_payload(parsed, *, panel, stage=None):
 
 
 def _parse_planner_output(raw, *, council_members, self_repair=False):
-    if self_repair:
-        plan = _normalize_council_payload(_extract_json_fragment(raw, "object"), panel=council_members)
-        slices = plan.get("slices")
-        if not isinstance(slices, list):
+    plan = _normalize_council_payload(_extract_json_fragment(raw, "object"), panel=council_members)
+    slices = plan.get("slices")
+    if not isinstance(slices, list):
+        if self_repair:
             raise ValueError("self-repair planner missing slices")
-        return plan, slices
-    try:
-        candidate = _extract_json_fragment(raw, "object")
-    except Exception:
-        candidate = None
-    if isinstance(candidate, dict) and isinstance(candidate.get("slices"), list):
-        plan = _normalize_council_payload(candidate, panel=council_members)
-        return plan, list(plan.get("slices") or [])
-    slices = _extract_json_fragment(raw, "array")
-    plan = _normalize_council_payload(
-        {"panel": list(council_members), "execution_path": "planner-council", "slices": slices},
-        panel=council_members,
-    )
+        raise ValueError("planner output missing slices")
     return plan, list(slices or [])
 
 
@@ -4139,18 +4148,7 @@ def _extract_review_verdict(raw):
             return "request_change"
         if _normalize_braid_status(payload.get("braid_status") or payload.get("status")) == "topology_error":
             return "topology_error"
-    verdict = None
-    for line in reversed([_normalize_braid_verdict_line(l) for l in raw.splitlines() if str(l).strip()][-20:]):
-        if line.startswith("BRAID_OK: APPROVE") or line.startswith("BRAID_OK: QA_SUFFICIENT"):
-            verdict = "approve"
-            break
-        if line.startswith("BRAID_OK: REQUEST_CHANGE") or line.startswith("BRAID_OK: QA_INSUFFICIENT"):
-            verdict = "request_change"
-            break
-        if line.startswith("BRAID_TOPOLOGY_ERROR"):
-            verdict = "topology_error"
-            break
-    return verdict
+    return None
 
 
 def enqueue_braid_refine(task, project_name, trailer, *, from_state):
@@ -4325,13 +4323,23 @@ def run_claude_planner(task, cfg, timeout, log_path):
             return
         logf.write(f"\n# exit: {proc.returncode}\n# stdout:\n{proc.stdout or ''}\n")
     model_name = "opus" if planner_mode == "self-repair-plan" else "sonnet"
-    _record_task_costs_from_text(task_id, "claude", model_name, proc.stdout or "")
-    raw = _extract_claude_result_text(proc.stdout or "")
-
     if proc.returncode != 0:
-        _pause_claude_slot_if_needed(raw or proc.stdout or f"claude exit {proc.returncode}", task=task)
+        _pause_claude_slot_if_needed(proc.stdout or f"claude exit {proc.returncode}", task=task)
         fail_task(task_id, "running", f"claude exit {proc.returncode}",
                   blocker_code="llm_exit_error", summary="claude exit error", retryable=True)
+        return
+    _record_task_costs_from_text(task_id, "claude", model_name, proc.stdout or "")
+    try:
+        raw = _extract_claude_result_text(proc.stdout or "")
+    except ValueError as exc:
+        fail_task(
+            task_id,
+            "running",
+            str(exc),
+            blocker_code="model_output_invalid",
+            summary="planner result invalid",
+            retryable=False,
+        )
         return
 
     try:

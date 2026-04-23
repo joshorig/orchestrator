@@ -1,6 +1,5 @@
 {
-  "review_verdict": "approve",
-  "qa_verdict": "approve",
-  "topology_trailer": "BRAID_TOPOLOGY_ERROR: patch_anchor_drift repeated apply_patch verification failures (2)",
-  "normalized_bullet": "BRAID_OK: APPROVE — ok"
+  "review_verdict": null,
+  "qa_verdict": null,
+  "topology_trailer": ""
 }

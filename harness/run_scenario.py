@@ -4053,7 +4053,6 @@ def _run_braid_trailer_markdown_wrapped(repo_root, scenario):
         "review_verdict": worker._extract_review_verdict(raw),
         "qa_verdict": worker._extract_review_verdict(qa_raw),
         "topology_trailer": worker._find_braid_trailer(topo_lines),
-        "normalized_bullet": worker._normalize_braid_verdict_line("* `BRAID_OK: APPROVE — ok`"),
     }
 
 
@@ -4091,22 +4090,18 @@ def _run_council_payload_normalization(repo_root, scenario):
 
 def _run_planner_output_normalization(repo_root, scenario):
     _, worker = _load_repo_modules(repo_root)
-    raw_object = """
-noise
-{"execution_path":"slice-1 -> slice-2","slices":[{"id":"slice-1","summary":"writer","braid_template":"lvc-implement-operator"},{"id":"slice-2","summary":"restore","braid_template":"lvc-implement-operator","depends_on":["slice-1"]}]}
-"""
+    raw_object = """{"execution_path":"slice-1 -> slice-2","slices":[{"id":"slice-1","summary":"writer","braid_template":"lvc-implement-operator"},{"id":"slice-2","summary":"restore","braid_template":"lvc-implement-operator","depends_on":["slice-1"]}]}"""
     plan1, slices1 = worker._parse_planner_output(raw_object, council_members=("aristotle",), self_repair=False)
-    raw_array = """
-noise
-[{"id":"slice-1","summary":"writer","braid_template":"lvc-implement-operator"}]
-"""
-    plan2, slices2 = worker._parse_planner_output(raw_array, council_members=("aristotle",), self_repair=False)
+    raw_array = """[{"id":"slice-1","summary":"writer","braid_template":"lvc-implement-operator"}]"""
+    try:
+        worker._parse_planner_output(raw_array, council_members=("aristotle",), self_repair=False)
+        array_error = None
+    except Exception as exc:
+        array_error = str(exc)
     return {
         "object_execution_path": plan1.get("execution_path"),
         "object_slice_depends": slices1[1].get("depends_on"),
-        "array_default_execution_path": plan2.get("execution_path"),
-        "array_panel": plan2.get("panel"),
-        "array_first_id": slices2[0].get("id"),
+        "array_error": array_error,
     }
 
 
@@ -4156,7 +4151,7 @@ def _run_end_to_end_handoff_contract(repo_root, scenario):
     }
     block = worker._render_slice_context_block(task)
     prompt = worker.build_codex_prompt(task, "graph", "memory")
-    pr_lines = ["body", "* `BRAID_OK: rebased on feature branch and fixed review comments`"]
+    pr_lines = ['{"status":"ok","summary":"rebased on feature branch and fixed review comments"}']
     return {
         "normalized_depends": normalized,
         "slice_block_has_chain": "slice-2" in block and "slice-3 state=enqueued" in block,
@@ -4196,9 +4191,16 @@ flowchart LR
   Start-->End
 ```
 """
+    try:
+        fallback_graph = worker._extract_template_graph(fallback)
+        fallback_error = None
+    except Exception as exc:
+        fallback_graph = None
+        fallback_error = str(exc)
     return {
         "wrapped_graph": worker._extract_template_graph(wrapped),
-        "fallback_graph": worker._extract_template_graph(fallback),
+        "fallback_graph": fallback_graph,
+        "fallback_error": fallback_error,
     }
 
 
@@ -4206,9 +4208,16 @@ def _run_claude_result_text_shared(repo_root, scenario):
     _, worker = _load_repo_modules(repo_root)
     structured = '{"type":"result","result":"hello from structured output"}'
     plain = "plain text output"
+    try:
+        plain_out = worker._extract_claude_result_text(plain)
+        plain_error = None
+    except Exception as exc:
+        plain_out = None
+        plain_error = str(exc)
     return {
         "structured": worker._extract_claude_result_text(structured),
-        "plain": worker._extract_claude_result_text(plain),
+        "plain": plain_out,
+        "plain_error": plain_error,
     }
 
 
@@ -4227,9 +4236,9 @@ def _run_feature_finalize_planner_live_no_children(repo_root, scenario):
             "shutil",
             "load_config",
             "list_features",
+            "feature_workflow_summary",
             "_load_feature_children",
             "_feature_all_children_failed_without_retry",
-            "_feature_planner_is_live",
             "update_feature",
             "append_transition",
             "append_event",
@@ -4239,9 +4248,63 @@ def _run_feature_finalize_planner_live_no_children(repo_root, scenario):
         orchestrator.feature_finalize.__globals__["shutil"] = types.SimpleNamespace(which=lambda _name: "/opt/homebrew/bin/gh")
         orchestrator.feature_finalize.__globals__["load_config"] = lambda: {"projects": [{"name": "demo", "path": "/tmp/demo"}]}
         orchestrator.feature_finalize.__globals__["list_features"] = lambda status="open": [dict(feature)] if status == "open" else []
+        orchestrator.feature_finalize.__globals__["feature_workflow_summary"] = lambda _feature: {
+            "has_live_work": True,
+            "child_metadata_complete": True,
+        }
         orchestrator.feature_finalize.__globals__["_load_feature_children"] = lambda _feature: []
         orchestrator.feature_finalize.__globals__["_feature_all_children_failed_without_retry"] = lambda _feature: False
-        orchestrator.feature_finalize.__globals__["_feature_planner_is_live"] = lambda _feature: True
+        orchestrator.feature_finalize.__globals__["update_feature"] = lambda *args, **kwargs: calls.__setitem__("updated", calls["updated"] + 1)
+        orchestrator.feature_finalize.__globals__["append_transition"] = lambda *args, **kwargs: calls.__setitem__("transitioned", calls["transitioned"] + 1)
+        orchestrator.feature_finalize.__globals__["append_event"] = lambda *args, **kwargs: calls.__setitem__("events", calls["events"] + 1)
+        checked, opened, abandoned, skipped = orchestrator.feature_finalize()
+    finally:
+        for key, value in old.items():
+            orchestrator.feature_finalize.__globals__[key] = value
+    return {
+        "checked": checked,
+        "opened": opened,
+        "abandoned": abandoned,
+        "skipped": skipped,
+        "updated": calls["updated"],
+        "transitioned": calls["transitioned"],
+        "events": calls["events"],
+    }
+
+
+def _run_feature_finalize_untracked_live_no_children(repo_root, scenario):
+    orchestrator, _worker = _load_repo_modules(repo_root)
+    feature = {
+        "feature_id": "feature-untracked-live",
+        "status": "open",
+        "project": "demo",
+        "child_task_ids": [],
+    }
+    calls = {"updated": 0, "transitioned": 0, "events": 0}
+    old = {
+        name: orchestrator.feature_finalize.__globals__[name]
+        for name in (
+            "shutil",
+            "load_config",
+            "list_features",
+            "feature_workflow_summary",
+            "_load_feature_children",
+            "_feature_all_children_failed_without_retry",
+            "update_feature",
+            "append_transition",
+            "append_event",
+        )
+    }
+    try:
+        orchestrator.feature_finalize.__globals__["shutil"] = types.SimpleNamespace(which=lambda _name: "/opt/homebrew/bin/gh")
+        orchestrator.feature_finalize.__globals__["load_config"] = lambda: {"projects": [{"name": "demo", "path": "/tmp/demo"}]}
+        orchestrator.feature_finalize.__globals__["list_features"] = lambda status="open": [dict(feature)] if status == "open" else []
+        orchestrator.feature_finalize.__globals__["feature_workflow_summary"] = lambda _feature: {
+            "has_live_work": True,
+            "child_metadata_complete": False,
+        }
+        orchestrator.feature_finalize.__globals__["_load_feature_children"] = lambda _feature: []
+        orchestrator.feature_finalize.__globals__["_feature_all_children_failed_without_retry"] = lambda _feature: False
         orchestrator.feature_finalize.__globals__["update_feature"] = lambda *args, **kwargs: calls.__setitem__("updated", calls["updated"] + 1)
         orchestrator.feature_finalize.__globals__["append_transition"] = lambda *args, **kwargs: calls.__setitem__("transitioned", calls["transitioned"] + 1)
         orchestrator.feature_finalize.__globals__["append_event"] = lambda *args, **kwargs: calls.__setitem__("events", calls["events"] + 1)
@@ -4275,9 +4338,9 @@ def _run_feature_finalize_orphan_no_children(repo_root, scenario):
             "shutil",
             "load_config",
             "list_features",
+            "feature_workflow_summary",
             "_load_feature_children",
             "_feature_all_children_failed_without_retry",
-            "_feature_planner_is_live",
             "update_feature",
             "append_transition",
             "append_event",
@@ -4287,9 +4350,12 @@ def _run_feature_finalize_orphan_no_children(repo_root, scenario):
         orchestrator.feature_finalize.__globals__["shutil"] = types.SimpleNamespace(which=lambda _name: "/opt/homebrew/bin/gh")
         orchestrator.feature_finalize.__globals__["load_config"] = lambda: {"projects": [{"name": "demo", "path": "/tmp/demo"}]}
         orchestrator.feature_finalize.__globals__["list_features"] = lambda status="open": [dict(feature)] if status == "open" else []
+        orchestrator.feature_finalize.__globals__["feature_workflow_summary"] = lambda _feature: {
+            "has_live_work": False,
+            "child_metadata_complete": True,
+        }
         orchestrator.feature_finalize.__globals__["_load_feature_children"] = lambda _feature: []
         orchestrator.feature_finalize.__globals__["_feature_all_children_failed_without_retry"] = lambda _feature: False
-        orchestrator.feature_finalize.__globals__["_feature_planner_is_live"] = lambda _feature: False
         orchestrator.feature_finalize.__globals__["update_feature"] = lambda *args, **kwargs: calls.__setitem__("updated", calls["updated"] + 1)
         orchestrator.feature_finalize.__globals__["append_transition"] = lambda *args, **kwargs: calls.__setitem__("transitioned", calls["transitioned"] + 1)
         orchestrator.feature_finalize.__globals__["append_event"] = lambda *args, **kwargs: calls.__setitem__("events", calls["events"] + 1)
@@ -4305,6 +4371,90 @@ def _run_feature_finalize_orphan_no_children(repo_root, scenario):
         "updated": calls["updated"],
         "transitioned": calls["transitioned"],
         "events": calls["events"],
+    }
+
+
+def _run_atomic_claim_skips_terminal_feature_children(repo_root, scenario):
+    orchestrator, _worker = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        queue_root = root / "queue"
+        features_dir = root / "features"
+        for state in orchestrator.STATES:
+            (queue_root / state).mkdir(parents=True, exist_ok=True)
+        features_dir.mkdir(parents=True, exist_ok=True)
+        old = {
+            "QUEUE_ROOT": orchestrator.QUEUE_ROOT,
+            "FEATURES_DIR": orchestrator.FEATURES_DIR,
+            "now_iso": orchestrator.now_iso,
+            "project_environment_ok": orchestrator.project_environment_ok,
+            "_STATE_ENGINE_CACHE": orchestrator._STATE_ENGINE_CACHE,
+            "STATE_ENGINE_MODE": os.environ.get("STATE_ENGINE_MODE"),
+        }
+        orchestrator.QUEUE_ROOT = queue_root
+        orchestrator.FEATURES_DIR = features_dir
+        orchestrator.now_iso = lambda: "2026-04-23T23:40:00"
+        orchestrator.project_environment_ok = lambda *_args, **_kwargs: True
+        orchestrator._STATE_ENGINE_CACHE = {"key": None, "engine": None}
+        os.environ["STATE_ENGINE_MODE"] = "off"
+        try:
+            orchestrator.write_json_atomic(features_dir / "feature-dead.json", {
+                "feature_id": "feature-dead",
+                "status": "abandoned",
+                "project": "demo",
+            })
+            dead = orchestrator.new_task(role="implementer", engine="codex", project="demo", summary="dead", source="scenario", feature_id="feature-dead")
+            dead["task_id"] = "task-dead"
+            ready = orchestrator.new_task(role="implementer", engine="codex", project="demo", summary="ready", source="scenario")
+            ready["task_id"] = "task-ready"
+            orchestrator.write_json_atomic(orchestrator.task_path("task-dead", "queued"), dead)
+            orchestrator.write_json_atomic(orchestrator.task_path("task-ready", "queued"), ready)
+            claimed = orchestrator.atomic_claim("codex")
+        finally:
+            orchestrator.QUEUE_ROOT = old["QUEUE_ROOT"]
+            orchestrator.FEATURES_DIR = old["FEATURES_DIR"]
+            orchestrator.now_iso = old["now_iso"]
+            orchestrator.project_environment_ok = old["project_environment_ok"]
+            orchestrator._STATE_ENGINE_CACHE = old["_STATE_ENGINE_CACHE"]
+            if old["STATE_ENGINE_MODE"] is None:
+                os.environ.pop("STATE_ENGINE_MODE", None)
+            else:
+                os.environ["STATE_ENGINE_MODE"] = old["STATE_ENGINE_MODE"]
+    return {
+        "claimed_task_id": (claimed or {}).get("task_id"),
+    }
+
+
+def _run_health_payload_prefers_live_state(repo_root, scenario):
+    orchestrator, _worker = _load_repo_modules(repo_root)
+    old = {
+        "_queue_count_map": orchestrator._health_payload.__globals__["_queue_count_map"],
+        "environment_health": orchestrator._health_payload.__globals__["environment_health"],
+        "open_feature_workflow_summaries": orchestrator._health_payload.__globals__["open_feature_workflow_summaries"],
+        "_live_workflow_issue_count": orchestrator._health_payload.__globals__["_live_workflow_issue_count"],
+        "load_config": orchestrator._health_payload.__globals__["load_config"],
+        "now_iso": orchestrator._health_payload.__globals__["now_iso"],
+    }
+    try:
+        orchestrator._health_payload.__globals__["_queue_count_map"] = lambda: {"queued": 0, "running": 1}
+        orchestrator._health_payload.__globals__["environment_health"] = lambda: {"ok": True, "issues": []}
+        orchestrator._health_payload.__globals__["open_feature_workflow_summaries"] = lambda: [
+            {"frontier": {"state": "blocked"}},
+            {"frontier": {"state": "running"}},
+        ]
+        orchestrator._health_payload.__globals__["_live_workflow_issue_count"] = lambda _cfg, workflows=None, health=None: 3
+        orchestrator._health_payload.__globals__["load_config"] = lambda: {"projects": []}
+        orchestrator._health_payload.__globals__["now_iso"] = lambda: "2026-04-23T23:41:00"
+        payload = orchestrator._health_payload()
+    finally:
+        for key, value in old.items():
+            orchestrator._health_payload.__globals__[key] = value
+    return {
+        "environment_ok": payload["environment_ok"],
+        "environment_error_count": payload["environment_error_count"],
+        "workflow_check_issue_count": payload["workflow_check_issue_count"],
+        "feature_open_count": payload["feature_open_count"],
+        "feature_frontier_blocked_count": payload["feature_frontier_blocked_count"],
     }
 
 
@@ -5144,8 +5294,14 @@ def main(argv):
         actual = _run_handoff_writer_contract_audit(repo_root, scenario)
     elif kind == "feature_finalize_planner_live_no_children":
         actual = _run_feature_finalize_planner_live_no_children(repo_root, scenario)
+    elif kind == "feature_finalize_untracked_live_no_children":
+        actual = _run_feature_finalize_untracked_live_no_children(repo_root, scenario)
     elif kind == "feature_finalize_orphan_no_children":
         actual = _run_feature_finalize_orphan_no_children(repo_root, scenario)
+    elif kind == "atomic_claim_skips_terminal_feature_children":
+        actual = _run_atomic_claim_skips_terminal_feature_children(repo_root, scenario)
+    elif kind == "health_payload_prefers_live_state":
+        actual = _run_health_payload_prefers_live_state(repo_root, scenario)
     elif kind == "ull_lock_guard_findings":
         actual = _run_ull_lock_guard_findings(repo_root, scenario)
     elif kind == "circular_feature_lineage":

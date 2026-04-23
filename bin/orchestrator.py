@@ -1200,19 +1200,21 @@ def _queue_count_map():
 
 
 def _health_payload():
-    latest = _latest_metric_values_by_tags()
     queue = _queue_count_map()
-    def metric(name, default=0, tags=None):
-        row = latest.get((name, tuple(sorted((tags or {}).items()))))
-        if row is None:
-            return default
-        return row.get("value", default)
+    health = environment_health()
+    workflows = open_feature_workflow_summaries()
+    blocked = sum(
+        1
+        for wf in workflows
+        if (wf.get("frontier") or {}).get("state") in ("blocked", "failed", "abandoned")
+    )
+    error_count = len([issue for issue in health.get("issues", []) if issue.get("severity") == "error"])
     return {
-        "environment_ok": int(metric("environment.ok", 1)),
-        "environment_error_count": int(metric("environment.error_count", 0)),
-        "workflow_check_issue_count": int(metric("workflow_check.issue_count", 0)),
-        "feature_open_count": int(metric("feature.open_count", len(open_feature_workflow_summaries()))),
-        "feature_frontier_blocked_count": int(metric("feature.frontier_blocked_count", 0)),
+        "environment_ok": 1 if health.get("ok") else 0,
+        "environment_error_count": error_count,
+        "workflow_check_issue_count": _live_workflow_issue_count(load_config(), workflows=workflows, health=health),
+        "feature_open_count": len(workflows),
+        "feature_frontier_blocked_count": blocked,
         "queue": queue,
         "generated_at": now_iso(),
     }
@@ -3921,6 +3923,9 @@ def atomic_claim(slot_engine):
                 "project_environment_ok",
                 f"self-repair bypass for degraded project {project_name}",
             )
+        feature = _task_feature(task)
+        if feature and feature.get("status") in TERMINAL_FEATURE_STATES:
+            continue
         if slot_engine == "codex":
             fid = task.get("feature_id")
             if fid and fid in busy_features:
@@ -6524,8 +6529,14 @@ def feature_finalize(dry_run=False):
     for feature in list_features(status="open"):
         checked += 1
         feature_id = feature.get("feature_id")
+        workflow = feature_workflow_summary(feature)
+        has_live_work = _feature_can_progress(feature, workflow)
+        child_meta_complete = _feature_child_metadata_complete(feature, workflow)
         children = _load_feature_children(feature)
         if children is None:
+            if has_live_work or not child_meta_complete:
+                skipped += 1
+                continue
             skipped += 1
             continue
 
@@ -6574,9 +6585,9 @@ def feature_finalize(dry_run=False):
 
         if not feature.get("child_task_ids"):
             if dry_run:
-                action = "would defer (planner live)" if _feature_planner_is_live(feature) else "would mark abandoned (no children)"
+                action = "would defer (live work or incomplete child metadata)" if (has_live_work or not child_meta_complete) else "would mark abandoned (no children)"
                 print(f"DRY-RUN feature-finalize {feature_id}: {action}")
-            elif _feature_planner_is_live(feature):
+            elif has_live_work or not child_meta_complete:
                 skipped += 1
                 continue
             else:
@@ -9985,16 +9996,15 @@ def status_text():
             f"{metrics['guard_skip_total']} skip(s) "
             f"({', '.join(f'{k}={v}' for k, v in sorted((metrics.get('guard_skip_by_reason') or {}).items()))})"
         )
-    latest = latest_metric_values(
-        names=("environment.error_count", "feature.open_count", "feature.frontier_blocked_count", "workflow_check.issue_count")
+    lines.append("")
+    lines.append("Live:")
+    lines.append(f"  environment.error_count: {len([issue for issue in health.get('issues', []) if issue.get('severity') == 'error'])}")
+    lines.append(f"  feature.open_count: {len(workflows)}")
+    lines.append(
+        "  feature.frontier_blocked_count: "
+        f"{sum(1 for wf in workflows if (wf.get('frontier') or {}).get('state') in ('blocked', 'failed', 'abandoned'))}"
     )
-    if latest:
-        lines.append("")
-        lines.append("Metrics:")
-        for key in ("environment.error_count", "feature.open_count", "feature.frontier_blocked_count", "workflow_check.issue_count"):
-            row = latest.get(key)
-            if row:
-                lines.append(f"  {key}: {row.get('value')}")
+    lines.append(f"  workflow_check.issue_count: {_live_workflow_issue_count(load_config(), workflows=workflows, health=health)}")
     return "\n".join(lines)
 
 
@@ -10364,6 +10374,9 @@ def _feature_planner_is_live(feature):
     return state in ("queued", "claimed", "running")
 
 
+FEATURE_ACTIVE_TASK_STATES = {"queued", "claimed", "running", "awaiting-review", "awaiting-qa", "blocked"}
+
+
 def _feature_related_tasks(feature_id):
     tasks = []
     if not feature_id:
@@ -10553,6 +10566,18 @@ def feature_workflow_summary(feature):
         if row.get("event") in ("repair_attempt", "retry_reset")
     ]
     workflow_check = dict(feature.get("workflow_check") or {})
+    live_related = []
+    untracked_live = []
+    for item in _feature_related_tasks(feature_id):
+        state = item.get("state")
+        task = item.get("task") or {}
+        if task.get("role") == "planner":
+            continue
+        if state not in FEATURE_ACTIVE_TASK_STATES:
+            continue
+        live_related.append(item)
+        if item.get("task_id") not in child_ids:
+            untracked_live.append(item)
 
     return {
         "feature_id": feature_id,
@@ -10582,6 +10607,10 @@ def feature_workflow_summary(feature):
         "workflow_check": workflow_check,
         "recent_events": recent_events,
         "repair_history": repair_events,
+        "has_live_work": bool(_feature_planner_is_live(feature) or live_related),
+        "child_metadata_complete": not untracked_live,
+        "live_task_ids": [item.get("task_id") for item in live_related],
+        "untracked_live_task_ids": [item.get("task_id") for item in untracked_live],
     }
 
 
@@ -10592,6 +10621,35 @@ def open_feature_workflow_summaries(project_name=None):
         feats = [f for f in feats if f.get("project") == project_name]
     feats.sort(key=lambda f: f.get("created_at", ""), reverse=True)
     return [feature_workflow_summary(feature) for feature in feats]
+
+
+def _feature_can_progress(feature, workflow=None):
+    if feature.get("status") in TERMINAL_FEATURE_STATES:
+        return False
+    workflow = workflow or feature_workflow_summary(feature)
+    return bool(workflow.get("has_live_work"))
+
+
+def _feature_child_metadata_complete(feature, workflow=None):
+    workflow = workflow or feature_workflow_summary(feature)
+    return bool(workflow.get("child_metadata_complete", True))
+
+
+def _live_workflow_issue_count(config, *, workflows=None, health=None):
+    health = health or environment_health()
+    count = len(_environment_health_issues(health))
+    if _canary_freshness_issue(config):
+        count += 1
+    if workflows is None:
+        workflows = open_feature_workflow_summaries()
+    features = {feature.get("feature_id"): feature for feature in list_features()}
+    for workflow in workflows:
+        feature = features.get(workflow.get("feature_id"))
+        if not feature:
+            continue
+        if _workflow_issue_from_summary(feature, workflow, config):
+            count += 1
+    return count
 
 
 def _workflow_check_attempts(feature, issue_key):
@@ -11273,6 +11331,8 @@ def _workflow_issue_from_summary(feature, workflow, config):
                         return {
                             **issue,
                         }
+            if workflow.get("has_live_work") or not workflow.get("child_metadata_complete", True):
+                return None
             issue = {
                 "feature_id": feature_id,
                 "project": project["name"],

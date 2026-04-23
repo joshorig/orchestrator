@@ -1,5 +1,5 @@
 {
-  "refine_trailer": "BRAID_REFINE: CheckBaseline: add baseline_red edge to End",
-  "refine_node": "CheckBaseline",
-  "pr_ok_trailer": "BRAID_OK: rebased on feature branch and fixed review comments"
+  "refine_trailer": "",
+  "refine_node": null,
+  "pr_ok_trailer": ""
 }
