@@ -4088,6 +4088,82 @@ def _run_council_payload_normalization(repo_root, scenario):
     }
 
 
+def _run_planner_output_normalization(repo_root, scenario):
+    _, worker = _load_repo_modules(repo_root)
+    raw_object = """
+noise
+{"execution_path":"slice-1 -> slice-2","slices":[{"id":"slice-1","summary":"writer","braid_template":"lvc-implement-operator"},{"id":"slice-2","summary":"restore","braid_template":"lvc-implement-operator","depends_on":["slice-1"]}]}
+"""
+    plan1, slices1 = worker._parse_planner_output(raw_object, council_members=("aristotle",), self_repair=False)
+    raw_array = """
+noise
+[{"id":"slice-1","summary":"writer","braid_template":"lvc-implement-operator"}]
+"""
+    plan2, slices2 = worker._parse_planner_output(raw_array, council_members=("aristotle",), self_repair=False)
+    return {
+        "object_execution_path": plan1.get("execution_path"),
+        "object_slice_depends": slices1[1].get("depends_on"),
+        "array_default_execution_path": plan2.get("execution_path"),
+        "array_panel": plan2.get("panel"),
+        "array_first_id": slices2[0].get("id"),
+    }
+
+
+def _run_end_to_end_handoff_contract(repo_root, scenario):
+    _, worker = _load_repo_modules(repo_root)
+    raw = """
+{"panel":["aristotle"],"execution_path":"slice-1 -> slice-2 -> slice-3","slices":[
+ {"id":"slice-1","summary":"writer","braid_template":"lvc-implement-operator"},
+ {"id":"slice-2","summary":"restore","braid_template":"lvc-implement-operator","depends_on":["slice-1"]},
+ {"id":"slice-3","summary":"historian","braid_template":"lvc-historian-update","depends_on":["slice-2"]}
+]}
+"""
+    plan, slices = worker._parse_planner_output(raw, council_members=("aristotle",), self_repair=False)
+    slice_ids, aliases = worker._slice_alias_maps(slices)
+    dropped = []
+    normalized = worker._normalize_slice_depends(
+        slices[2]["depends_on"],
+        idx=2,
+        dropped=dropped,
+        raw_tpl=slices[2]["braid_template"],
+        summ=slices[2]["summary"],
+        slice_ids=slice_ids,
+        alias_to_canonical=aliases,
+    )
+    task = {
+        "task_id": "task-s3",
+        "summary": slices[2]["summary"],
+        "engine_args": {
+            "council": {
+                "panel": plan.get("panel"),
+                "execution_path": plan.get("execution_path"),
+                "key_agreements": [],
+                "dissent": [],
+            },
+            "slice": {
+                "id": "slice-3",
+                "index": 3,
+                "depends_on": normalized,
+                "execution_path": plan.get("execution_path"),
+                "plan": [
+                    {"id": "slice-1", "summary": "writer", "braid_template": "lvc-implement-operator", "depends_on": [], "state": "done"},
+                    {"id": "slice-2", "summary": "restore", "braid_template": "lvc-implement-operator", "depends_on": ["slice-1"], "state": "done"},
+                    {"id": "slice-3", "summary": "historian", "braid_template": "lvc-historian-update", "depends_on": ["slice-2"], "state": "enqueued"},
+                ],
+            },
+        },
+    }
+    block = worker._render_slice_context_block(task)
+    prompt = worker.build_codex_prompt(task, "graph", "memory")
+    pr_lines = ["body", "* `BRAID_OK: rebased on feature branch and fixed review comments`"]
+    return {
+        "normalized_depends": normalized,
+        "slice_block_has_chain": "slice-2" in block and "slice-3 state=enqueued" in block,
+        "codex_prompt_has_slice_context": "[SLICE CONTEXT]" in prompt and "depends_on: [slice-2]" in prompt,
+        "pr_feedback_ok": worker._find_braid_trailer(pr_lines),
+    }
+
+
 def _run_patch_anchor_failures_trigger_topology(repo_root, scenario):
     _, worker = _load_repo_modules(repo_root)
     trailer = worker._synthesize_patch_anchor_topology_error(
@@ -4893,6 +4969,10 @@ def main(argv):
         actual = _run_braid_refine_and_pr_wrapped(repo_root, scenario)
     elif kind == "council_payload_normalization":
         actual = _run_council_payload_normalization(repo_root, scenario)
+    elif kind == "planner_output_normalization":
+        actual = _run_planner_output_normalization(repo_root, scenario)
+    elif kind == "end_to_end_handoff_contract":
+        actual = _run_end_to_end_handoff_contract(repo_root, scenario)
     elif kind == "ull_lock_guard_findings":
         actual = _run_ull_lock_guard_findings(repo_root, scenario)
     elif kind == "circular_feature_lineage":

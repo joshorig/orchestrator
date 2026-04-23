@@ -1,0 +1,7 @@
+{
+  "object_execution_path": "slice-1 -> slice-2",
+  "object_slice_depends": ["slice-1"],
+  "array_default_execution_path": "planner-council",
+  "array_panel": ["aristotle"],
+  "array_first_id": "slice-1"
+}

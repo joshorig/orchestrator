@@ -1,0 +1,6 @@
+{
+  "normalized_depends": ["slice-2"],
+  "slice_block_has_chain": true,
+  "codex_prompt_has_slice_context": true,
+  "pr_feedback_ok": "BRAID_OK: rebased on feature branch and fixed review comments"
+}

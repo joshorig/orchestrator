@@ -4007,6 +4007,28 @@ def _normalize_council_payload(parsed, *, panel, stage=None):
     return normalized
 
 
+def _parse_planner_output(raw, *, council_members, self_repair=False):
+    if self_repair:
+        plan = _normalize_council_payload(_extract_json_fragment(raw, "object"), panel=council_members)
+        slices = plan.get("slices")
+        if not isinstance(slices, list):
+            raise ValueError("self-repair planner missing slices")
+        return plan, slices
+    try:
+        candidate = _extract_json_fragment(raw, "object")
+    except Exception:
+        candidate = None
+    if isinstance(candidate, dict) and isinstance(candidate.get("slices"), list):
+        plan = _normalize_council_payload(candidate, panel=council_members)
+        return plan, list(plan.get("slices") or [])
+    slices = _extract_json_fragment(raw, "array")
+    plan = _normalize_council_payload(
+        {"panel": list(council_members), "execution_path": "planner-council", "slices": slices},
+        panel=council_members,
+    )
+    return plan, list(slices or [])
+
+
 def _extract_review_verdict(raw):
     verdict = None
     for line in reversed([_normalize_braid_verdict_line(l) for l in raw.splitlines() if str(l).strip()][-20:]):
@@ -4207,43 +4229,22 @@ def run_claude_planner(task, cfg, timeout, log_path):
                   blocker_code="llm_exit_error", summary="claude exit error", retryable=True)
         return
 
-    if planner_mode == "self-repair-plan":
-        try:
-            plan = _normalize_council_payload(_extract_json_fragment(raw, "object"), panel=council_members)
-        except Exception:
-            fail_task(task_id, "running", "no json object in self-repair planner output",
-                      blocker_code="model_output_invalid", summary="planner output invalid", retryable=False)
-            return
-        slices = plan.get("slices")
-        if not isinstance(slices, list):
-            fail_task(task_id, "running", "self-repair planner missing slices",
-                      blocker_code="model_output_invalid", summary="planner output invalid", retryable=False)
-            return
-    else:
-        plan = None
-        m = re.search(r"\{.*\}", raw, re.DOTALL)
-        if m:
-            try:
-                candidate = _extract_json_fragment(m.group(0), "object")
-            except Exception:
-                candidate = None
-            if isinstance(candidate, dict) and isinstance(candidate.get("slices"), list):
-                plan = _normalize_council_payload(candidate, panel=council_members)
-                slices = candidate.get("slices") or []
-        if plan is None:
-            try:
-                slices = _extract_json_fragment(raw, "array")
-            except Exception:
-                fail_task(task_id, "running", "no json array/object in output",
-                          blocker_code="model_output_invalid", summary="planner output invalid", retryable=False)
-                return
-            plan = {
-                "panel": list(council_members),
-                "key_agreements": [],
-                "dissent": [],
-                "execution_path": "planner-council",
-                "slices": slices,
-            }
+    try:
+        plan, slices = _parse_planner_output(
+            raw,
+            council_members=council_members,
+            self_repair=(planner_mode == "self-repair-plan"),
+        )
+    except Exception as exc:
+        fail_task(
+            task_id,
+            "running",
+            str(exc) or "planner output invalid",
+            blocker_code="model_output_invalid",
+            summary="planner output invalid",
+            retryable=False,
+        )
+        return
 
     # Template → role for codex slices. Slices with a template outside this set
     # are dropped — the planner prompt instructs claude to skip ill-fitting work
