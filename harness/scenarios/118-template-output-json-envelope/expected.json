@@ -1,0 +1,4 @@
+{
+  "wrapped_graph": "flowchart TD\n  A-->B",
+  "fallback_graph": "flowchart LR\n  Start-->End"
+}

@@ -4164,6 +4164,53 @@ def _run_end_to_end_handoff_contract(repo_root, scenario):
     }
 
 
+def _run_braid_result_json_envelope(repo_root, scenario):
+    _, worker = _load_repo_modules(repo_root)
+    review_raw = """
+{"status":"ok","verdict":"approve","summary":"minimal historian append only"}
+"""
+    refine_raw = """
+{"status":"refine","node_id":"CheckBaseline","condition":"add baseline_red edge to End"}
+"""
+    topo_raw = """
+{"status":"topology_error","summary":"patch_anchor_drift repeated apply_patch verification failures (2)"}
+"""
+    return {
+        "review_verdict": worker._extract_review_verdict(review_raw),
+        "review_trailer": worker._extract_braid_result_trailer(review_raw),
+        "refine_trailer": worker._extract_braid_result_trailer(refine_raw),
+        "topology_trailer": worker._extract_braid_result_trailer(topo_raw),
+    }
+
+
+def _run_template_output_json_envelope(repo_root, scenario):
+    _, worker = _load_repo_modules(repo_root)
+    wrapped = """
+{"mermaid":"```mermaid\\nflowchart TD\\n  A-->B\\n```"}
+"""
+    fallback = """
+noise
+```mermaid
+flowchart LR
+  Start-->End
+```
+"""
+    return {
+        "wrapped_graph": worker._extract_template_graph(wrapped),
+        "fallback_graph": worker._extract_template_graph(fallback),
+    }
+
+
+def _run_claude_result_text_shared(repo_root, scenario):
+    _, worker = _load_repo_modules(repo_root)
+    structured = '{"type":"result","result":"hello from structured output"}'
+    plain = "plain text output"
+    return {
+        "structured": worker._extract_claude_result_text(structured),
+        "plain": worker._extract_claude_result_text(plain),
+    }
+
+
 def _run_patch_anchor_failures_trigger_topology(repo_root, scenario):
     _, worker = _load_repo_modules(repo_root)
     trailer = worker._synthesize_patch_anchor_topology_error(
@@ -4973,6 +5020,12 @@ def main(argv):
         actual = _run_planner_output_normalization(repo_root, scenario)
     elif kind == "end_to_end_handoff_contract":
         actual = _run_end_to_end_handoff_contract(repo_root, scenario)
+    elif kind == "braid_result_json_envelope":
+        actual = _run_braid_result_json_envelope(repo_root, scenario)
+    elif kind == "template_output_json_envelope":
+        actual = _run_template_output_json_envelope(repo_root, scenario)
+    elif kind == "claude_result_text_shared":
+        actual = _run_claude_result_text_shared(repo_root, scenario)
     elif kind == "ull_lock_guard_findings":
         actual = _run_ull_lock_guard_findings(repo_root, scenario)
     elif kind == "circular_feature_lineage":
