@@ -1,0 +1,5 @@
+{
+  "trailer": "BRAID_TOPOLOGY_ERROR: patch_anchor_drift repeated apply_patch verification failures (2) indicate the repo shape diverged from the slice assumptions",
+  "valid": true,
+  "code": "patch_anchor_drift"
+}

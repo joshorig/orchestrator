@@ -3774,6 +3774,7 @@ VALID_TOPOLOGY_REASONS = (
     "graph_unreachable",
     "graph_malformed",
     "main_dirty_or_ahead",
+    "patch_anchor_drift",
 )
 
 
@@ -3794,6 +3795,50 @@ def topology_reason_code(trailer):
         if code in rest:
             return code
     return None
+
+
+def _patch_anchor_failure_count(*chunks):
+    total = 0
+    for chunk in chunks:
+        text = str(chunk or "")
+        total += text.count("apply_patch verification failed")
+    return total
+
+
+def _synthesize_patch_anchor_topology_error(*chunks):
+    count = _patch_anchor_failure_count(*chunks)
+    if count < 2:
+        return ""
+    return (
+        "BRAID_TOPOLOGY_ERROR: patch_anchor_drift repeated apply_patch verification "
+        f"failures ({count}) indicate the repo shape diverged from the slice assumptions"
+    )
+
+
+def _resolve_slice_depends(raw_depends, *, idx, sibling_task_ids, dropped, raw_tpl, summ, slice_ids=None):
+    resolved = []
+    if not isinstance(raw_depends, list):
+        return resolved
+    id_to_index = {sid: i for i, sid in enumerate(slice_ids or []) if isinstance(sid, str) and sid}
+    for dep in raw_depends:
+        dep_index = dep
+        if isinstance(dep, str):
+            dep_index = id_to_index.get(dep)
+            if dep_index is None:
+                dropped.append((raw_tpl, summ[:80], f"depends_on id unknown: {dep!r}"))
+                return None
+        elif not isinstance(dep, int):
+            dropped.append((raw_tpl, summ[:80], f"depends_on index not int: {dep!r}"))
+            return None
+        if dep_index < 0 or dep_index >= idx:
+            dropped.append((raw_tpl, summ[:80], f"depends_on index out of range: {dep_index}"))
+            return None
+        dep_task_id = sibling_task_ids[dep_index]
+        if dep_task_id is None:
+            dropped.append((raw_tpl, summ[:80], f"depends_on refers to dropped slice: {dep!r}"))
+            return None
+        resolved.append(dep_task_id)
+    return resolved
 
 
 _BRAID_REFINE_NODE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
@@ -4111,6 +4156,7 @@ def run_claude_planner(task, cfg, timeout, log_path):
         candidate_slices = candidate_slices[:1]
         if len(slices) > 1:
             dropped.append(("self-repair-plan", task.get("summary", "")[:80], f"extra self-repair slices suppressed: {len(slices) - 1}"))
+    candidate_slice_ids = [s.get("id") for s in candidate_slices]
     for idx, s in enumerate(candidate_slices):
         raw_tpl = s.get("braid_template")
         summ = s.get("summary", "")
@@ -4139,23 +4185,15 @@ def run_claude_planner(task, cfg, timeout, log_path):
             engine_args=dict(shared_engine_args),
         )
         raw_depends = s.get("depends_on")
-        resolved = []
-        if isinstance(raw_depends, list):
-            for dep in raw_depends:
-                if not isinstance(dep, int):
-                    dropped.append((raw_tpl, summ[:80], f"depends_on index not int: {dep!r}"))
-                    resolved = None
-                    break
-                if dep < 0 or dep >= idx:
-                    dropped.append((raw_tpl, summ[:80], f"depends_on index out of range: {dep}"))
-                    resolved = None
-                    break
-                dep_task_id = sibling_task_ids[dep]
-                if dep_task_id is None:
-                    dropped.append((raw_tpl, summ[:80], f"depends_on refers to dropped slice: {dep}"))
-                    resolved = None
-                    break
-                resolved.append(dep_task_id)
+        resolved = _resolve_slice_depends(
+            raw_depends,
+            idx=idx,
+            sibling_task_ids=sibling_task_ids,
+            dropped=dropped,
+            raw_tpl=raw_tpl,
+            summ=summ,
+            slice_ids=candidate_slice_ids,
+        )
         if resolved is None:
             sibling_task_ids.append(None)
             continue
@@ -5937,6 +5975,11 @@ def run_codex_slot(task, cfg):
             # Paper's guidance: scan the last few non-empty lines.
             trailer = _find_braid_trailer(lines)
         _record_task_costs_from_text(task_id, "codex", "gpt-5.4", proc.stdout or "")
+
+        if not trailer:
+            synthetic_topology = _synthesize_patch_anchor_topology_error(proc.stderr, proc.stdout)
+            if synthetic_topology:
+                trailer = synthetic_topology
 
         if proc.returncode != 0 and not trailer:
             def mut_fail(t):

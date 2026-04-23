@@ -3938,6 +3938,38 @@ def _run_env_health_launchctl_fallback(repo_root, scenario):
         }
 
 
+def _run_planner_depends_on_ids(repo_root, scenario):
+    _, worker = _load_repo_modules(repo_root)
+    dropped = []
+    sibling_task_ids = ["task-s1", "task-s2"]
+    resolved = worker._resolve_slice_depends(
+        ["s1"],
+        idx=1,
+        sibling_task_ids=sibling_task_ids,
+        dropped=dropped,
+        raw_tpl="lvc-implement-operator",
+        summ="slice 2",
+        slice_ids=["s1", "s2", "s3"],
+    )
+    return {
+        "resolved": resolved,
+        "dropped": dropped,
+    }
+
+
+def _run_patch_anchor_failures_trigger_topology(repo_root, scenario):
+    _, worker = _load_repo_modules(repo_root)
+    trailer = worker._synthesize_patch_anchor_topology_error(
+        "apply_patch verification failed: one\nnoise\napply_patch verification failed: two\n",
+        "",
+    )
+    return {
+        "trailer": trailer,
+        "valid": worker.topology_reason_is_valid(trailer),
+        "code": worker.topology_reason_code(trailer),
+    }
+
+
 def _run_circular_feature_lineage(repo_root, scenario):
     orchestrator, _ = _load_repo_modules(repo_root)
     with tempfile.TemporaryDirectory() as tmp:
@@ -4693,6 +4725,10 @@ def main(argv):
         actual = _run_dashboard_environment_reads_db(repo_root, scenario)
     elif kind == "env_health_launchctl_fallback":
         actual = _run_env_health_launchctl_fallback(repo_root, scenario)
+    elif kind == "planner_depends_on_ids":
+        actual = _run_planner_depends_on_ids(repo_root, scenario)
+    elif kind == "patch_anchor_failures_trigger_topology":
+        actual = _run_patch_anchor_failures_trigger_topology(repo_root, scenario)
     elif kind == "circular_feature_lineage":
         actual = _run_circular_feature_lineage(repo_root, scenario)
     elif kind == "same_epoch_ordering":
