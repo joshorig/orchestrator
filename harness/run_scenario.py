@@ -1338,6 +1338,157 @@ def _run_self_repair_issue_backfill(repo_root, scenario):
         }
 
 
+def _run_self_repair_review_state_live(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        feats = root / "features"
+        feats.mkdir()
+        queue_root = root / "queue"
+        for state in orchestrator.STATES:
+            (queue_root / state).mkdir(parents=True, exist_ok=True)
+        old = {
+            "FEATURES_DIR": orchestrator.FEATURES_DIR,
+            "QUEUE_ROOT": orchestrator.QUEUE_ROOT,
+            "load_config": orchestrator.load_config,
+            "acquire_lock": orchestrator.acquire_lock,
+        }
+        orchestrator.FEATURES_DIR = feats
+        orchestrator.QUEUE_ROOT = queue_root
+        orchestrator.load_config = lambda: {
+            "self_repair": {"enabled": True, "project": "devmini-orchestrator"},
+            "projects": [{"name": "devmini-orchestrator", "path": str(root / "orchestrator")}],
+        }
+        orchestrator.acquire_lock = lambda *args, **kwargs: type("L", (), {"close": lambda self: None})()
+        try:
+            feature = {
+                "feature_id": "feature-sr",
+                "project": "devmini-orchestrator",
+                "status": "open",
+                "self_repair": {
+                    "enabled": True,
+                    "issues": [
+                        {"issue_key": "active", "status": "planned", "planner_task_id": "task-plan", "execution_task_ids": []},
+                    ],
+                },
+            }
+            orchestrator.write_json_atomic(feats / "feature-sr.json", feature)
+            orchestrator.write_json_atomic(
+                queue_root / "awaiting-review" / "task-codex.json",
+                {
+                    "task_id": "task-codex",
+                    "project": "devmini-orchestrator",
+                    "feature_id": "feature-sr",
+                    "state": "awaiting-review",
+                    "engine": "codex",
+                    "engine_args": {"issue_key": "active", "evidence": "old"},
+                },
+            )
+            saved = orchestrator.read_json(feats / "feature-sr.json", {})
+            issue = saved["self_repair"]["issues"][0]
+            live_before = orchestrator._self_repair_issue_live(issue, feature_id="feature-sr")
+            active_before = orchestrator._self_repair_has_active_work(saved)
+            out = orchestrator.enqueue_self_repair(
+                summary="new summary",
+                evidence="new evidence",
+                issue_key="new",
+                source="workflow-check",
+            )
+            saved_feature = orchestrator.read_json(feats / "feature-sr.json", {})
+            saved_task = orchestrator.read_json(queue_root / "awaiting-review" / "task-codex.json", {})
+        finally:
+            for key, value in old.items():
+                setattr(orchestrator, key, value)
+        issues = {row["issue_key"]: row for row in saved_feature["self_repair"]["issues"]}
+        return {
+            "live_before": live_before,
+            "active_before": active_before,
+            "enqueue_reason": out.get("reason"),
+            "appended_issue_status": issues["new"].get("status"),
+            "active_updates": len(saved_task["engine_args"].get("self_repair_updates") or []),
+        }
+
+
+def _run_orchestrator_template_candidate_only(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        state_root = root / "state"
+        braid_templates = root / "braid" / "templates"
+        state_root.mkdir(parents=True, exist_ok=True)
+        braid_templates.mkdir(parents=True, exist_ok=True)
+        old = {
+            "STATE_ROOT": orchestrator.STATE_ROOT,
+            "RUNTIME_DIR": orchestrator.RUNTIME_DIR,
+            "BRAID_DIR": orchestrator.BRAID_DIR,
+            "BRAID_TEMPLATES": orchestrator.BRAID_TEMPLATES,
+            "BRAID_INDEX": orchestrator.BRAID_INDEX,
+            "load_config": orchestrator.load_config,
+            "append_event": orchestrator.append_event,
+        }
+        events = []
+        orchestrator.STATE_ROOT = state_root
+        orchestrator.RUNTIME_DIR = state_root / "runtime"
+        orchestrator.BRAID_DIR = root / "braid"
+        orchestrator.BRAID_TEMPLATES = braid_templates
+        orchestrator.BRAID_INDEX = state_root / "braid-index.json"
+        orchestrator.load_config = lambda: {"projects": [{"name": "devmini-orchestrator", "path": str(root)}]}
+        orchestrator.append_event = lambda *args, **kwargs: events.append((args, kwargs))
+        try:
+            body = "flowchart TD;\nStart[Start] -- \"always\" --> C1[Check: ok];\nC1 -- \"pass\" --> End[End];\n"
+            orchestrator.braid_template_write("orchestrator-self-repair", body, "claude-opus-refine")
+            candidate = orchestrator.RUNTIME_DIR / "braid-template-candidates" / "orchestrator-self-repair.mmd"
+            canonical = braid_templates / "orchestrator-self-repair.mmd"
+            idx = orchestrator.load_braid_index().get("orchestrator-self-repair", {})
+        finally:
+            for key, value in old.items():
+                setattr(orchestrator, key, value)
+        return {
+            "candidate_exists": candidate.exists(),
+            "canonical_exists": canonical.exists(),
+            "pending_candidate_path": idx.get("pending_candidate_path"),
+            "event_kind": events[0][0][1] if events else None,
+        }
+
+
+def _run_telegram_health_dedupe(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    telegram = _load_module("telegram_bot", repo_root / "bin" / "telegram_bot.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        old = {
+            "TELEGRAM_PUSH_STATE_PATH": orchestrator.TELEGRAM_PUSH_STATE_PATH,
+            "load_config": orchestrator.load_config,
+            "_health_payload": orchestrator._health_payload,
+            "telegram_health_card": orchestrator.telegram_health_card,
+        }
+        orchestrator.TELEGRAM_PUSH_STATE_PATH = root / "telegram-pushes.json"
+        orchestrator.load_config = lambda: {}
+        orchestrator._health_payload = lambda: {
+            "environment_ok": 0,
+            "environment_error_count": 2,
+            "workflow_check_issue_count": 4,
+            "feature_open_count": 2,
+            "feature_frontier_blocked_count": 1,
+            "queue": {},
+            "generated_at": "2026-04-23T16:00:00",
+        }
+        orchestrator.telegram_health_card = lambda: "env 2 errors\nworkflow 4 issues\nfeatures 2 open / 1 blocked"
+        try:
+            key = f"health:{telegram.health_fingerprint(orchestrator.telegram_health_card())}"
+            first = orchestrator.should_push_alert(key, 6 * 3600)
+            second = orchestrator.should_push_alert(key, 6 * 3600)
+            saved = orchestrator.load_telegram_push_state()
+        finally:
+            for key_name, value in old.items():
+                setattr(orchestrator, key_name, value)
+        return {
+            "first_allowed": first,
+            "second_allowed": second,
+            "stored_events": len((saved.get("events") or {})),
+        }
+
+
 def _run_state_engine_mirror(repo_root, scenario):
     orchestrator, _ = _load_repo_modules(repo_root)
     import os
@@ -4337,6 +4488,12 @@ def main(argv):
         actual = _run_security_secret_gate(repo_root, scenario)
     elif kind == "untrusted_skill_refusal":
         actual = _run_untrusted_skill_refusal(repo_root, scenario)
+    elif kind == "self_repair_review_state_live":
+        actual = _run_self_repair_review_state_live(repo_root, scenario)
+    elif kind == "orchestrator_template_candidate_only":
+        actual = _run_orchestrator_template_candidate_only(repo_root, scenario)
+    elif kind == "telegram_health_dedupe":
+        actual = _run_telegram_health_dedupe(repo_root, scenario)
     else:
         raise SystemExit(f"unknown scenario kind: {kind}")
 

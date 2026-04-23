@@ -1,0 +1,6 @@
+{
+  "candidate_exists": true,
+  "canonical_exists": false,
+  "pending_candidate_path": "runtime/braid-template-candidates/orchestrator-self-repair.mmd",
+  "event_kind": "candidate_written"
+}

@@ -7103,6 +7103,33 @@ def braid_template_write(task_type, body, generator_model):
     if hard_failures:
         joined = "; ".join(err.format() for err in hard_failures)
         raise ValueError(f"BRAID lint failed for {task_type}: {joined}")
+    owner_project = _template_owner_project(load_config(), task_type)
+    if owner_project == "devmini-orchestrator":
+        candidate_dir = RUNTIME_DIR / "braid-template-candidates"
+        candidate_dir.mkdir(parents=True, exist_ok=True)
+        candidate = candidate_dir / f"{task_type}.mmd"
+        candidate.write_text(body)
+        append_event(
+            "template-candidate",
+            "candidate_written",
+            details={
+                "task_type": task_type,
+                "path": str(candidate),
+                "generator_model": generator_model,
+                "mode": "candidate_only",
+            },
+        )
+        idx = load_braid_index()
+        entry = idx.get(task_type, {})
+        entry.update(
+            pending_candidate_path=str(candidate.relative_to(STATE_ROOT)),
+            pending_candidate_hash="sha256:" + hashlib.sha256(body.encode()).hexdigest(),
+            pending_candidate_model=generator_model,
+            pending_candidate_at=now_iso(),
+        )
+        idx[task_type] = entry
+        save_braid_index(idx)
+        return
     p = braid_template_path(task_type)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".mmd.tmp")
@@ -7488,17 +7515,28 @@ def _self_repair_issue_key(*, issue_key=None, issue_kind="runtime_bug", summary=
     return f"sha256:{hashlib.sha256(raw).hexdigest()}"
 
 
-def _self_repair_issue_live(issue):
+SELF_REPAIR_LIVE_STATES = ("queued", "claimed", "running", "awaiting-review", "awaiting-qa", "blocked")
+
+
+def _self_repair_issue_live(issue, *, feature_id=None):
     issue = issue or {}
     task_ids = []
+    issue_key = issue.get("issue_key")
     planner_task_id = issue.get("planner_task_id")
     if planner_task_id:
         task_ids.append(planner_task_id)
     task_ids.extend(issue.get("execution_task_ids") or ())
     for task_id in task_ids:
         found = find_task(task_id)
-        if found and found[0] in ("queued", "claimed", "running"):
+        if found and found[0] in SELF_REPAIR_LIVE_STATES:
             return True
+    if feature_id and issue_key:
+        for task in iter_tasks(states=SELF_REPAIR_LIVE_STATES, project="devmini-orchestrator"):
+            if task.get("feature_id") != feature_id:
+                continue
+            eargs = task.get("engine_args") or {}
+            if eargs.get("issue_key") == issue_key:
+                return True
     return False
 
 
@@ -7511,14 +7549,14 @@ def _self_repair_has_active_work(feature):
     for issue in (((feature or {}).get("self_repair") or {}).get("issues") or []):
         if issue.get("status") not in (None, "pending", "scheduled", "stalled", "resolved", "rejected"):
             return True
-        if _self_repair_issue_live(issue):
+        if _self_repair_issue_live(issue, feature_id=(feature or {}).get("feature_id")):
             return True
     return False
 
 
 def _self_repair_active_issue(feature):
     for issue in (((feature or {}).get("self_repair") or {}).get("issues") or []):
-        if _self_repair_issue_live(issue):
+        if _self_repair_issue_live(issue, feature_id=(feature or {}).get("feature_id")):
             return issue
     return None
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import hashlib
 import json
 import logging
 import os
@@ -94,6 +95,10 @@ def save_pushed_state(state):
 def workflow_check_fingerprint(body):
     m = re.search(r"^Fingerprint:\s*`([0-9a-f]{64})`", body, re.MULTILINE)
     return m.group(1) if m else None
+
+
+def health_fingerprint(body):
+    return hashlib.sha256((body or "").strip().encode("utf-8")).hexdigest()
 
 
 def build_handlers(cfg):
@@ -480,15 +485,12 @@ def build_handlers(cfg):
         health = o._health_payload()
         env_ok = bool(health.get("environment_ok")) and int(health.get("environment_error_count") or 0) == 0
         if (not env_ok or int(health.get("workflow_check_issue_count") or 0) > 0):
-            key = (
-                f"health:{int(health.get('environment_error_count') or 0)}:"
-                f"{int(health.get('workflow_check_issue_count') or 0)}:"
-                f"{int(health.get('feature_frontier_blocked_count') or 0)}"
-            )
-            if o.should_push_alert(key, 900):
+            card = o.telegram_health_card()
+            key = f"health:{health_fingerprint(card)}"
+            if o.should_push_alert(key, 6 * 3600):
                 await send_or_reply(
                     None,
-                    block("🩺", "health", o.telegram_health_card()),
+                    block("🩺", "health", card),
                     buttons=[[("Features", "cmd:/features"), ("Queue", "cmd:/queue")]],
                 )
         for slot, paused in o.slot_pause_status().items():
@@ -508,17 +510,19 @@ def build_handlers(cfg):
                         block("⚠️", "feature blocked", feature_alert_text(wf)),
                         buttons=feature_buttons(wf),
                     )
-        for path in sorted(o.REPORT_DIR.glob("workflow-check_*.md"))[-3:]:
-            fingerprint = workflow_check_fingerprint(path.read_text(errors="replace"))
-            if not fingerprint:
-                continue
-            key = f"workflow-check:{fingerprint}"
-            if o.should_push_alert(key, 86400):
-                await send_or_reply(
-                    None,
-                    block("🛠️", "workflow check", path.read_text(errors="replace")[:3200]),
-                    buttons=[[("Read full", f"readfull:{o.remember_full_message(path.read_text(errors='replace'))}")]],
-                )
+        reports = sorted(o.REPORT_DIR.glob("workflow-check_*.md"))
+        if reports:
+            path = reports[-1]
+            body = path.read_text(errors="replace")
+            fingerprint = workflow_check_fingerprint(body)
+            if fingerprint:
+                key = f"workflow-check:{fingerprint}"
+                if o.should_push_alert(key, 24 * 3600):
+                    await send_or_reply(
+                        None,
+                        block("🛠️", "workflow check", body[:3200]),
+                        buttons=[[("Read full", f"readfull:{o.remember_full_message(body)}")]],
+                    )
 
     app = Application.builder().token(cfg["bot_token"]).build()
     app.add_handler(CommandHandler("health", gate(cmd_health)))
