@@ -1,0 +1,14 @@
+{
+  "planner_mode": "planner-refine",
+  "planner_feature_id": "feature-1",
+  "planner_refine_origin_task_id": "task-impl",
+  "planner_refine_question": "clarify where snapshot(Path)/restore(Path) should live and what checkpoint state must be persisted",
+  "impl_to_state": "abandoned",
+  "impl_abandoned_reason": "superseded by planner refine",
+  "impl_planner_refine_task_id": "task-planner-refine-1",
+  "sibling_to_state": "abandoned",
+  "removed_children": [
+    "task-impl",
+    "task-sibling"
+  ]
+}

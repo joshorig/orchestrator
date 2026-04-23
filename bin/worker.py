@@ -1954,7 +1954,8 @@ def _braid_output_contract_prompt(*, ok_verdicts=None):
         "Return ONLY a single JSON object with no markdown fence and no extra commentary.\n"
         "Allowed shapes:\n"
         f"  {ok_shape}\n"
-        '  {"status":"refine","node_id":"<node-id>","condition":"<missing-edge-condition>"}\n'
+        '  {"status":"refine","refine_kind":"template","node_id":"<node-id>","condition":"<missing-edge-condition>"}\n'
+        '  {"status":"refine","refine_kind":"planner","summary":"<one-line ambiguity>","question":"<specific planning/spec clarification needed>"}\n'
         '  {"status":"topology_error","summary":"<reason the graph could not be traversed>"}\n'
     )
 
@@ -4040,6 +4041,30 @@ def parse_braid_refine(trailer):
     return {"node_id": node_id, "condition": condition}
 
 
+def parse_braid_planner_refine(trailer):
+    """Parse `BRAID_PLANNER_REFINE: <summary> :: <question>`.
+
+    >>> parse_braid_planner_refine("BRAID_PLANNER_REFINE: snapshot api missing :: clarify where snapshot(Path)/restore(Path) should live")
+    {'summary': 'snapshot api missing', 'question': 'clarify where snapshot(Path)/restore(Path) should live'}
+    >>> parse_braid_planner_refine("BRAID_PLANNER_REFINE: missing separator") is None
+    True
+    """
+    prefix = "BRAID_PLANNER_REFINE:"
+    if not trailer.startswith(prefix):
+        return None
+    rest = trailer[len(prefix):].strip()
+    summary, sep, question = rest.partition("::")
+    summary = summary.strip()
+    question = question.strip()
+    if not sep or not summary or not question:
+        return None
+    if len(summary) > 240 or len(question) > 600:
+        return None
+    if any(ch in summary for ch in "\r\n") or any(ch in question for ch in "\r\n"):
+        return None
+    return {"summary": summary, "question": question}
+
+
 def _find_braid_trailer(lines):
     return _extract_braid_result_trailer("\n".join([str(line) for line in lines[-40:]]))
 
@@ -4114,6 +4139,13 @@ def _braid_result_payload_to_trailer(payload):
             return f"BRAID_OK: {verdict} — {detail}".strip()
         return f"BRAID_OK: {detail}".strip()
     if status == "refine":
+        refine_kind = str(payload.get("refine_kind") or "").strip().lower().replace("-", "_")
+        if refine_kind == "planner":
+            summary = str(payload.get("summary") or payload.get("detail") or "").strip()
+            question = str(payload.get("question") or payload.get("clarification") or "").strip()
+            if summary and question:
+                return f"BRAID_PLANNER_REFINE: {summary} :: {question}"
+            return ""
         node_id = str(payload.get("node_id") or "").strip()
         condition = str(payload.get("condition") or payload.get("missing_edge_condition") or "").strip()
         if node_id and condition:
@@ -4321,6 +4353,123 @@ def enqueue_braid_refine(task, project_name, trailer, *, from_state):
     o.move_task(task["task_id"], from_state, "blocked", reason=trailer[:80], mutator=mut_block)
 
 
+def enqueue_braid_planner_refine(task, project_name, trailer, *, from_state):
+    refine = parse_braid_planner_refine(trailer)
+    if not refine:
+        def mut_fail(t):
+            t["finished_at"] = o.now_iso()
+            t["false_blocker_claim"] = trailer
+            o.set_task_blocker(
+                t,
+                "invalid_braid_refine",
+                summary="invalid planner refine contract",
+                detail=trailer,
+                source="worker",
+                retryable=False,
+            )
+        o.move_task(
+            task["task_id"],
+            from_state,
+            "failed",
+            reason=f"invalid planner refine: {trailer[:80]}",
+            mutator=mut_fail,
+        )
+        return
+
+    source = f"planner-refine-for:{task['task_id']}"
+    for existing in o.iter_tasks(states=("queued", "claimed", "running", "awaiting-review", "awaiting-qa")):
+        if existing.get("source") == source:
+            planner_task = existing
+            break
+    else:
+        feature = o.read_feature(task.get("feature_id")) if task.get("feature_id") else None
+        parent = None
+        if task.get("parent_task_id"):
+            found = o.find_task(task.get("parent_task_id"))
+            parent = found[1] if found else None
+        roadmap_entry = dict(((parent or {}).get("engine_args") or {}).get("roadmap_entry") or {})
+        task_engine_args = task.get("engine_args") or {}
+        planner_engine_args = {
+            "mode": "planner-refine",
+            "roadmap_entry": roadmap_entry,
+            "planner_refine": {
+                "origin_task_id": task["task_id"],
+                "origin_parent_task_id": task.get("parent_task_id"),
+                "origin_slice": dict(task_engine_args.get("slice") or {}),
+                "summary": refine["summary"],
+                "question": refine["question"],
+                "task_summary": task.get("summary") or "",
+                "feature_summary": (feature or {}).get("summary") or "",
+            },
+        }
+        council = task_engine_args.get("council")
+        if isinstance(council, dict) and council:
+            planner_engine_args["council"] = dict(council)
+        planner_task = o.new_task(
+            role="planner",
+            engine="claude",
+            project=project_name,
+            summary=f"Clarify plan for {task.get('summary') or task['task_id']}"[:240],
+            source=source,
+            braid_template=task.get("braid_template"),
+            feature_id=task.get("feature_id"),
+            engine_args=planner_engine_args,
+        )
+        o.enqueue_task(planner_task)
+
+    superseded = []
+    feature_id = task.get("feature_id")
+    parent_task_id = task.get("parent_task_id")
+    if feature_id and parent_task_id:
+        for sibling in o.iter_tasks(states=("queued",), project=project_name):
+            if sibling.get("feature_id") != feature_id:
+                continue
+            if sibling.get("parent_task_id") != parent_task_id:
+                continue
+            if sibling.get("task_id") == task["task_id"]:
+                continue
+            sibling_id = sibling.get("task_id")
+            o.move_task(
+                sibling_id,
+                "queued",
+                "abandoned",
+                reason="superseded by planner refine",
+                mutator=lambda t, planner_task_id=planner_task["task_id"]: t.update(
+                    {
+                        "finished_at": o.now_iso(),
+                        "abandoned_reason": "superseded by planner refine",
+                        "planner_refine_task_id": planner_task_id,
+                    }
+                ),
+            )
+            superseded.append(sibling_id)
+        o.remove_feature_children(feature_id, [task["task_id"], *superseded])
+
+    def mut_abandon(t):
+        t["finished_at"] = o.now_iso()
+        t["abandoned_reason"] = "superseded by planner refine"
+        t["planner_refine_request"] = {
+            **refine,
+            "planner_task_id": planner_task["task_id"],
+        }
+        o.set_task_blocker(
+            t,
+            "runtime_precondition_failed",
+            summary="planner clarification requested",
+            detail=refine["question"],
+            source="worker",
+            retryable=True,
+            metadata={"planner_task_id": planner_task["task_id"]},
+        )
+    o.move_task(
+        task["task_id"],
+        from_state,
+        "abandoned",
+        reason=f"planner refine -> {planner_task['task_id']}",
+        mutator=mut_abandon,
+    )
+
+
 def run_claude_planner(task, cfg, timeout, log_path):
     """Freeform planner: claude reads memory and emits slice proposals."""
     task_id = task["task_id"]
@@ -4334,10 +4483,38 @@ def run_claude_planner(task, cfg, timeout, log_path):
         return
 
     roadmap_entry = (task.get("engine_args") or {}).get("roadmap_entry") or {}
-    planner_query = " ".join(filter(None, [roadmap_entry.get("title"), roadmap_entry.get("body"), task.get("summary")]))
+    planner_refine = (task.get("engine_args") or {}).get("planner_refine") or {}
+    planner_query = " ".join(
+        filter(
+            None,
+            [
+                roadmap_entry.get("title"),
+                roadmap_entry.get("body"),
+                task.get("summary"),
+                planner_refine.get("summary"),
+                planner_refine.get("question"),
+            ],
+        )
+    )
     memory_ctx = read_memory_context(project["name"], project["path"], role="planner", query=planner_query)
     if planner_mode == "self-repair-plan":
         system_prompt, user_prompt, council_members = self_repair_council_prompt(task, project, memory_ctx)
+    elif planner_mode == "planner-refine":
+        system_prompt, user_prompt, council_members = planner_council_prompt(task, project, memory_ctx, cfg)
+        user_prompt = (
+            user_prompt
+            + "\n"
+            + "[PLANNER REFINE]\n"
+            + f"Origin task: {planner_refine.get('origin_task_id') or '-'}\n"
+            + f"Origin summary: {planner_refine.get('task_summary') or '-'}\n"
+            + f"Feature summary: {planner_refine.get('feature_summary') or '-'}\n"
+            + f"Ambiguity: {planner_refine.get('summary') or '-'}\n"
+            + f"Clarification needed: {planner_refine.get('question') or '-'}\n"
+            + f"Origin slice id: {((planner_refine.get('origin_slice') or {}).get('id')) or '-'}\n"
+            + f"Origin execution path: {((planner_refine.get('origin_slice') or {}).get('execution_path')) or '-'}\n"
+            "Replan from current repo state and emit replacement runnable slices for this feature.\n"
+            "Do not emit a historian slice unless the implementation path is actually complete in this replan.\n"
+        )
     else:
         system_prompt, user_prompt, council_members = planner_council_prompt(task, project, memory_ctx, cfg)
 
@@ -5457,6 +5634,10 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
             lines = [l.strip() for l in last_msg_path.read_text().splitlines() if l.strip()]
             trailer = _find_braid_trailer(lines)
 
+        if trailer.startswith("BRAID_PLANNER_REFINE"):
+            enqueue_braid_planner_refine(task, project["name"], trailer, from_state="running")
+            return
+
         if trailer.startswith("BRAID_REFINE"):
             enqueue_braid_refine(task, project["name"], trailer, from_state="running")
             return
@@ -5843,6 +6024,10 @@ def run_pr_feedback_task(task, cfg):
         if last_msg_path.exists():
             lines = [l.strip() for l in last_msg_path.read_text().splitlines() if l.strip()]
             trailer = _find_braid_trailer(lines)
+
+        if trailer.startswith("BRAID_PLANNER_REFINE"):
+            enqueue_braid_planner_refine(task, project["name"], trailer, from_state="running")
+            return
 
         if trailer.startswith("BRAID_REFINE"):
             enqueue_braid_refine(task, project["name"], trailer, from_state="running")
@@ -6301,6 +6486,10 @@ def run_codex_slot(task, cfg):
                 t["finished_at"] = o.now_iso()
             fail_task(task_id, "running", f"codex exit {proc.returncode}",
                       blocker_code="llm_exit_error", summary="codex exit error", retryable=True, mutator=mut_fail)
+            return
+
+        if trailer.startswith("BRAID_PLANNER_REFINE"):
+            enqueue_braid_planner_refine(task, project["name"], trailer, from_state="running")
             return
 
         if trailer.startswith("BRAID_REFINE"):

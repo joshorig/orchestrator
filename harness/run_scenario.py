@@ -4166,7 +4166,7 @@ def _run_braid_result_json_envelope(repo_root, scenario):
 {"status":"ok","verdict":"approve","summary":"minimal historian append only"}
 """
     refine_raw = """
-{"status":"refine","node_id":"CheckBaseline","condition":"add baseline_red edge to End"}
+{"status":"refine","refine_kind":"template","node_id":"CheckBaseline","condition":"add baseline_red edge to End"}
 """
     topo_raw = """
 {"status":"topology_error","summary":"patch_anchor_drift repeated apply_patch verification failures (2)"}
@@ -4176,6 +4176,19 @@ def _run_braid_result_json_envelope(repo_root, scenario):
         "review_trailer": worker._extract_braid_result_trailer(review_raw),
         "refine_trailer": worker._extract_braid_result_trailer(refine_raw),
         "topology_trailer": worker._extract_braid_result_trailer(topo_raw),
+    }
+
+
+def _run_braid_planner_refine_json_envelope(repo_root, scenario):
+    _, worker = _load_repo_modules(repo_root)
+    planner_refine_raw = """
+{"status":"refine","refine_kind":"planner","summary":"snapshot api missing","question":"clarify where snapshot(Path)/restore(Path) should live and what checkpoint state must be persisted"}
+"""
+    parsed = worker.parse_braid_planner_refine(worker._extract_braid_result_trailer(planner_refine_raw))
+    return {
+        "planner_refine_trailer": worker._extract_braid_result_trailer(planner_refine_raw),
+        "planner_refine_summary": (parsed or {}).get("summary"),
+        "planner_refine_question": (parsed or {}).get("question"),
     }
 
 
@@ -4218,6 +4231,118 @@ def _run_claude_result_text_shared(repo_root, scenario):
         "structured": worker._extract_claude_result_text(structured),
         "plain": plain_out,
         "plain_error": plain_error,
+    }
+
+
+def _run_planner_refine_route(repo_root, scenario):
+    orchestrator, worker = _load_repo_modules(repo_root)
+    calls = {"enqueued": [], "moved": [], "removed_children": []}
+    base_task = {
+        "task_id": "task-impl",
+        "project": "lvc-standard",
+        "feature_id": "feature-1",
+        "parent_task_id": "task-plan-1",
+        "summary": "Implement snapshot writer",
+        "braid_template": "lvc-implement-operator",
+        "engine_args": {
+            "slice": {"id": "slice-1", "depends_on": [], "execution_path": "slice-1 -> slice-2"},
+            "council": {"panel": ["aristotle"], "execution_path": "slice-1 -> slice-2"},
+        },
+    }
+    sibling = {
+        "task_id": "task-sibling",
+        "project": "lvc-standard",
+        "feature_id": "feature-1",
+        "parent_task_id": "task-plan-1",
+        "state": "queued",
+    }
+    planner_parent = {
+        "task_id": "task-plan-1",
+        "engine_args": {"roadmap_entry": {"id": "R-002", "title": "Snapshot/restore", "body": "body"}},
+    }
+    feature = {"feature_id": "feature-1", "summary": "[R-002] Snapshot/restore API"}
+    old = {
+        name: getattr(worker.o, name)
+        for name in (
+            "iter_tasks",
+            "new_task",
+            "enqueue_task",
+            "read_feature",
+            "find_task",
+            "remove_feature_children",
+            "move_task",
+            "now_iso",
+            "set_task_blocker",
+        )
+    }
+    try:
+        worker.o.iter_tasks = lambda **kwargs: [dict(sibling)] if kwargs.get("states") == ("queued",) and kwargs.get("project") == "lvc-standard" else []
+        worker.o.new_task = lambda **kwargs: {"task_id": "task-planner-refine-1", **kwargs}
+        worker.o.enqueue_task = lambda task: calls["enqueued"].append(task)
+        worker.o.read_feature = lambda feature_id: dict(feature) if feature_id == "feature-1" else None
+        worker.o.find_task = lambda task_id, states=None: ("done", dict(planner_parent)) if task_id == "task-plan-1" else None
+        worker.o.remove_feature_children = lambda feature_id, child_ids: calls["removed_children"].append((feature_id, list(child_ids)))
+        def fake_move(task_id, from_state, to_state, reason="", mutator=None):
+            task_obj = dict(base_task if task_id == "task-impl" else sibling)
+            if mutator:
+                mutator(task_obj)
+            calls["moved"].append({"task_id": task_id, "to_state": to_state, "task": task_obj, "reason": reason})
+        worker.o.move_task = fake_move
+        worker.o.now_iso = lambda: "2026-04-24T01:00:00"
+        worker.o.set_task_blocker = orchestrator.set_task_blocker
+        worker.enqueue_braid_planner_refine(
+            dict(base_task),
+            "lvc-standard",
+            "BRAID_PLANNER_REFINE: snapshot api missing :: clarify where snapshot(Path)/restore(Path) should live and what checkpoint state must be persisted",
+            from_state="running",
+        )
+    finally:
+        for key, value in old.items():
+            setattr(worker.o, key, value)
+    planner_task = calls["enqueued"][0]
+    moved_impl = next(item for item in calls["moved"] if item["task_id"] == "task-impl")
+    moved_sibling = next(item for item in calls["moved"] if item["task_id"] == "task-sibling")
+    return {
+        "planner_mode": ((planner_task.get("engine_args") or {}).get("mode")),
+        "planner_feature_id": planner_task.get("feature_id"),
+        "planner_refine_origin_task_id": (((planner_task.get("engine_args") or {}).get("planner_refine") or {}).get("origin_task_id")),
+        "planner_refine_question": (((planner_task.get("engine_args") or {}).get("planner_refine") or {}).get("question")),
+        "impl_to_state": moved_impl["to_state"],
+        "impl_abandoned_reason": moved_impl["task"].get("abandoned_reason"),
+        "impl_planner_refine_task_id": ((moved_impl["task"].get("planner_refine_request") or {}).get("planner_task_id")),
+        "sibling_to_state": moved_sibling["to_state"],
+        "removed_children": calls["removed_children"][0][1],
+    }
+
+
+def _run_template_refine_route_requires_template_context(repo_root, scenario):
+    orchestrator, worker = _load_repo_modules(repo_root)
+    moved = []
+    old_move = worker.o.move_task
+    old_now = worker.o.now_iso
+    try:
+        def fake_move(task_id, from_state, to_state, reason="", mutator=None):
+            task_obj = {"task_id": task_id, "state": from_state}
+            if mutator:
+                mutator(task_obj)
+            moved.append({"task_id": task_id, "to_state": to_state, "task": task_obj, "reason": reason})
+        worker.o.move_task = fake_move
+        worker.o.now_iso = lambda: "2026-04-24T01:00:00"
+        worker.enqueue_braid_refine(
+            {"task_id": "task-impl"},
+            "lvc-standard",
+            "BRAID_REFINE: CheckBaseline: add baseline_red edge to End",
+            from_state="running",
+        )
+    finally:
+        worker.o.move_task = old_move
+        worker.o.now_iso = old_now
+    result = moved[0]
+    blocker = orchestrator.task_blocker(result["task"])
+    return {
+        "to_state": result["to_state"],
+        "blocker_code": (blocker or {}).get("code"),
+        "summary": (blocker or {}).get("summary"),
     }
 
 
@@ -5322,10 +5447,16 @@ def main(argv):
         actual = _run_end_to_end_handoff_contract(repo_root, scenario)
     elif kind == "braid_result_json_envelope":
         actual = _run_braid_result_json_envelope(repo_root, scenario)
+    elif kind == "braid_planner_refine_json_envelope":
+        actual = _run_braid_planner_refine_json_envelope(repo_root, scenario)
     elif kind == "template_output_json_envelope":
         actual = _run_template_output_json_envelope(repo_root, scenario)
     elif kind == "claude_result_text_shared":
         actual = _run_claude_result_text_shared(repo_root, scenario)
+    elif kind == "planner_refine_route":
+        actual = _run_planner_refine_route(repo_root, scenario)
+    elif kind == "template_refine_route_requires_template_context":
+        actual = _run_template_refine_route_requires_template_context(repo_root, scenario)
     elif kind == "handoff_writer_contract_audit":
         actual = _run_handoff_writer_contract_audit(repo_root, scenario)
     elif kind == "planner_prompt_json_contract":

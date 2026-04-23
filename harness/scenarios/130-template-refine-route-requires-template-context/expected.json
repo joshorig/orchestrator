@@ -1,0 +1,5 @@
+{
+  "to_state": "failed",
+  "blocker_code": "invalid_braid_refine",
+  "summary": "BRAID_REFINE missing active template context"
+}

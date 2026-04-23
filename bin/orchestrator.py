@@ -8468,6 +8468,17 @@ def append_feature_child(feature_id, child_task_id):
     return update_feature(feature_id, mut)
 
 
+def remove_feature_children(feature_id, child_task_ids):
+    child_ids = {tid for tid in (child_task_ids or []) if tid}
+    if not child_ids:
+        return read_feature(feature_id)
+
+    def mut(f):
+        kids = list(f.get("child_task_ids") or [])
+        f["child_task_ids"] = [tid for tid in kids if tid not in child_ids]
+    return update_feature(feature_id, mut)
+
+
 def in_flight_feature_ids():
     """Return the set of feature_ids currently held by claimed or running tasks.
 
