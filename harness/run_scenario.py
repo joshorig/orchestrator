@@ -11,6 +11,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 from datetime import datetime, timedelta, timezone
 
 
@@ -4211,6 +4212,54 @@ def _run_claude_result_text_shared(repo_root, scenario):
     }
 
 
+def _run_feature_finalize_planner_live_no_children(repo_root, scenario):
+    orchestrator, _worker = _load_repo_modules(repo_root)
+    feature = {
+        "feature_id": "feature-live",
+        "status": "open",
+        "project": "demo",
+        "child_task_ids": [],
+    }
+    calls = {"updated": 0, "transitioned": 0, "events": 0}
+    old = {
+        name: orchestrator.feature_finalize.__globals__[name]
+        for name in (
+            "shutil",
+            "load_config",
+            "list_features",
+            "_load_feature_children",
+            "_feature_all_children_failed_without_retry",
+            "_feature_planner_is_live",
+            "update_feature",
+            "append_transition",
+            "append_event",
+        )
+    }
+    try:
+        orchestrator.feature_finalize.__globals__["shutil"] = types.SimpleNamespace(which=lambda _name: "/opt/homebrew/bin/gh")
+        orchestrator.feature_finalize.__globals__["load_config"] = lambda: {"projects": [{"name": "demo", "path": "/tmp/demo"}]}
+        orchestrator.feature_finalize.__globals__["list_features"] = lambda status="open": [dict(feature)] if status == "open" else []
+        orchestrator.feature_finalize.__globals__["_load_feature_children"] = lambda _feature: []
+        orchestrator.feature_finalize.__globals__["_feature_all_children_failed_without_retry"] = lambda _feature: False
+        orchestrator.feature_finalize.__globals__["_feature_planner_is_live"] = lambda _feature: True
+        orchestrator.feature_finalize.__globals__["update_feature"] = lambda *args, **kwargs: calls.__setitem__("updated", calls["updated"] + 1)
+        orchestrator.feature_finalize.__globals__["append_transition"] = lambda *args, **kwargs: calls.__setitem__("transitioned", calls["transitioned"] + 1)
+        orchestrator.feature_finalize.__globals__["append_event"] = lambda *args, **kwargs: calls.__setitem__("events", calls["events"] + 1)
+        checked, opened, abandoned, skipped = orchestrator.feature_finalize()
+    finally:
+        for key, value in old.items():
+            orchestrator.feature_finalize.__globals__[key] = value
+    return {
+        "checked": checked,
+        "opened": opened,
+        "abandoned": abandoned,
+        "skipped": skipped,
+        "updated": calls["updated"],
+        "transitioned": calls["transitioned"],
+        "events": calls["events"],
+    }
+
+
 def _run_handoff_writer_contract_audit(repo_root, scenario):
     worker_path = pathlib.Path(repo_root) / "bin" / "worker.py"
     text = worker_path.read_text()
@@ -5045,6 +5094,8 @@ def main(argv):
         actual = _run_claude_result_text_shared(repo_root, scenario)
     elif kind == "handoff_writer_contract_audit":
         actual = _run_handoff_writer_contract_audit(repo_root, scenario)
+    elif kind == "feature_finalize_planner_live_no_children":
+        actual = _run_feature_finalize_planner_live_no_children(repo_root, scenario)
     elif kind == "ull_lock_guard_findings":
         actual = _run_ull_lock_guard_findings(repo_root, scenario)
     elif kind == "circular_feature_lineage":

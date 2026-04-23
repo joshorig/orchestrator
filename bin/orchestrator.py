@@ -6574,17 +6574,9 @@ def feature_finalize(dry_run=False):
 
         if not feature.get("child_task_ids"):
             if dry_run:
-                print(f"DRY-RUN feature-finalize {feature_id}: would mark abandoned (no children)")
-            else:
-                update_feature(feature_id, lambda f: f.update({"status": "abandoned", "abandoned_at": now_iso(), "abandoned_reason": "feature has no child tasks"}))
-                append_transition(feature_id, "open", "abandoned", "feature has no child tasks")
-                append_event(
-                    "feature-finalize",
-                    "feature_abandoned",
-                    feature_id=feature_id,
-                    details={"project": feature.get("project"), "reason": "feature has no child tasks"},
-                )
-            abandoned += 1
+                action = "would defer (planner live)" if _feature_planner_is_live(feature) else "would defer (no children)"
+                print(f"DRY-RUN feature-finalize {feature_id}: {action}")
+            skipped += 1
             continue
 
         try:
@@ -10350,6 +10342,14 @@ def _feature_ready_for_finalize(feature):
         and child.get("pr_final_state") == "MERGED"
         for child in children
     )
+
+
+def _feature_planner_is_live(feature):
+    latest = _latest_feature_planner_task(feature.get("feature_id"))
+    if latest is None:
+        return False
+    state, _task = latest
+    return state in ("queued", "claimed", "running")
 
 
 def _feature_related_tasks(feature_id):
