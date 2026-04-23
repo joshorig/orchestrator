@@ -4359,6 +4359,56 @@ def _run_security_secret_gate(repo_root, scenario):
         }
 
 
+def _run_security_secret_gate_ignored(repo_root, scenario):
+    _, worker = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        wt = pathlib.Path(tmp) / "repo"
+        subprocess.run(["git", "init", "-b", "main", str(wt)], check=True, capture_output=True, text=True)
+        subprocess.run(["git", "-C", str(wt), "config", "user.name", "Doctest"], check=True, capture_output=True, text=True)
+        subprocess.run(["git", "-C", str(wt), "config", "user.email", "doctest@example.com"], check=True, capture_output=True, text=True)
+        (wt / ".gitignore").write_text("config/telegram.json\n")
+        path = wt / "config" / "telegram.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        (wt / "README.md").write_text("baseline\n")
+        subprocess.run(["git", "-C", str(wt), "add", ".gitignore", "README.md"], check=True, capture_output=True, text=True)
+        subprocess.run(["git", "-C", str(wt), "commit", "-m", "baseline"], check=True, capture_output=True, text=True)
+        path.write_text('{"token":"123456:abcdef"}\n')
+        findings = worker._security_gate_findings(wt, "main")
+        return {
+            "finding_count": len(findings),
+            "first_finding": findings[0] if findings else None,
+        }
+
+
+def _run_review_feedback_challenge(repo_root, scenario):
+    _, worker = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        wt = pathlib.Path(tmp) / "repo"
+        subprocess.run(["git", "init", "-b", "main", str(wt)], check=True, capture_output=True, text=True)
+        subprocess.run(["git", "-C", str(wt), "config", "user.name", "Doctest"], check=True, capture_output=True, text=True)
+        subprocess.run(["git", "-C", str(wt), "config", "user.email", "doctest@example.com"], check=True, capture_output=True, text=True)
+        (wt / ".gitignore").write_text("config/telegram.json\n")
+        (wt / "README.md").write_text("baseline\n")
+        subprocess.run(["git", "-C", str(wt), "add", ".gitignore", "README.md"], check=True, capture_output=True, text=True)
+        subprocess.run(["git", "-C", str(wt), "commit", "-m", "baseline"], check=True, capture_output=True, text=True)
+        path = wt / "config" / "telegram.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"token":"placeholder"}\n')
+        target = {
+            "task_id": "task-target",
+            "worktree": str(wt),
+            "base_branch": "main",
+        }
+        notes = worker._review_feedback_challenge_notes(
+            target,
+            "REQUEST_CHANGE: secret exposure in config/telegram.json local credential file",
+        )
+        return {
+            "has_challenge": bool(notes),
+            "mentions_ignored_file": "config/telegram.json" in notes,
+        }
+
+
 def _run_untrusted_skill_refusal(repo_root, scenario):
     orchestrator, worker = _load_repo_modules(repo_root)
     with tempfile.TemporaryDirectory() as tmp:
@@ -4570,6 +4620,10 @@ def main(argv):
         actual = _run_supply_chain_gate(repo_root, scenario)
     elif kind == "security_secret_gate":
         actual = _run_security_secret_gate(repo_root, scenario)
+    elif kind == "security_secret_gate_ignored":
+        actual = _run_security_secret_gate_ignored(repo_root, scenario)
+    elif kind == "review_feedback_challenge":
+        actual = _run_review_feedback_challenge(repo_root, scenario)
     elif kind == "untrusted_skill_refusal":
         actual = _run_untrusted_skill_refusal(repo_root, scenario)
     elif kind == "self_repair_review_state_live":

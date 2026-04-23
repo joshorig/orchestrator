@@ -829,6 +829,21 @@ def _changed_files_against_base(wt: pathlib.Path, base_branch: str):
     return sorted(files)
 
 
+def _git_ignored_files(wt: pathlib.Path, filenames):
+    filenames = [name for name in filenames if name]
+    if not filenames:
+        return set()
+    proc = subprocess.run(
+        ["git", "-C", str(wt), "check-ignore", "--stdin"],
+        input="\n".join(filenames) + "\n",
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode not in (0, 1):
+        return set()
+    return {line.strip() for line in (proc.stdout or "").splitlines() if line.strip()}
+
+
 def _detect_secrets_hook_findings(wt: pathlib.Path, filenames, baseline_path: pathlib.Path | None = None):
     """Run `detect-secrets-hook` against changed files when configured.
 
@@ -2170,7 +2185,14 @@ _HIGH_CONFIDENCE_SECRET_TYPES = {
 def _security_gate_findings(worktree, base_ref):
     findings = []
     changed = _changed_files_against_base(pathlib.Path(worktree), base_ref)
-    diff_text = _git(pathlib.Path(worktree), "diff", base_ref).stdout or ""
+    ignored = _git_ignored_files(pathlib.Path(worktree), changed)
+    changed = [rel for rel in changed if rel not in ignored]
+    diff_args = ["diff", base_ref]
+    if changed:
+        diff_args += ["--", *changed]
+    else:
+        diff_args += ["--"]
+    diff_text = _git(pathlib.Path(worktree), *diff_args).stdout or ""
     for label, snippet in scan_for_secrets(diff_text):
         findings.append(f"high-confidence secret pattern in diff: {label} ({snippet[:80]})")
     hook_findings = _detect_secrets_hook_findings(pathlib.Path(worktree), changed)
@@ -2181,6 +2203,35 @@ def _security_gate_findings(worktree, base_ref):
                 f"high-confidence secret finding: {label} in {finding.get('filename') or '(unknown file)'}"
             )
     return findings
+
+
+def _review_feedback_challenge_notes(target, review_findings):
+    wt = pathlib.Path(target.get("worktree") or "")
+    base_branch = target.get("base_branch") or base_branch_for_task(target)
+    if not wt.exists():
+        return ""
+    changed = _changed_files_against_base(wt, base_branch)
+    ignored = set(_git_ignored_files(wt, changed))
+    hinted_paths = set(re.findall(r"\b(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:json|env|ya?ml|toml)\b", review_findings or ""))
+    ignored.update(_git_ignored_files(wt, sorted(hinted_paths)))
+    ignored = sorted(ignored)
+    if not ignored:
+        return ""
+    findings_lower = (review_findings or "").lower()
+    matched = []
+    for rel in ignored:
+        name = pathlib.Path(rel).name.lower()
+        if name in findings_lower or rel.lower() in findings_lower or "secret" in findings_lower or "credential" in findings_lower:
+            matched.append(rel)
+    if not matched:
+        return ""
+    lines = [
+        "Reviewer challenge:",
+        "The following changed files are ignored by git and are local-only configuration, not shippable repo artifacts:",
+    ]
+    lines.extend(f"- {rel}" for rel in matched)
+    lines.append("Do not treat ignored local config files as secret exposure unless the same credential is introduced into tracked files or runtime logs.")
+    return "\n".join(lines)
 
 
 _SUPPLY_CHAIN_VERSION_RULES = (
@@ -4285,6 +4336,7 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
         "architectural-fit-review-pass": _config_council_panel(cfg, "architecture_panel", review_panel or ("socrates", "kahneman", "torvalds")),
     }
     is_self_repair_target = _self_repair_enabled(target)
+    challenge_notes = str(target.get("review_challenge_notes") or "")
 
     codex_prompt = (
         "[BRAID REVIEW GRAPH — traverse deterministically.]\n"
@@ -4308,6 +4360,7 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
             + "\n\n"
             if (policy_findings or secret_findings or supply_chain_findings or compile_findings or ratio_findings) else ""
         )
+        + (f"[IMPLEMENTATION CHALLENGE NOTES]\n{challenge_notes}\n\n" if challenge_notes else "")
         + f"[PROJECT CONTEXT]\n{memory_ctx}\n\n"
         "Emit EXACTLY one final line:\n"
         "  BRAID_OK: APPROVE — <one-line justification>\n"
@@ -4340,6 +4393,7 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
             + "\n\n"
             if (policy_findings or secret_findings or supply_chain_findings or compile_findings or ratio_findings) else ""
         )
+        + (f"[IMPLEMENTATION CHALLENGE NOTES]\n{challenge_notes}\n\n" if challenge_notes else "")
         + f"[PROJECT CONTEXT]\n{memory_ctx}\n\n"
         "Emit EXACTLY one final line:\n"
         "  BRAID_OK: APPROVE — <one-line justification>\n"
@@ -4668,6 +4722,7 @@ def _handle_review_request_change(reviewer_task_id, project_name, target, review
     rounds = int(target.get("review_feedback_rounds", 0)) + 1
     MAX_ROUNDS = 8
     target_id = target["task_id"]
+    challenge_notes = _review_feedback_challenge_notes(target, review_findings)
     if rounds > MAX_ROUNDS:
         def mut_fail_target(t):
             mut_target(t)
@@ -4704,6 +4759,7 @@ def _handle_review_request_change(reviewer_task_id, project_name, target, review
         summary=f"Address reviewer findings on {target_id} (round {rounds})",
         engine_args={
             "review_findings": review_findings,
+            "review_challenge_notes": challenge_notes,
             "target_task_id": target_id,
             "round": rounds,
             "self_repair": dict((target.get("engine_args") or {}).get("self_repair") or {}),
@@ -4780,11 +4836,17 @@ def _complete_review_feedback_target(target_id, target_state, *, task_id, round_
     >>> for key, value in old.items():
     ...     setattr(_complete_review_feedback_target.__globals__["o"], key, value)
     """
+    feedback_task = o.find_task(task_id, states=("queued", "claimed", "running", "done", "failed", "abandoned"))
+    feedback = feedback_task[1] if feedback_task else {}
+    challenge_notes = str(((feedback.get("engine_args") or {}).get("review_challenge_notes") or "") if feedback else "")
+
     def mut_target(t):
         t["finished_at"] = o.now_iso()
         t["review_feedback_rounds"] = int(round_no or t.get("review_feedback_rounds", 0))
         if info not in ("", "clean"):
             t["artifacts"] = t.get("artifacts", []) + [info]
+        if challenge_notes:
+            t["review_challenge_notes"] = challenge_notes
 
     try:
         o.move_task(target_id, target_state, "awaiting-review",
