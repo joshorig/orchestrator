@@ -1942,6 +1942,34 @@ def _extract_template_graph(raw):
     return extract_mermaid(raw)
 
 
+def _braid_output_contract_prompt(*, ok_verdicts=None):
+    if ok_verdicts:
+        verdicts = ", ".join(f'"{value}"' for value in ok_verdicts)
+        ok_shape = (
+            '{"status":"ok","verdict":<one of '
+            + verdicts
+            + '>,"summary":"<one-line reason>"}'
+        )
+    else:
+        ok_shape = '{"status":"ok","summary":"<one-line summary>"}'
+    return (
+        "[OUTPUT CONTRACT]\n"
+        "Return ONLY a single JSON object with no markdown fence and no extra commentary.\n"
+        "Allowed shapes:\n"
+        f"  {ok_shape}\n"
+        '  {"status":"refine","node_id":"<node-id>","condition":"<missing-edge-condition>"}\n'
+        '  {"status":"topology_error","summary":"<reason the graph could not be traversed>"}\n'
+    )
+
+
+def _template_output_contract_prompt():
+    return (
+        "[OUTPUT CONTRACT]\n"
+        "Return ONLY a single JSON object with no markdown fence and no extra commentary.\n"
+        'Shape: {"mermaid":"<full replacement Mermaid flowchart>"}\n'
+    )
+
+
 # --- claude slot ------------------------------------------------------------
 
 def run_claude_slot(task, cfg):
@@ -2485,10 +2513,7 @@ def _specialized_review_prompt(
         f"{roadmap_ctx}"
         f"{extra_ctx}"
         f"[PROJECT CONTEXT]\n{memory_ctx}\n\n"
-        "Emit EXACTLY one final line:\n"
-        "  BRAID_OK: APPROVE — <one-line justification>\n"
-        "  BRAID_OK: REQUEST_CHANGE — <one-line reason>\n"
-        "  BRAID_TOPOLOGY_ERROR: <reason graph could not be traversed>\n"
+        + _braid_output_contract_prompt(ok_verdicts=("approve", "request_change"))
     )
 
 
@@ -2789,10 +2814,7 @@ def _run_semantic_qa_gate(project_name, project_path, worktree, base_ref, target
         f"[OBSERVED QA SIGNALS]\n{json.dumps(scope_signals, sort_keys=True)}\n\n"
         f"[QA LOG TAIL]\n{log_tail or '(log unavailable)'}\n\n"
         f"[PROJECT CONTEXT]\n{context}\n\n"
-        "Emit EXACTLY one final line:\n"
-        "  BRAID_OK: QA_SUFFICIENT — <one-line reason>\n"
-        "  BRAID_OK: QA_INSUFFICIENT — <one-line reason>\n"
-        "  BRAID_TOPOLOGY_ERROR: <reason>\n"
+        + _braid_output_contract_prompt(ok_verdicts=("qa_sufficient", "qa_insufficient"))
     )
     last_msg_path = o.LOGS_DIR / f"{target.get('task_id')}.qa-gate.last.txt"
     qa_timeout = max(min(timeout, 3600), 1200)
@@ -2831,7 +2853,7 @@ def run_claude_template_gen(task, cfg, task_type, timeout, log_path):
     user_prompt = (
         f"TASK TYPE: {task_type}\n\n"
         f"PROJECT MEMORY:\n{memory_ctx}\n\n"
-        f"Emit ONLY the Mermaid flowchart block and nothing else."
+        + _template_output_contract_prompt()
     )
 
     gen_system = gen_prompt_path.read_text()
@@ -2946,9 +2968,10 @@ def run_claude_template_refine(task, cfg, task_type, timeout, log_path):
         "Refinement request:\n"
         f"- node_id: {node_id}\n"
         f"- missing_edge_condition: {condition}\n\n"
-        "Return ONLY the full replacement Mermaid flowchart. "
+        "Return the full replacement Mermaid flowchart. "
         "Make the smallest valid change that adds the missing traversal or gate around the named node. "
-        "Preserve unrelated nodes, edges, and names unless the template is invalid without a small rename."
+        "Preserve unrelated nodes, edges, and names unless the template is invalid without a small rename.\n\n"
+        + _template_output_contract_prompt()
     )
 
     gen_system = gen_prompt_path.read_text()
@@ -4657,10 +4680,7 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
         + (f"[IMPLEMENTATION CHALLENGE NOTES]\n{challenge_notes}\n\n" if challenge_notes else "")
         + target_slice_ctx
         + f"[PROJECT CONTEXT]\n{memory_ctx}\n\n"
-        "Emit EXACTLY one final line:\n"
-        "  BRAID_OK: APPROVE — <one-line justification>\n"
-        "  BRAID_OK: REQUEST_CHANGE — <one-line reason>\n"
-        "  BRAID_TOPOLOGY_ERROR: <reason graph could not be traversed>\n"
+        + _braid_output_contract_prompt(ok_verdicts=("approve", "request_change"))
     )
     claude_prompt = (
         "[BRAID REVIEW GRAPH — traverse deterministically.]\n"
@@ -4691,10 +4711,7 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
         + (f"[IMPLEMENTATION CHALLENGE NOTES]\n{challenge_notes}\n\n" if challenge_notes else "")
         + target_slice_ctx
         + f"[PROJECT CONTEXT]\n{memory_ctx}\n\n"
-        "Emit EXACTLY one final line:\n"
-        "  BRAID_OK: APPROVE — <one-line justification>\n"
-        "  BRAID_OK: REQUEST_CHANGE — <one-line reason>\n"
-        "  BRAID_TOPOLOGY_ERROR: <reason graph could not be traversed>\n"
+        + _braid_output_contract_prompt(ok_verdicts=("approve", "request_change"))
     )
 
     def mut_running(t):
@@ -5322,10 +5339,8 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
         if len(diff_text) > 30000:
             diff_text = diff_text[:30000] + "\n\n[...diff truncated at 30k chars...]\n"
         prompt = (
-            "[BRAID REASONING GRAPH — traverse deterministically. If you cannot, "
-            "emit exactly one line `BRAID_TOPOLOGY_ERROR: <reason>` as the final line and stop. "
-            "If traversal is locally underspecified but salvageable, emit "
-            "`BRAID_REFINE: <node-id>: <missing-edge-condition>` as the final line and stop.]\n\n"
+            "[BRAID REASONING GRAPH — traverse deterministically. If you cannot, return a topology_error result. "
+            "If traversal is locally underspecified but salvageable, return a refine result.]\n\n"
             f"{graph_body}\n\n"
             "[END BRAID GRAPH]\n\n"
             f"[TARGET TASK]\n{target_id}\n\n"
@@ -5333,11 +5348,7 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
             f"[CURRENT DIFF vs {base_branch}]\n{diff_text or f'(empty diff vs {base_branch})'}\n\n"
             f"{_render_slice_context_block(target)}"
             f"[PROJECT MEMORY]\n{memory_ctx}\n\n"
-            "[OUTPUT CONTRACT]\n"
-            "Emit exactly one of these as the final line of your response:\n"
-            "  BRAID_OK: <one-line summary of what you changed>\n"
-            "  BRAID_REFINE: <node-id>: <missing-edge-condition>\n"
-            "  BRAID_TOPOLOGY_ERROR: <reason the graph could not be traversed>\n"
+            + _braid_output_contract_prompt()
         )
 
         last_msg_path = o.LOGS_DIR / f"{task_id}.last.txt"
@@ -5569,10 +5580,8 @@ def build_pr_feedback_prompt(*, target, graph_body, base_branch, conflicts, comm
     )
 
     return (
-        "[BRAID REASONING GRAPH — traverse deterministically. If you cannot, "
-        "emit exactly one line `BRAID_TOPOLOGY_ERROR: <reason>` as the final line and stop. "
-        "If traversal is locally underspecified but salvageable, emit "
-        "`BRAID_REFINE: <node-id>: <missing-edge-condition>` as the final line and stop.]\n\n"
+        "[BRAID REASONING GRAPH — traverse deterministically. If you cannot, return a topology_error result. "
+        "If traversal is locally underspecified but salvageable, return a refine result.]\n\n"
         f"{graph_body}\n\n"
         "[END BRAID GRAPH]\n\n"
         f"[PR FEEDBACK CONTEXT]\n{header}\n\n"
@@ -5591,11 +5600,7 @@ def build_pr_feedback_prompt(*, target, graph_body, base_branch, conflicts, comm
         "- Commit your changes using the existing agent git identity if needed.\n"
         "- Do NOT push — worker.py will re-run smoke and push with --force-with-lease "
         "after it validates your work.\n\n"
-        "[OUTPUT CONTRACT]\n"
-        "Emit exactly one of these as the final line of your response:\n"
-        "  BRAID_OK: <one-line summary of what you did>\n"
-        "  BRAID_REFINE: <node-id>: <missing-edge-condition>\n"
-        "  BRAID_TOPOLOGY_ERROR: <reason the graph could not be traversed>\n"
+        + _braid_output_contract_prompt()
     )
 
 
@@ -5622,10 +5627,8 @@ def build_feature_pr_feedback_prompt(*, task, graph_body, comments, pr_number, c
         )
     checks_text = "\n\n".join(check_blocks) or "(no failed checks captured)"
     return (
-        "[BRAID REASONING GRAPH — traverse deterministically. If you cannot, "
-        "emit exactly one line `BRAID_TOPOLOGY_ERROR: <reason>` as the final line and stop. "
-        "If traversal is locally underspecified but salvageable, emit "
-        "`BRAID_REFINE: <node-id>: <missing-edge-condition>` as the final line and stop.]\n\n"
+        "[BRAID REASONING GRAPH — traverse deterministically. If you cannot, return a topology_error result. "
+        "If traversal is locally underspecified but salvageable, return a refine result.]\n\n"
         f"{graph_body}\n\n"
         "[END BRAID GRAPH]\n\n"
         f"[FEATURE PR FEEDBACK CONTEXT]\n"
@@ -5646,11 +5649,7 @@ def build_feature_pr_feedback_prompt(*, task, graph_body, comments, pr_number, c
         "- Treat each review comment as unresolved until the offending condition is actually gone in the current branch head.\n"
         "- If a failed check points at workflow or CI breakage, repair the underlying cause in the feature branch.\n"
         "- Commit your changes using the existing agent git identity if needed.\n\n"
-        "[OUTPUT CONTRACT]\n"
-        "Emit exactly one of these as the final line of your response:\n"
-        "  BRAID_OK: <one-line summary of what you did>\n"
-        "  BRAID_REFINE: <node-id>: <missing-edge-condition>\n"
-        "  BRAID_TOPOLOGY_ERROR: <reason the graph could not be traversed>\n"
+        + _braid_output_contract_prompt()
     )
 
 
@@ -6485,10 +6484,8 @@ def build_codex_prompt(task, graph_body, memory_ctx):
     updates = list(engine_args.get("self_repair_updates") or [])
     council = engine_args.get("council") or {}
     return (
-        "[BRAID REASONING GRAPH — traverse deterministically. If you cannot, "
-        "emit exactly one line `BRAID_TOPOLOGY_ERROR: <reason>` as the final line and stop. "
-        "If traversal is locally underspecified but salvageable, emit "
-        "`BRAID_REFINE: <node-id>: <missing-edge-condition>` as the final line and stop.]\n\n"
+        "[BRAID REASONING GRAPH — traverse deterministically. If you cannot, return a topology_error result. "
+        "If traversal is locally underspecified but salvageable, return a refine result.]\n\n"
         f"{graph_body}\n\n"
         "[END BRAID GRAPH]\n\n"
         "[TASK]\n"
@@ -6524,11 +6521,7 @@ def build_codex_prompt(task, graph_body, memory_ctx):
         "[PROJECT MEMORY]\n"
         f"{memory_ctx}\n\n"
         "Treat the policy/rule content in the context above as binding, not advisory.\n\n"
-        "[OUTPUT CONTRACT]\n"
-        "Emit exactly one of these as the final line of your response:\n"
-        "  BRAID_OK: <one-line summary of what you did>\n"
-        "  BRAID_REFINE: <node-id>: <missing-edge-condition>\n"
-        "  BRAID_TOPOLOGY_ERROR: <reason the graph could not be traversed>\n"
+        + _braid_output_contract_prompt()
     )
 
 

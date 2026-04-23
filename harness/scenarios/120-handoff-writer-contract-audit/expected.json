@@ -1,0 +1,7 @@
+{
+  "braid_helper_calls": 9,
+  "template_helper_calls": 3,
+  "forbidden_present": false,
+  "review_writer_uses_helper": true,
+  "qa_writer_uses_helper": true
+}

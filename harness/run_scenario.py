@@ -4211,6 +4211,23 @@ def _run_claude_result_text_shared(repo_root, scenario):
     }
 
 
+def _run_handoff_writer_contract_audit(repo_root, scenario):
+    worker_path = pathlib.Path(repo_root) / "bin" / "worker.py"
+    text = worker_path.read_text()
+    forbidden = [
+        "Emit EXACTLY one final line:",
+        "Emit exactly one of these as the final line of your response:",
+        "emit exactly one line `BRAID_TOPOLOGY_ERROR",
+    ]
+    return {
+        "braid_helper_calls": text.count("_braid_output_contract_prompt("),
+        "template_helper_calls": text.count("_template_output_contract_prompt("),
+        "forbidden_present": any(item in text for item in forbidden),
+        "review_writer_uses_helper": "_specialized_review_prompt" in text and 'ok_verdicts=("approve", "request_change")' in text,
+        "qa_writer_uses_helper": 'ok_verdicts=("qa_sufficient", "qa_insufficient")' in text,
+    }
+
+
 def _run_patch_anchor_failures_trigger_topology(repo_root, scenario):
     _, worker = _load_repo_modules(repo_root)
     trailer = worker._synthesize_patch_anchor_topology_error(
@@ -5026,6 +5043,8 @@ def main(argv):
         actual = _run_template_output_json_envelope(repo_root, scenario)
     elif kind == "claude_result_text_shared":
         actual = _run_claude_result_text_shared(repo_root, scenario)
+    elif kind == "handoff_writer_contract_audit":
+        actual = _run_handoff_writer_contract_audit(repo_root, scenario)
     elif kind == "ull_lock_guard_findings":
         actual = _run_ull_lock_guard_findings(repo_root, scenario)
     elif kind == "circular_feature_lineage":
