@@ -907,7 +907,7 @@ def build_feed(*, emit_runtime_metrics=False):
 
 
 def main():
-    o.write_json_atomic(o.DASHBOARD_FEED_PATH, build_feed(emit_runtime_metrics=True))
+    o.write_json_atomic(o.DASHBOARD_FEED_PATH, build_feed(emit_runtime_metrics=False))
     print(o.DASHBOARD_FEED_PATH)
 
 

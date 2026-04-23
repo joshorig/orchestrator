@@ -95,6 +95,11 @@ CLAUDE_CANDIDATE_PATHS = (
     str(pathlib.Path.home() / "Library/Application Support/Claude/claude-code-vm/current/claude"),
     str(pathlib.Path.home() / "Library/Application Support/Claude/claude-code/claude.app/Contents/MacOS/claude"),
 )
+GH_CANDIDATE_PATHS = (
+    os.environ.get("GH_BIN", "").strip(),
+    shutil.which("gh") or "",
+    "/opt/homebrew/bin/gh",
+)
 CODEX_CANDIDATE_PATHS = (
     os.environ.get("CODEX_BIN", "").strip(),
     shutil.which("codex") or "",
@@ -761,6 +766,8 @@ def load_gh_token_env():
         return True
     token = secret_value("gh-token")
     if not token:
+        token = _launchctl_getenv("GH_TOKEN") or _launchctl_getenv("GITHUB_TOKEN")
+    if not token:
         return False
     os.environ["GH_TOKEN"] = token
     return True
@@ -771,6 +778,15 @@ def load_telegram_bot_token():
     if token:
         return token
     token = secret_value("telegram-bot-token")
+    if not token:
+        config_path = STATE_ROOT / "config" / "telegram.json"
+        try:
+            cfg = json.loads(config_path.read_text())
+            token = str(cfg.get("bot_token") or "").strip()
+        except Exception:
+            token = ""
+    if not token:
+        token = _launchctl_getenv("TELEGRAM_BOT_TOKEN")
     if token:
         os.environ["TELEGRAM_BOT_TOKEN"] = token
     return token
@@ -2219,6 +2235,22 @@ def _launchctl_setenv(name, value):
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, str(exc)
+
+
+def _launchctl_getenv(name):
+    try:
+        proc = subprocess.run(
+            ["launchctl", "getenv", name],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except Exception:
+        return ""
+    if proc.returncode != 0:
+        return ""
+    return (proc.stdout or "").strip()
     detail = (proc.stderr or proc.stdout or "").strip()
     return proc.returncode == 0, detail or "ok"
 
@@ -2430,7 +2462,7 @@ def environment_health(*, refresh=False):
         "bash": ("runtime_env_dirty", lambda: shutil.which("bash")),
         "python3": ("runtime_env_dirty", lambda: shutil.which("python3")),
         "launchctl": ("runtime_env_dirty", lambda: shutil.which("launchctl")),
-        "gh": ("delivery_auth_expired", lambda: shutil.which("gh")),
+        "gh": ("delivery_auth_expired", lambda: next((p for p in GH_CANDIDATE_PATHS if p and pathlib.Path(p).exists()), None)),
         "codex": ("runtime_env_dirty", lambda: next((p for p in CODEX_CANDIDATE_PATHS if p and pathlib.Path(p).exists()), None)),
         "claude": ("runtime_env_dirty", lambda: next((p for p in CLAUDE_CANDIDATE_PATHS if p and pathlib.Path(p).exists()), None)),
     }

@@ -3885,6 +3885,59 @@ def _run_dashboard_environment_reads_db(repo_root, scenario):
         }
 
 
+def _run_env_health_launchctl_fallback(repo_root, scenario):
+    orchestrator = _load_module("orchestrator", repo_root / "bin" / "orchestrator.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        config_dir = root / "config"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        fake_gh = root / "gh"
+        fake_gh.write_text("#!/bin/sh\nexit 0\n")
+        old = {
+            "STATE_ROOT": orchestrator.STATE_ROOT,
+            "GH_TOKEN_PATH": orchestrator.GH_TOKEN_PATH,
+            "GH_CANDIDATE_PATHS": orchestrator.GH_CANDIDATE_PATHS,
+            "CODEX_CANDIDATE_PATHS": orchestrator.CODEX_CANDIDATE_PATHS,
+            "CLAUDE_CANDIDATE_PATHS": orchestrator.CLAUDE_CANDIDATE_PATHS,
+            "_launchctl_getenv": orchestrator._launchctl_getenv,
+            "_launchctl_loaded_labels": orchestrator._launchctl_loaded_labels,
+            "_state_engine_write_enabled": orchestrator._state_engine_write_enabled,
+        }
+        old_env = {
+            "GH_TOKEN": os.environ.get("GH_TOKEN"),
+            "TELEGRAM_BOT_TOKEN": os.environ.get("TELEGRAM_BOT_TOKEN"),
+        }
+        orchestrator.STATE_ROOT = root
+        orchestrator.GH_TOKEN_PATH = config_dir / "gh-token"
+        orchestrator.GH_CANDIDATE_PATHS = (str(fake_gh),)
+        orchestrator.CODEX_CANDIDATE_PATHS = (sys.executable,)
+        orchestrator.CLAUDE_CANDIDATE_PATHS = (sys.executable,)
+        orchestrator._launchctl_loaded_labels = lambda: set()
+        orchestrator._launchctl_getenv = lambda name: {
+            "GH_TOKEN": "gh-launchctl-token",
+            "TELEGRAM_BOT_TOKEN": "tg-launchctl-token",
+        }.get(name, "")
+        orchestrator._state_engine_write_enabled = lambda cfg=None: False
+        os.environ.pop("GH_TOKEN", None)
+        os.environ.pop("TELEGRAM_BOT_TOKEN", None)
+        try:
+            health = orchestrator.environment_health(refresh=True)
+        finally:
+            for key, value in old.items():
+                setattr(orchestrator, key, value)
+            for key, value in old_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+        summaries = [issue.get("summary") for issue in health.get("issues") or []]
+        return {
+            "gh_missing": "required binary missing: gh" in summaries,
+            "gh_token_missing": "GH_TOKEN unavailable" in summaries,
+            "telegram_missing": "telegram bot token unavailable" in summaries,
+        }
+
+
 def _run_circular_feature_lineage(repo_root, scenario):
     orchestrator, _ = _load_repo_modules(repo_root)
     with tempfile.TemporaryDirectory() as tmp:
@@ -4638,6 +4691,8 @@ def main(argv):
         actual = _run_blocker_code_missing(repo_root, scenario)
     elif kind == "dashboard_environment_reads_db":
         actual = _run_dashboard_environment_reads_db(repo_root, scenario)
+    elif kind == "env_health_launchctl_fallback":
+        actual = _run_env_health_launchctl_fallback(repo_root, scenario)
     elif kind == "circular_feature_lineage":
         actual = _run_circular_feature_lineage(repo_root, scenario)
     elif kind == "same_epoch_ordering":
