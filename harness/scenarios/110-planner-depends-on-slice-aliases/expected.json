@@ -1,0 +1,6 @@
+{
+  "slice_ids": ["slice-1", "slice-2", "slice-3"],
+  "normalized": ["slice-2"],
+  "resolved": ["task-s2"],
+  "dropped": []
+}

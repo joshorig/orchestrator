@@ -3940,6 +3940,8 @@ def _run_env_health_launchctl_fallback(repo_root, scenario):
 
 def _run_planner_depends_on_ids(repo_root, scenario):
     _, worker = _load_repo_modules(repo_root)
+    candidate_slices = [{"id": "s1"}, {"id": "s2"}, {"id": "s3"}]
+    slice_ids, aliases = worker._slice_alias_maps(candidate_slices)
     dropped = []
     sibling_task_ids = ["task-s1", "task-s2"]
     resolved = worker._resolve_slice_depends(
@@ -3949,11 +3951,86 @@ def _run_planner_depends_on_ids(repo_root, scenario):
         dropped=dropped,
         raw_tpl="lvc-implement-operator",
         summ="slice 2",
-        slice_ids=["s1", "s2", "s3"],
+        slice_ids=slice_ids,
+        alias_to_canonical=aliases,
     )
     return {
         "resolved": resolved,
         "dropped": dropped,
+    }
+
+
+def _run_planner_depends_on_slice_alias(repo_root, scenario):
+    _, worker = _load_repo_modules(repo_root)
+    candidate_slices = [
+        {"summary": "slice 1", "braid_template": "lvc-implement-operator"},
+        {"summary": "slice 2", "braid_template": "lvc-implement-operator", "depends_on": ["slice-1"]},
+        {"summary": "slice 3", "braid_template": "lvc-implement-operator", "depends_on": ["slice-2"]},
+    ]
+    slice_ids, aliases = worker._slice_alias_maps(candidate_slices)
+    dropped = []
+    normalized = worker._normalize_slice_depends(
+        candidate_slices[2]["depends_on"],
+        idx=2,
+        dropped=dropped,
+        raw_tpl="lvc-implement-operator",
+        summ="slice 3",
+        slice_ids=slice_ids,
+        alias_to_canonical=aliases,
+    )
+    resolved = worker._resolve_slice_depends(
+        candidate_slices[2]["depends_on"],
+        idx=2,
+        sibling_task_ids=["task-s1", "task-s2"],
+        dropped=dropped,
+        raw_tpl="lvc-implement-operator",
+        summ="slice 3",
+        slice_ids=slice_ids,
+        alias_to_canonical=aliases,
+    )
+    return {
+        "slice_ids": slice_ids,
+        "normalized": normalized,
+        "resolved": resolved,
+        "dropped": dropped,
+    }
+
+
+def _run_depends_on_context_prompts(repo_root, scenario):
+    _, worker = _load_repo_modules(repo_root)
+    task = {
+        "task_id": "task-s2",
+        "summary": "Implement restore path",
+        "engine_args": {
+            "council": {
+                "panel": ["aristotle"],
+                "execution_path": "slice-1 -> slice-2 -> slice-3",
+                "key_agreements": ["keep restore after writer"],
+                "dissent": [],
+            },
+            "slice": {
+                "id": "slice-2",
+                "index": 2,
+                "depends_on": ["slice-1"],
+                "execution_path": "slice-1 -> slice-2 -> slice-3",
+                "plan": [
+                    {"id": "slice-1", "summary": "writer", "braid_template": "lvc-implement-operator", "depends_on": [], "state": "done"},
+                    {"id": "slice-2", "summary": "restore", "braid_template": "lvc-implement-operator", "depends_on": ["slice-1"], "state": "enqueued"},
+                    {"id": "slice-3", "summary": "historian", "braid_template": "lvc-historian", "depends_on": ["slice-2"], "state": "planned"},
+                ],
+            },
+        },
+    }
+    block = worker._render_slice_context_block(task)
+    prompt = worker.build_codex_prompt(task, "graph", "memory")
+    planner_prompt = worker.planner_system_prompt("lvc-standard", "body")
+    return {
+        "block_has_slice_id": "slice_id: slice-2" in block,
+        "block_has_depends": "depends_on: [slice-1]" in block,
+        "block_has_plan": "slice-3 state=planned" in block,
+        "codex_has_slice_context": "[SLICE CONTEXT]" in prompt,
+        "codex_has_execution_path": "execution_path: slice-1 -> slice-2 -> slice-3" in prompt,
+        "planner_uses_string_ids": "optional depends_on (list[str])" in planner_prompt and "slice-1" in planner_prompt,
     }
 
 
@@ -4750,8 +4827,12 @@ def main(argv):
         actual = _run_env_health_launchctl_fallback(repo_root, scenario)
     elif kind == "planner_depends_on_ids":
         actual = _run_planner_depends_on_ids(repo_root, scenario)
+    elif kind == "planner_depends_on_slice_alias":
+        actual = _run_planner_depends_on_slice_alias(repo_root, scenario)
     elif kind == "patch_anchor_failures_trigger_topology":
         actual = _run_patch_anchor_failures_trigger_topology(repo_root, scenario)
+    elif kind == "depends_on_context_prompts":
+        actual = _run_depends_on_context_prompts(repo_root, scenario)
     elif kind == "ull_lock_guard_findings":
         actual = _run_ull_lock_guard_findings(repo_root, scenario)
     elif kind == "circular_feature_lineage":

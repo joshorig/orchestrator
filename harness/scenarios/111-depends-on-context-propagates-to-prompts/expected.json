@@ -1,0 +1,8 @@
+{
+  "block_has_slice_id": true,
+  "block_has_depends": true,
+  "block_has_plan": true,
+  "codex_has_slice_context": true,
+  "codex_has_execution_path": true,
+  "planner_uses_string_ids": true
+}

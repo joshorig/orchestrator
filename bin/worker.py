@@ -3137,7 +3137,10 @@ def planner_council_prompt(task, project, memory_ctx, cfg):
         "  dissent: list[str]\n"
         "  execution_path: string\n"
         "  slices: list[object]\n"
-        "Each slice object must include summary and braid_template, and may include depends_on.\n"
+        "Each slice object must include id, summary, and braid_template, and may include depends_on.\n"
+        "Standardize ids exactly as slice-1, slice-2, slice-3 in emitted order.\n"
+        "If a slice depends on an earlier slice, depends_on must be a list of those slice ids "
+        '(for example ["slice-1"]). Do not use numeric indexes.\n'
         "Use only valid braid_template values for this project.\n\n"
         "[COUNCIL PERSONAS]\n"
         f"{council_ctx}\n"
@@ -3192,7 +3195,9 @@ def self_repair_council_prompt(task, project, memory_ctx):
         "  retry_conditions: list[str]\n"
         "  escalation_threshold: string\n"
         "  slices: list[object]\n"
-        "Each slice object must include summary and braid_template.\n"
+        "Each slice object must include id, summary, and braid_template.\n"
+        "Standardize ids exactly as slice-1, slice-2, slice-3 in emitted order.\n"
+        "If a later slice depends on an earlier slice, depends_on must be a list of those slice ids.\n"
         "Valid braid_template values here: only \"orchestrator-self-repair\".\n"
         "Do not emit prose outside the JSON object.\n\n"
         "[COUNCIL PERSONAS]\n"
@@ -3600,13 +3605,15 @@ def planner_system_prompt(project_name, roadmap_entry_body=""):
         "(e.g. CI workflow changes, release automation, cross-project refactors), "
         "SKIP it — do not include it in your output. If nothing fits, emit an empty array [].\n\n"
         f'Use only these template strings verbatim: {allowed}.\n'
-        "Every object MUST include summary and braid_template. "
-        "Slices may also include optional depends_on as a list of zero-based sibling slice indices "
-        "that must complete before that slice can run. Use depends_on only for same-feature "
-        "ordering constraints within this emitted array; otherwise omit it.\n"
+        "Every object MUST include id, summary and braid_template. "
+        "Use ids exactly as slice-1, slice-2, slice-3 in emitted order. "
+        "Slices may also include optional depends_on as a list of prior sibling slice ids "
+        'such as ["slice-1"] that must complete before that slice can run. '
+        "Use depends_on only for same-feature ordering constraints within this emitted array; "
+        "otherwise omit it.\n"
         "Emit ONLY a JSON array of objects, each with keys:\n"
-        "  summary (≤120 chars), braid_template (one of the valid values above, verbatim), "
-        "optional depends_on (list[int]).\n"
+        "  id (slice-1..slice-3), summary (≤120 chars), braid_template "
+        "(one of the valid values above, verbatim), optional depends_on (list[str]).\n"
         "No prose, no markdown fences."
     )
 
@@ -3826,15 +3833,52 @@ def _synthesize_patch_anchor_topology_error(*chunks):
     )
 
 
-def _resolve_slice_depends(raw_depends, *, idx, sibling_task_ids, dropped, raw_tpl, summ, slice_ids=None):
-    resolved = []
+_SLICE_ORDINAL_RE = re.compile(r"^(?:slice[-_ ]?|s)(\d+)$", re.IGNORECASE)
+
+
+def _canonical_slice_id(idx):
+    return f"slice-{idx + 1}"
+
+
+def _normalize_slice_ref(ref):
+    if not isinstance(ref, str):
+        return ref
+    text = ref.strip()
+    if not text:
+        return text
+    match = _SLICE_ORDINAL_RE.fullmatch(text)
+    if match:
+        return f"slice-{int(match.group(1))}"
+    return text
+
+
+def _slice_alias_maps(candidate_slices):
+    canonical_ids = []
+    alias_to_canonical = {}
+    for idx, slice_obj in enumerate(candidate_slices or []):
+        canonical_id = _canonical_slice_id(idx)
+        canonical_ids.append(canonical_id)
+        alias_to_canonical[canonical_id] = canonical_id
+        raw_id = (slice_obj or {}).get("id")
+        if isinstance(raw_id, str) and raw_id.strip():
+            alias_to_canonical[raw_id.strip()] = canonical_id
+            alias_to_canonical[_normalize_slice_ref(raw_id)] = canonical_id
+    return canonical_ids, alias_to_canonical
+
+
+def _normalize_slice_depends(raw_depends, *, idx, dropped, raw_tpl, summ, slice_ids=None, alias_to_canonical=None):
+    normalized = []
     if not isinstance(raw_depends, list):
-        return resolved
-    id_to_index = {sid: i for i, sid in enumerate(slice_ids or []) if isinstance(sid, str) and sid}
+        return normalized
+    slice_ids = list(slice_ids or [])
+    alias_to_canonical = dict(alias_to_canonical or {})
+    id_to_index = {sid: i for i, sid in enumerate(slice_ids) if isinstance(sid, str) and sid}
     for dep in raw_depends:
         dep_index = dep
         if isinstance(dep, str):
-            dep_index = id_to_index.get(dep)
+            dep_key = dep.strip()
+            canonical_dep = alias_to_canonical.get(dep_key) or alias_to_canonical.get(_normalize_slice_ref(dep_key)) or _normalize_slice_ref(dep_key)
+            dep_index = id_to_index.get(canonical_dep)
             if dep_index is None:
                 dropped.append((raw_tpl, summ[:80], f"depends_on id unknown: {dep!r}"))
                 return None
@@ -3844,12 +3888,59 @@ def _resolve_slice_depends(raw_depends, *, idx, sibling_task_ids, dropped, raw_t
         if dep_index < 0 or dep_index >= idx:
             dropped.append((raw_tpl, summ[:80], f"depends_on index out of range: {dep_index}"))
             return None
-        dep_task_id = sibling_task_ids[dep_index]
+        normalized.append(slice_ids[dep_index])
+    return normalized
+
+
+def _resolve_slice_depends(raw_depends, *, idx, sibling_task_ids, dropped, raw_tpl, summ, slice_ids=None, alias_to_canonical=None):
+    resolved = []
+    normalized = _normalize_slice_depends(
+        raw_depends,
+        idx=idx,
+        dropped=dropped,
+        raw_tpl=raw_tpl,
+        summ=summ,
+        slice_ids=slice_ids,
+        alias_to_canonical=alias_to_canonical,
+    )
+    if normalized is None:
+        return None
+    id_to_index = {sid: i for i, sid in enumerate(slice_ids or []) if isinstance(sid, str) and sid}
+    for dep_id in normalized:
+        dep_task_id = sibling_task_ids[id_to_index[dep_id]]
         if dep_task_id is None:
-            dropped.append((raw_tpl, summ[:80], f"depends_on refers to dropped slice: {dep!r}"))
+            dropped.append((raw_tpl, summ[:80], f"depends_on refers to dropped slice: {dep_id!r}"))
             return None
         resolved.append(dep_task_id)
     return resolved
+
+
+def _render_slice_context_block(task):
+    engine_args = task.get("engine_args") or {}
+    slice_ctx = engine_args.get("slice") or {}
+    if not isinstance(slice_ctx, dict) or not slice_ctx:
+        return ""
+    plan_rows = []
+    for row in slice_ctx.get("plan") or []:
+        if not isinstance(row, dict):
+            continue
+        deps = ", ".join(row.get("depends_on") or []) or "-"
+        state = row.get("state")
+        state_txt = f" state={state}" if state else ""
+        plan_rows.append(
+            f"- {row.get('id') or '-'}{state_txt} template={row.get('braid_template') or '-'} "
+            f"depends_on=[{deps}] summary={row.get('summary') or '-'}"
+        )
+    depends = ", ".join(slice_ctx.get("depends_on") or []) or "-"
+    return (
+        "[SLICE CONTEXT]\n"
+        f"slice_id: {slice_ctx.get('id') or '-'}\n"
+        f"slice_index: {slice_ctx.get('index') or '-'}\n"
+        f"depends_on: [{depends}]\n"
+        f"execution_path: {slice_ctx.get('execution_path') or '-'}\n"
+        "planned_slices:\n"
+        f"{chr(10).join(plan_rows) if plan_rows else '- (none)'}\n\n"
+    )
 
 
 _BRAID_REFINE_NODE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
@@ -4167,7 +4258,34 @@ def run_claude_planner(task, cfg, timeout, log_path):
         candidate_slices = candidate_slices[:1]
         if len(slices) > 1:
             dropped.append(("self-repair-plan", task.get("summary", "")[:80], f"extra self-repair slices suppressed: {len(slices) - 1}"))
-    candidate_slice_ids = [s.get("id") for s in candidate_slices]
+    candidate_slice_ids, slice_aliases = _slice_alias_maps(candidate_slices)
+    normalized_slice_depends = []
+    for idx, s in enumerate(candidate_slices):
+        normalized_slice_depends.append(
+            _normalize_slice_depends(
+                s.get("depends_on"),
+                idx=idx,
+                dropped=dropped,
+                raw_tpl=s.get("braid_template"),
+                summ=s.get("summary", ""),
+                slice_ids=candidate_slice_ids,
+                alias_to_canonical=slice_aliases,
+            )
+        )
+    slice_plan = []
+    for idx, s in enumerate(candidate_slices):
+        deps = normalized_slice_depends[idx]
+        if deps is None:
+            deps = []
+        slice_plan.append(
+            {
+                "id": candidate_slice_ids[idx],
+                "summary": s.get("summary", "")[:240],
+                "braid_template": s.get("braid_template"),
+                "depends_on": list(deps),
+                "state": "planned",
+            }
+        )
     for idx, s in enumerate(candidate_slices):
         raw_tpl = s.get("braid_template")
         summ = s.get("summary", "")
@@ -4183,6 +4301,19 @@ def run_claude_planner(task, cfg, timeout, log_path):
             dropped.append((raw_tpl, summ[:80], reason))
             sibling_task_ids.append(None)
             continue
+        normalized_dep_ids = normalized_slice_depends[idx]
+        if normalized_dep_ids is None:
+            sibling_task_ids.append(None)
+            continue
+        slice_plan[idx]["state"] = "enqueued"
+        child_engine_args = dict(shared_engine_args)
+        child_engine_args["slice"] = {
+            "id": candidate_slice_ids[idx],
+            "index": idx + 1,
+            "depends_on": list(normalized_dep_ids),
+            "execution_path": council_meta.get("execution_path") or "",
+            "plan": [dict(row) for row in slice_plan],
+        }
         child = o.new_task(
             role=TEMPLATE_ROLE[raw_tpl],
             engine="codex",
@@ -4193,7 +4324,7 @@ def run_claude_planner(task, cfg, timeout, log_path):
             parent_task_id=task_id,
             feature_id=feature_id,
             depends_on=[],
-            engine_args=dict(shared_engine_args),
+            engine_args=child_engine_args,
         )
         raw_depends = s.get("depends_on")
         resolved = _resolve_slice_depends(
@@ -4204,6 +4335,7 @@ def run_claude_planner(task, cfg, timeout, log_path):
             raw_tpl=raw_tpl,
             summ=summ,
             slice_ids=candidate_slice_ids,
+            alias_to_canonical=slice_aliases,
         )
         if resolved is None:
             sibling_task_ids.append(None)
@@ -4365,6 +4497,7 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
     supply_chain_findings = _supply_chain_findings(target_wt, target_base)
     compile_findings = _compile_gate_findings(project, target_wt, changed_files)
     ratio_findings = _test_ratio_findings(changed_files, task=target, worktree=target_wt, cfg=cfg)
+    target_slice_ctx = _render_slice_context_block(target)
     feature = o.read_feature(target.get("feature_id")) if target.get("feature_id") else None
     roadmap_ctx = ""
     if feature:
@@ -4410,6 +4543,7 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
             if (policy_findings or secret_findings or supply_chain_findings or compile_findings or ratio_findings) else ""
         )
         + (f"[IMPLEMENTATION CHALLENGE NOTES]\n{challenge_notes}\n\n" if challenge_notes else "")
+        + target_slice_ctx
         + f"[PROJECT CONTEXT]\n{memory_ctx}\n\n"
         "Emit EXACTLY one final line:\n"
         "  BRAID_OK: APPROVE — <one-line justification>\n"
@@ -4443,6 +4577,7 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
             if (policy_findings or secret_findings or supply_chain_findings or compile_findings or ratio_findings) else ""
         )
         + (f"[IMPLEMENTATION CHALLENGE NOTES]\n{challenge_notes}\n\n" if challenge_notes else "")
+        + target_slice_ctx
         + f"[PROJECT CONTEXT]\n{memory_ctx}\n\n"
         "Emit EXACTLY one final line:\n"
         "  BRAID_OK: APPROVE — <one-line justification>\n"
@@ -5084,6 +5219,7 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
             f"[TARGET TASK]\n{target_id}\n\n"
             f"[REVIEW FEEDBACK TO ADDRESS]\n{review_findings}\n\n"
             f"[CURRENT DIFF vs {base_branch}]\n{diff_text or f'(empty diff vs {base_branch})'}\n\n"
+            f"{_render_slice_context_block(target)}"
             f"[PROJECT MEMORY]\n{memory_ctx}\n\n"
             "[OUTPUT CONTRACT]\n"
             "Emit exactly one of these as the final line of your response:\n"
@@ -6265,6 +6401,7 @@ def build_codex_prompt(task, graph_body, memory_ctx):
             if council else
             ""
         )
+        + _render_slice_context_block(task)
         +
         "[REPO LAYOUT]\n"
         "All repo-memory files live under `repo-memory/` at the worktree root:\n"
