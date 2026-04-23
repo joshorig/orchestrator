@@ -981,6 +981,38 @@ class StateEngine:
             for row in rows
         ]
 
+    def read_latest_environment_checks(self, *, conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
+        conn = conn or self.connect()
+        rows = conn.execute(
+            """
+            WITH ranked AS (
+                SELECT
+                    ts,
+                    project,
+                    result,
+                    blocker_summary,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY COALESCE(project, 'global')
+                        ORDER BY ts_epoch DESC, rowid DESC
+                    ) AS rn
+                FROM environment_check_log
+            )
+            SELECT ts, project, result, blocker_summary
+              FROM ranked
+             WHERE rn = 1
+             ORDER BY CASE WHEN project IS NULL OR project = 'global' THEN 0 ELSE 1 END, project
+            """
+        ).fetchall()
+        return [
+            {
+                "ts": row["ts"],
+                "project": row["project"],
+                "result": row["result"],
+                "blocker_summary": row["blocker_summary"],
+            }
+            for row in rows
+        ]
+
     def read_task_bypasses(self, *, conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
         conn = conn or self.connect()
         rows = conn.execute(

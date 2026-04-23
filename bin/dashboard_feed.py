@@ -672,32 +672,22 @@ def _telegram_log():
 
 def _environment_panel(runtime_audit, dashboard_server):
     status = (dashboard_server.get("state_engine") or {}) if dashboard_server else {}
-    checks_by_project = defaultdict(list)
-    for row in runtime_audit.get("environment_checks") or []:
-        checks_by_project[row.get("project") or "global"].append(row)
-    latest_check_at = {}
-    for project, entries in checks_by_project.items():
-        latest = entries[-1]
-        latest_check_at[project] = latest.get("ts")
-    current = o.environment_health(refresh=True)
-    issues_by_project = defaultdict(list)
-    for issue in current.get("issues") or []:
-        project = issue.get("project") or "global"
-        issues_by_project[project].append(issue)
+    engine = _state_engine()
+    latest_rows = engine.read_latest_environment_checks() if engine else []
+    latest_by_project = {
+        (row.get("project") or "global"): row
+        for row in latest_rows
+    }
     projects = []
     project_names = ["global"] + [str(p.get("name")) for p in o.load_config().get("projects", [])]
     for project in project_names:
-        issues = issues_by_project.get(project) or []
-        blocker_summary = "; ".join(
-            f"{issue.get('code')}:{issue.get('summary')}"
-            for issue in issues
-        )[:500] or None
+        row = latest_by_project.get(project) or {}
         projects.append(
             {
                 "project": project,
-                "result": "blocked" if any(issue.get("severity") == "error" for issue in issues) else "ok",
-                "blocker_summary": blocker_summary,
-                "checked_at": latest_check_at.get(project) or current.get("generated_at"),
+                "result": row.get("result") or "unknown",
+                "blocker_summary": row.get("blocker_summary"),
+                "checked_at": row.get("ts"),
             }
         )
     return {

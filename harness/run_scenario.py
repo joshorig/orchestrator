@@ -3835,6 +3835,56 @@ def _run_blocker_code_missing(repo_root, scenario):
         }
 
 
+def _run_dashboard_environment_reads_db(repo_root, scenario):
+    orchestrator = _load_module("orchestrator", repo_root / "bin" / "orchestrator.py")
+    state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
+    dashboard = _load_module("dashboard_feed", repo_root / "bin" / "dashboard_feed.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        runtime = root / "state" / "runtime"
+        db_path = runtime / "orchestrator.db"
+        engine = state_engine.StateEngine(
+            state_engine.StateEngineConfig(
+                root=root,
+                db_path=db_path,
+                migrations_dir=repo_root / "state" / "migrations",
+                mode="primary",
+            )
+        )
+        engine.initialize()
+        engine.record_environment_check(ts="2026-04-23T19:00:00", project="global", result="ok", blocker_summary=None)
+        engine.record_environment_check(ts="2026-04-23T19:00:01", project="demo", result="blocked", blocker_summary="project_main_dirty:dirty main")
+        old_dash_state_engine = dashboard._state_engine
+        old_dash_dashboard_server = dashboard._dashboard_server
+        old_dash_load_config = dashboard.o.load_config
+        old_orch_env_health = orchestrator.environment_health
+        dashboard._state_engine = lambda: engine
+        dashboard._dashboard_server = lambda: {"state_engine": {"mode": "primary", "integrity_check": "ok", "db_path": str(db_path), "applied_migrations": ["0001_initial"]}}
+        dashboard.o.load_config = lambda: {"projects": [{"name": "demo"}]}
+        orchestrator.environment_health = lambda refresh=False: {
+            "ok": False,
+            "generated_at": "2026-04-23T19:00:02",
+            "issues": [
+                {"project": None, "severity": "error", "code": "delivery_auth_expired", "summary": "required binary missing: gh"},
+                {"project": "demo", "severity": "error", "code": "project_main_dirty", "summary": "dirty main"},
+            ],
+        }
+        try:
+            panel = dashboard._environment_panel({"environment_checks": []}, dashboard._dashboard_server())
+        finally:
+            dashboard._state_engine = old_dash_state_engine
+            dashboard._dashboard_server = old_dash_dashboard_server
+            dashboard.o.load_config = old_dash_load_config
+            orchestrator.environment_health = old_orch_env_health
+        projects = {row["project"]: row for row in panel["projects"]}
+        return {
+            "global_result": projects["global"]["result"],
+            "global_blocker_summary": projects["global"]["blocker_summary"],
+            "demo_result": projects["demo"]["result"],
+            "demo_blocker_summary": projects["demo"]["blocker_summary"],
+        }
+
+
 def _run_circular_feature_lineage(repo_root, scenario):
     orchestrator, _ = _load_repo_modules(repo_root)
     with tempfile.TemporaryDirectory() as tmp:
@@ -4586,6 +4636,8 @@ def main(argv):
         actual = _run_timestamp_future_epoch(repo_root, scenario)
     elif kind == "blocker_code_missing":
         actual = _run_blocker_code_missing(repo_root, scenario)
+    elif kind == "dashboard_environment_reads_db":
+        actual = _run_dashboard_environment_reads_db(repo_root, scenario)
     elif kind == "circular_feature_lineage":
         actual = _run_circular_feature_lineage(repo_root, scenario)
     elif kind == "same_epoch_ordering":

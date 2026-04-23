@@ -2557,6 +2557,12 @@ def environment_health(*, refresh=False):
         "generated_at": now_iso(),
         "issues": issues,
     }
+    if refresh:
+        global_errors = [
+            issue for issue in issues
+            if issue.get("severity") == "error" and issue.get("project") is None
+        ]
+        _record_environment_check("global", global_errors)
     _ENV_HEALTH_CACHE["ts"] = now
     _ENV_HEALTH_CACHE["data"] = out
     return out

@@ -1,0 +1,6 @@
+{
+  "global_result": "ok",
+  "global_blocker_summary": null,
+  "demo_result": "blocked",
+  "demo_blocker_summary": "project_main_dirty:dirty main"
+}
