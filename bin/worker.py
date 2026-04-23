@@ -3159,6 +3159,19 @@ def _config_council_panel(cfg, key, fallback):
     return panel or tuple(fallback)
 
 
+def _strict_json_object_contract_block(example_json):
+    return (
+        "[JSON CONTRACT]\n"
+        "Your entire response must be exactly one JSON object.\n"
+        "Do not wrap the JSON object in ``` fences.\n"
+        "Do not prefix it with json.\n"
+        "Do not add commentary before or after it.\n"
+        "If you output markdown fences or any extra text, the task fails.\n"
+        "Example shape:\n"
+        f"{example_json}\n"
+    )
+
+
 def planner_council_prompt(task, project, memory_ctx, cfg):
     roadmap_entry = (task.get("engine_args") or {}).get("roadmap_entry") or {}
     panel = _config_council_panel(cfg, "planner_panel", ("aristotle", "socrates", "meadows"))
@@ -3178,6 +3191,14 @@ def planner_council_prompt(task, project, memory_ctx, cfg):
         "If a slice depends on an earlier slice, depends_on must be a list of those slice ids "
         '(for example ["slice-1"]). Do not use numeric indexes.\n'
         "Use only valid braid_template values for this project.\n\n"
+        + _strict_json_object_contract_block(
+            '{"panel":["aristotle","socrates","meadows"],'
+            '"key_agreements":["..."],'
+            '"dissent":["..."],'
+            '"execution_path":"slice-1 -> slice-2",'
+            '"slices":[{"id":"slice-1","summary":"...","braid_template":"lvc-implement-operator"}]}'
+        )
+        + "\n"
         "[COUNCIL PERSONAS]\n"
         f"{council_ctx}\n"
         "[END COUNCIL PERSONAS]"
@@ -3194,6 +3215,7 @@ def planner_council_prompt(task, project, memory_ctx, cfg):
         "Keep at most 3 slices.\n"
         f"Allowed braid_template values: {allowed_templates}\n"
         "Preserve dissent when a risky slice is rejected or narrowed.\n"
+        "Return the JSON object directly. Do not use ```json fences.\n"
     )
     return system_prompt, user_prompt, panel
 
@@ -3236,6 +3258,20 @@ def self_repair_council_prompt(task, project, memory_ctx):
         "If a later slice depends on an earlier slice, depends_on must be a list of those slice ids.\n"
         "Valid braid_template values here: only \"orchestrator-self-repair\".\n"
         "Do not emit prose outside the JSON object.\n\n"
+        + _strict_json_object_contract_block(
+            '{"panel":["aristotle","socrates","meadows"],'
+            '"key_agreements":["..."],'
+            '"dissent":["..."],'
+            '"execution_path":"slice-1",'
+            '"chosen_strategy":"...",'
+            '"rejected_strategies":["..."],'
+            '"dissent_reasons":["..."],'
+            '"confidence":0.8,'
+            '"retry_conditions":["..."],'
+            '"escalation_threshold":"...",'
+            '"slices":[{"id":"slice-1","summary":"...","braid_template":"orchestrator-self-repair"}]}'
+        )
+        + "\n"
         "[COUNCIL PERSONAS]\n"
         f"{council_ctx}\n"
         "[END COUNCIL PERSONAS]"
@@ -3257,6 +3293,7 @@ def self_repair_council_prompt(task, project, memory_ctx):
         "2. the cleanest repair path\n"
         "3. whether local deployment/restart is required\n"
         "4. the single best Codex execution slice to fix the runtime\n"
+        "Return the JSON object directly. Do not use ```json fences.\n"
     )
     return system_prompt, user_prompt, members
 

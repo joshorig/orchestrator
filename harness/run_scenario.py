@@ -4475,6 +4475,30 @@ def _run_handoff_writer_contract_audit(repo_root, scenario):
     }
 
 
+def _run_planner_prompt_json_contract(repo_root, scenario):
+    _, worker = _load_repo_modules(repo_root)
+    system_prompt, user_prompt, _panel = worker.planner_council_prompt(
+        {"engine_args": {"roadmap_entry": {"id": "R-002", "title": "Title", "body": "Body"}}},
+        {"name": "lvc-standard"},
+        "memory",
+        {"council": {}},
+    )
+    repair_system, repair_user, _members = worker.self_repair_council_prompt(
+        {
+            "summary": "repair",
+            "feature_id": "feature-1",
+            "engine_args": {"issue_key": "issue-1", "evidence": "evidence", "self_repair": {}},
+        },
+        {"name": "devmini-orchestrator"},
+        "memory",
+    )
+    needle = "Do not wrap the JSON object in ``` fences."
+    return {
+        "planner_has_strict_contract": needle in system_prompt and "Return the JSON object directly. Do not use ```json fences." in user_prompt,
+        "self_repair_has_strict_contract": needle in repair_system and "Return the JSON object directly. Do not use ```json fences." in repair_user,
+    }
+
+
 def _run_patch_anchor_failures_trigger_topology(repo_root, scenario):
     _, worker = _load_repo_modules(repo_root)
     trailer = worker._synthesize_patch_anchor_topology_error(
@@ -5292,6 +5316,8 @@ def main(argv):
         actual = _run_claude_result_text_shared(repo_root, scenario)
     elif kind == "handoff_writer_contract_audit":
         actual = _run_handoff_writer_contract_audit(repo_root, scenario)
+    elif kind == "planner_prompt_json_contract":
+        actual = _run_planner_prompt_json_contract(repo_root, scenario)
     elif kind == "feature_finalize_planner_live_no_children":
         actual = _run_feature_finalize_planner_live_no_children(repo_root, scenario)
     elif kind == "feature_finalize_untracked_live_no_children":
