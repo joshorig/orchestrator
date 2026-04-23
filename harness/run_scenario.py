@@ -1464,20 +1464,33 @@ def _run_telegram_health_dedupe(repo_root, scenario):
         }
         orchestrator.TELEGRAM_PUSH_STATE_PATH = root / "telegram-pushes.json"
         orchestrator.load_config = lambda: {}
-        orchestrator._health_payload = lambda: {
-            "environment_ok": 0,
-            "environment_error_count": 2,
-            "workflow_check_issue_count": 4,
-            "feature_open_count": 2,
-            "feature_frontier_blocked_count": 1,
-            "queue": {},
-            "generated_at": "2026-04-23T16:00:00",
-        }
-        orchestrator.telegram_health_card = lambda: "env 2 errors\nworkflow 4 issues\nfeatures 2 open / 1 blocked"
+        rows = [
+            {
+                "environment_ok": 0,
+                "environment_error_count": 2,
+                "workflow_check_issue_count": 4,
+                "feature_open_count": 2,
+                "feature_frontier_blocked_count": 1,
+                "queue": {},
+                "generated_at": "2026-04-23T16:00:00",
+            },
+            {
+                "environment_ok": 0,
+                "environment_error_count": 2,
+                "workflow_check_issue_count": 4,
+                "feature_open_count": 2,
+                "feature_frontier_blocked_count": 1,
+                "queue": {},
+                "generated_at": "2026-04-23T16:00:30",
+            },
+        ]
         try:
-            key = f"health:{telegram.health_fingerprint(orchestrator.telegram_health_card())}"
-            first = orchestrator.should_push_alert(key, 6 * 3600)
-            second = orchestrator.should_push_alert(key, 6 * 3600)
+            first_payload = rows[0]
+            second_payload = rows[1]
+            first_key = f"health:{telegram.health_dedupe_key(first_payload)}"
+            second_key = f"health:{telegram.health_dedupe_key(second_payload)}"
+            first = orchestrator.should_push_alert(first_key, 6 * 3600)
+            second = orchestrator.should_push_alert(second_key, 6 * 3600)
             saved = orchestrator.load_telegram_push_state()
         finally:
             for key_name, value in old.items():
@@ -1486,6 +1499,7 @@ def _run_telegram_health_dedupe(repo_root, scenario):
             "first_allowed": first,
             "second_allowed": second,
             "stored_events": len((saved.get("events") or {})),
+            "same_key": first_key == second_key,
         }
 
 

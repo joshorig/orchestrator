@@ -101,6 +101,26 @@ def health_fingerprint(body):
     return hashlib.sha256((body or "").strip().encode("utf-8")).hexdigest()
 
 
+def health_dedupe_key(payload):
+    payload = dict(payload or {})
+    queue = dict(payload.get("queue") or {})
+    stable = {
+        "environment_ok": int(bool(payload.get("environment_ok"))),
+        "environment_error_count": int(payload.get("environment_error_count") or 0),
+        "workflow_check_issue_count": int(payload.get("workflow_check_issue_count") or 0),
+        "feature_open_count": int(payload.get("feature_open_count") or 0),
+        "feature_frontier_blocked_count": int(payload.get("feature_frontier_blocked_count") or 0),
+        "queue": {
+            "queued": int(queue.get("queued") or 0),
+            "running": int(queue.get("running") or 0),
+            "blocked": int(queue.get("blocked") or 0),
+            "awaiting-review": int(queue.get("awaiting-review") or 0),
+            "awaiting-qa": int(queue.get("awaiting-qa") or 0),
+        },
+    }
+    return hashlib.sha256(json.dumps(stable, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
 def build_handlers(cfg):
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
     from telegram.constants import ParseMode
@@ -486,7 +506,7 @@ def build_handlers(cfg):
         env_ok = bool(health.get("environment_ok")) and int(health.get("environment_error_count") or 0) == 0
         if (not env_ok or int(health.get("workflow_check_issue_count") or 0) > 0):
             card = o.telegram_health_card()
-            key = f"health:{health_fingerprint(card)}"
+            key = f"health:{health_dedupe_key(health)}"
             if o.should_push_alert(key, 6 * 3600):
                 await send_or_reply(
                     None,

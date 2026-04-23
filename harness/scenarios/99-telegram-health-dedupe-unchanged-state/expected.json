@@ -1,5 +1,6 @@
 {
   "first_allowed": true,
   "second_allowed": false,
-  "stored_events": 1
+  "stored_events": 1,
+  "same_key": true
 }
