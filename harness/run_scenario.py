@@ -1503,6 +1503,28 @@ def _run_telegram_health_dedupe(repo_root, scenario):
         }
 
 
+def _run_telegram_health_backoff(repo_root, scenario):
+    telegram = _load_module("telegram_bot", repo_root / "bin" / "telegram_bot.py")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        old = {
+            "PUSHED_STATE_PATH": telegram.PUSHED_STATE_PATH,
+        }
+        telegram.PUSHED_STATE_PATH = root / "telegram-pushed.json"
+        try:
+            first = telegram.category_backoff_allows("health", 600)
+            second = telegram.category_backoff_allows("health", 600)
+            saved = telegram.load_pushed_state()
+        finally:
+            for key_name, value in old.items():
+                setattr(telegram, key_name, value)
+        return {
+            "first_allowed": first,
+            "second_allowed": second,
+            "stored_categories": len((saved.get("categories") or {})),
+        }
+
+
 def _run_state_engine_mirror(repo_root, scenario):
     orchestrator, _ = _load_repo_modules(repo_root)
     import os
@@ -4508,6 +4530,8 @@ def main(argv):
         actual = _run_orchestrator_template_candidate_only(repo_root, scenario)
     elif kind == "telegram_health_dedupe":
         actual = _run_telegram_health_dedupe(repo_root, scenario)
+    elif kind == "telegram_health_backoff":
+        actual = _run_telegram_health_backoff(repo_root, scenario)
     else:
         raise SystemExit(f"unknown scenario kind: {kind}")
 

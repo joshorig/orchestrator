@@ -75,13 +75,14 @@ def log_reject(chat_id, text, reason):
 
 def load_pushed_state():
     if not PUSHED_STATE_PATH.exists():
-        return {"pushed": [], "workflow_check": {}}
+        return {"pushed": [], "workflow_check": {}, "categories": {}}
     try:
         state = json.loads(PUSHED_STATE_PATH.read_text())
     except (OSError, json.JSONDecodeError):
-        return {"pushed": [], "workflow_check": {}}
+        return {"pushed": [], "workflow_check": {}, "categories": {}}
     state.setdefault("pushed", [])
     state.setdefault("workflow_check", {})
+    state.setdefault("categories", {})
     return state
 
 
@@ -119,6 +120,22 @@ def health_dedupe_key(payload):
         },
     }
     return hashlib.sha256(json.dumps(stable, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def category_backoff_allows(category, cooldown_seconds):
+    state = load_pushed_state()
+    cats = dict(state.get("categories") or {})
+    now = dt.datetime.now().timestamp()
+    row = dict(cats.get(category) or {})
+    last = float(row.get("ts", 0.0) or 0.0)
+    cooldown = max(0, int(cooldown_seconds or 0))
+    if last and (now - last) < cooldown:
+        return False
+    row = {"ts": now, "at": o.now_iso(), "cooldown_seconds": cooldown}
+    cats[category] = row
+    state["categories"] = cats
+    save_pushed_state(state)
+    return True
 
 
 def build_handlers(cfg):
@@ -507,7 +524,7 @@ def build_handlers(cfg):
         if (not env_ok or int(health.get("workflow_check_issue_count") or 0) > 0):
             card = o.telegram_health_card()
             key = f"health:{health_dedupe_key(health)}"
-            if o.should_push_alert(key, 6 * 3600):
+            if o.should_push_alert(key, 6 * 3600) and category_backoff_allows("health", 10 * 60):
                 await send_or_reply(
                     None,
                     block("🩺", "health", card),
