@@ -2615,17 +2615,7 @@ def _run_review_agent(kind, *, prompt, worktree, timeout, logf, last_msg_path):
             _pause_claude_slot_if_needed((proc.stderr or raw or f"claude exit {proc.returncode}"), task={"task_id": last_msg_path.stem.split(".")[0]})
         return {"error": f"{kind} exit {proc.returncode}", "raw": raw}
 
-    verdict = None
-    for line in reversed([l.strip() for l in raw.splitlines() if l.strip()][-20:]):
-        if line.startswith("BRAID_OK: APPROVE") or line.startswith("BRAID_OK: QA_SUFFICIENT"):
-            verdict = "approve"
-            break
-        if line.startswith("BRAID_OK: REQUEST_CHANGE") or line.startswith("BRAID_OK: QA_INSUFFICIENT"):
-            verdict = "request_change"
-            break
-        if line.startswith("BRAID_TOPOLOGY_ERROR"):
-            verdict = "topology_error"
-            break
+    verdict = _extract_review_verdict(raw)
     if verdict is None:
         return {"error": f"{kind} verdict missing", "raw": raw}
     return {"verdict": verdict, "raw": raw}
@@ -3977,10 +3967,41 @@ def parse_braid_refine(trailer):
 
 
 def _find_braid_trailer(lines):
-    for line in reversed(lines[-20:]):
+    for raw_line in reversed(lines[-20:]):
+        line = _normalize_braid_verdict_line(raw_line)
         if line.startswith("BRAID_OK") or line.startswith("BRAID_TOPOLOGY_ERROR") or line.startswith("BRAID_REFINE"):
             return line
     return ""
+
+
+def _normalize_braid_verdict_line(line):
+    if not isinstance(line, str):
+        return ""
+    text = line.strip()
+    if not text:
+        return ""
+    while len(text) >= 2 and text[0] == text[-1] and text[0] in "`'\"":
+        text = text[1:-1].strip()
+    if text.startswith(("* ", "- ", "+ ")):
+        text = text[2:].strip()
+    while text.startswith("`") and text.endswith("`") and len(text) >= 2:
+        text = text[1:-1].strip()
+    return text
+
+
+def _extract_review_verdict(raw):
+    verdict = None
+    for line in reversed([_normalize_braid_verdict_line(l) for l in raw.splitlines() if str(l).strip()][-20:]):
+        if line.startswith("BRAID_OK: APPROVE") or line.startswith("BRAID_OK: QA_SUFFICIENT"):
+            verdict = "approve"
+            break
+        if line.startswith("BRAID_OK: REQUEST_CHANGE") or line.startswith("BRAID_OK: QA_INSUFFICIENT"):
+            verdict = "request_change"
+            break
+        if line.startswith("BRAID_TOPOLOGY_ERROR"):
+            verdict = "topology_error"
+            break
+    return verdict
 
 
 def enqueue_braid_refine(task, project_name, trailer, *, from_state):

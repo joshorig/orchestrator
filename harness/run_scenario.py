@@ -4034,6 +4034,28 @@ def _run_depends_on_context_prompts(repo_root, scenario):
     }
 
 
+def _run_braid_trailer_markdown_wrapped(repo_root, scenario):
+    _, worker = _load_repo_modules(repo_root)
+    raw = """Some body
+
+`BRAID_OK: APPROVE — minimal one-line historian append`
+"""
+    qa_raw = """Analysis
+
+* `BRAID_OK: QA_SUFFICIENT — smoke and scope look adequate`
+"""
+    topo_lines = [
+        "discussion",
+        "`BRAID_TOPOLOGY_ERROR: patch_anchor_drift repeated apply_patch verification failures (2)`",
+    ]
+    return {
+        "review_verdict": worker._extract_review_verdict(raw),
+        "qa_verdict": worker._extract_review_verdict(qa_raw),
+        "topology_trailer": worker._find_braid_trailer(topo_lines),
+        "normalized_bullet": worker._normalize_braid_verdict_line("* `BRAID_OK: APPROVE — ok`"),
+    }
+
+
 def _run_patch_anchor_failures_trigger_topology(repo_root, scenario):
     _, worker = _load_repo_modules(repo_root)
     trailer = worker._synthesize_patch_anchor_topology_error(
@@ -4833,6 +4855,8 @@ def main(argv):
         actual = _run_patch_anchor_failures_trigger_topology(repo_root, scenario)
     elif kind == "depends_on_context_prompts":
         actual = _run_depends_on_context_prompts(repo_root, scenario)
+    elif kind == "braid_trailer_markdown_wrapped":
+        actual = _run_braid_trailer_markdown_wrapped(repo_root, scenario)
     elif kind == "ull_lock_guard_findings":
         actual = _run_ull_lock_guard_findings(repo_root, scenario)
     elif kind == "circular_feature_lineage":
