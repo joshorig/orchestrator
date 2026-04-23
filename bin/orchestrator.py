@@ -6574,9 +6574,21 @@ def feature_finalize(dry_run=False):
 
         if not feature.get("child_task_ids"):
             if dry_run:
-                action = "would defer (planner live)" if _feature_planner_is_live(feature) else "would defer (no children)"
+                action = "would defer (planner live)" if _feature_planner_is_live(feature) else "would mark abandoned (no children)"
                 print(f"DRY-RUN feature-finalize {feature_id}: {action}")
-            skipped += 1
+            elif _feature_planner_is_live(feature):
+                skipped += 1
+                continue
+            else:
+                update_feature(feature_id, lambda f: f.update({"status": "abandoned", "abandoned_at": now_iso(), "abandoned_reason": "feature has no child tasks"}))
+                append_transition(feature_id, "open", "abandoned", "feature has no child tasks")
+                append_event(
+                    "feature-finalize",
+                    "feature_abandoned",
+                    feature_id=feature_id,
+                    details={"project": feature.get("project"), "reason": "feature has no child tasks"},
+                )
+                abandoned += 1
             continue
 
         try:
