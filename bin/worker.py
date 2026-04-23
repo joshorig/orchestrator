@@ -2597,11 +2597,7 @@ def _run_review_agent(kind, *, prompt, worktree, timeout, logf, last_msg_path):
         structured = proc.stdout or ""
         logf.write(structured)
         _record_task_costs_from_text(last_msg_path.stem.split(".")[0], "claude", "sonnet", structured)
-        try:
-            payload = json.loads(structured)
-            raw = str(payload.get("result") or "")
-        except json.JSONDecodeError:
-            raw = structured
+        raw = _extract_claude_result_text(structured)
         last_msg_path.write_text(raw)
     else:
         if proc.stderr:
@@ -2867,11 +2863,7 @@ def run_claude_template_gen(task, cfg, task_type, timeout, log_path):
         logf.write("# stdout:\n")
         logf.write(proc.stdout or "")
     _record_task_costs_from_text(task_id, "claude", "opus", proc.stdout or "")
-    try:
-        payload = json.loads(proc.stdout or "")
-        raw_text = str(payload.get("result") or "")
-    except json.JSONDecodeError:
-        raw_text = proc.stdout or ""
+    raw_text = _extract_claude_result_text(proc.stdout or "")
 
     if proc.returncode != 0:
         _pause_claude_slot_if_needed(raw_text or proc.stdout or f"claude exit {proc.returncode}", task=task)
@@ -2983,11 +2975,7 @@ def run_claude_template_refine(task, cfg, task_type, timeout, log_path):
             return
         logf.write(f"\n# exit: {proc.returncode}\n# stdout:\n{proc.stdout or ''}\n")
     _record_task_costs_from_text(task_id, "claude", "opus", proc.stdout or "")
-    try:
-        payload = json.loads(proc.stdout or "")
-        raw_text = str(payload.get("result") or "")
-    except json.JSONDecodeError:
-        raw_text = proc.stdout or ""
+    raw_text = _extract_claude_result_text(proc.stdout or "")
 
     if proc.returncode != 0:
         _pause_claude_slot_if_needed(raw_text or proc.stdout or f"claude exit {proc.returncode}", task=task)
@@ -3246,13 +3234,7 @@ def _is_validator_malfunction(detail):
 
 
 def _parse_council_json(raw):
-    m = re.search(r"\{.*\}", raw or "", re.DOTALL)
-    if not m:
-        raise ValueError("no json object in council output")
-    parsed = json.loads(m.group(0))
-    if not isinstance(parsed, dict):
-        raise ValueError("council output must decode to a JSON object")
-    return parsed
+    return _extract_json_fragment(raw, "object")
 
 
 def _run_self_repair_council(
@@ -3315,11 +3297,7 @@ def _run_self_repair_council(
     except subprocess.TimeoutExpired:
         return {"error": f"council timeout {timeout}s", "blocker_code": "council_timeout"}
     _record_task_costs_from_text(task.get("task_id"), "claude", model, proc.stdout or "")
-    try:
-        payload = json.loads(proc.stdout or "")
-        raw = str(payload.get("result") or "")
-    except json.JSONDecodeError:
-        raw = proc.stdout or ""
+    raw = _extract_claude_result_text(proc.stdout or "")
     if last_msg_path:
         last_msg_path.write_text(raw)
     if proc.returncode != 0:
@@ -3328,7 +3306,7 @@ def _run_self_repair_council(
             return {"error": "claude budget exhausted", "blocker_code": "claude_budget_exhausted"}
         return {"error": (proc.stderr or raw or f"claude exit {proc.returncode}").strip()[:400]}
     try:
-        data = _parse_council_json(raw)
+        data = _normalize_council_payload(_parse_council_json(raw), panel=panel, stage=stage)
     except Exception as exc:
         return {"error": f"invalid council output: {exc}", "blocker_code": "review_gate_protocol_error"}
     referenced_task_id = (
@@ -3341,8 +3319,6 @@ def _run_self_repair_council(
             "error": f"council referenced missing task: {referenced_task_id}",
             "blocker_code": "review_gate_protocol_error",
         }
-    data.setdefault("panel", list(panel))
-    data.setdefault("stage", stage)
     data["raw"] = raw
     return data
 
@@ -3989,6 +3965,48 @@ def _normalize_braid_verdict_line(line):
     return text
 
 
+def _extract_claude_result_text(stdout):
+    try:
+        payload = json.loads(stdout or "")
+        return str(payload.get("result") or "")
+    except json.JSONDecodeError:
+        return stdout or ""
+
+
+def _extract_json_fragment(raw, kind="object"):
+    pattern = r"\{.*\}" if kind == "object" else r"\[.*\]"
+    match = re.search(pattern, raw or "", re.DOTALL)
+    if not match:
+        raise ValueError(f"no json {kind} in output")
+    parsed = json.loads(match.group(0))
+    if kind == "object" and not isinstance(parsed, dict):
+        raise ValueError("json fragment must decode to object")
+    if kind == "array" and not isinstance(parsed, list):
+        raise ValueError("json fragment must decode to array")
+    return parsed
+
+
+def _normalize_council_payload(parsed, *, panel, stage=None):
+    if not isinstance(parsed, dict):
+        raise ValueError("council output must decode to a JSON object")
+    normalized = dict(parsed)
+    normalized.setdefault("panel", list(panel))
+    if stage is not None:
+        normalized.setdefault("stage", stage)
+    normalized.setdefault("key_agreements", [])
+    normalized.setdefault("dissent", [])
+    normalized.setdefault("rejected_strategies", [])
+    normalized.setdefault("dissent_reasons", [])
+    normalized.setdefault("retry_conditions", [])
+    normalized.setdefault("execution_path", "")
+    normalized.setdefault("chosen_strategy", normalized.get("execution_path") or "")
+    normalized.setdefault("confidence", None)
+    normalized.setdefault("escalation_threshold", "")
+    if "slices" in normalized and normalized["slices"] is None:
+        normalized["slices"] = []
+    return normalized
+
+
 def _extract_review_verdict(raw):
     verdict = None
     for line in reversed([_normalize_braid_verdict_line(l) for l in raw.splitlines() if str(l).strip()][-20:]):
@@ -4190,15 +4208,10 @@ def run_claude_planner(task, cfg, timeout, log_path):
         return
 
     if planner_mode == "self-repair-plan":
-        m = re.search(r"\{.*\}", raw, re.DOTALL)
-        if not m:
-            fail_task(task_id, "running", "no json object in self-repair planner output",
-                      blocker_code="model_output_invalid", summary="planner output invalid", retryable=False)
-            return
         try:
-            plan = json.loads(m.group(0))
-        except json.JSONDecodeError:
-            fail_task(task_id, "running", "malformed self-repair planner json",
+            plan = _normalize_council_payload(_extract_json_fragment(raw, "object"), panel=council_members)
+        except Exception:
+            fail_task(task_id, "running", "no json object in self-repair planner output",
                       blocker_code="model_output_invalid", summary="planner output invalid", retryable=False)
             return
         slices = plan.get("slices")
@@ -4211,22 +4224,17 @@ def run_claude_planner(task, cfg, timeout, log_path):
         m = re.search(r"\{.*\}", raw, re.DOTALL)
         if m:
             try:
-                candidate = json.loads(m.group(0))
-            except json.JSONDecodeError:
+                candidate = _extract_json_fragment(m.group(0), "object")
+            except Exception:
                 candidate = None
             if isinstance(candidate, dict) and isinstance(candidate.get("slices"), list):
-                plan = candidate
+                plan = _normalize_council_payload(candidate, panel=council_members)
                 slices = candidate.get("slices") or []
         if plan is None:
-            m = re.search(r"\[.*\]", raw, re.DOTALL)
-            if not m:
-                fail_task(task_id, "running", "no json array/object in output",
-                          blocker_code="model_output_invalid", summary="planner output invalid", retryable=False)
-                return
             try:
-                slices = json.loads(m.group(0))
-            except json.JSONDecodeError:
-                fail_task(task_id, "running", "malformed json array",
+                slices = _extract_json_fragment(raw, "array")
+            except Exception:
+                fail_task(task_id, "running", "no json array/object in output",
                           blocker_code="model_output_invalid", summary="planner output invalid", retryable=False)
                 return
             plan = {

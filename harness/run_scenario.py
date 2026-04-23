@@ -4056,6 +4056,38 @@ def _run_braid_trailer_markdown_wrapped(repo_root, scenario):
     }
 
 
+def _run_braid_refine_and_pr_wrapped(repo_root, scenario):
+    _, worker = _load_repo_modules(repo_root)
+    refine_lines = [
+        "body",
+        "* `BRAID_REFINE: CheckBaseline: add baseline_red edge to End`",
+    ]
+    pr_ok_lines = [
+        "body",
+        "`BRAID_OK: rebased on feature branch and fixed review comments`",
+    ]
+    parsed_refine = worker.parse_braid_refine(worker._find_braid_trailer(refine_lines))
+    return {
+        "refine_trailer": worker._find_braid_trailer(refine_lines),
+        "refine_node": (parsed_refine or {}).get("node_id"),
+        "pr_ok_trailer": worker._find_braid_trailer(pr_ok_lines),
+    }
+
+
+def _run_council_payload_normalization(repo_root, scenario):
+    _, worker = _load_repo_modules(repo_root)
+    parsed = {"verdict": "approve", "reason": "looks good"}
+    normalized = worker._normalize_council_payload(parsed, panel=("socrates", "ada"), stage="pre_execute")
+    return {
+        "panel": normalized.get("panel"),
+        "stage": normalized.get("stage"),
+        "execution_path": normalized.get("execution_path"),
+        "chosen_strategy": normalized.get("chosen_strategy"),
+        "retry_conditions": normalized.get("retry_conditions"),
+        "rejected_strategies": normalized.get("rejected_strategies"),
+    }
+
+
 def _run_patch_anchor_failures_trigger_topology(repo_root, scenario):
     _, worker = _load_repo_modules(repo_root)
     trailer = worker._synthesize_patch_anchor_topology_error(
@@ -4857,6 +4889,10 @@ def main(argv):
         actual = _run_depends_on_context_prompts(repo_root, scenario)
     elif kind == "braid_trailer_markdown_wrapped":
         actual = _run_braid_trailer_markdown_wrapped(repo_root, scenario)
+    elif kind == "braid_refine_and_pr_wrapped":
+        actual = _run_braid_refine_and_pr_wrapped(repo_root, scenario)
+    elif kind == "council_payload_normalization":
+        actual = _run_council_payload_normalization(repo_root, scenario)
     elif kind == "ull_lock_guard_findings":
         actual = _run_ull_lock_guard_findings(repo_root, scenario)
     elif kind == "circular_feature_lineage":

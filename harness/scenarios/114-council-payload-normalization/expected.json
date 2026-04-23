@@ -1,0 +1,8 @@
+{
+  "panel": ["socrates", "ada"],
+  "stage": "pre_execute",
+  "execution_path": "",
+  "chosen_strategy": "",
+  "retry_conditions": [],
+  "rejected_strategies": []
+}
