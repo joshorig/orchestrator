@@ -2261,14 +2261,16 @@ def _project_main_preflight_issue(project):
         }
     ok, detail = _git_ok(repo_path, "fetch", "origin", "main")
     if not ok:
-        return {
-            "code": "runtime_env_dirty",
-            "scope": "project",
-            "project": project["name"],
-            "severity": "error",
-            "summary": "fetch origin main failed",
-            "detail": detail[:200],
-        }
+        cached_ok, _ = _git_ok(repo_path, "rev-parse", "--verify", "refs/remotes/origin/main")
+        if not cached_ok:
+            return {
+                "code": "runtime_env_dirty",
+                "scope": "project",
+                "project": project["name"],
+                "severity": "error",
+                "summary": "fetch origin main failed",
+                "detail": detail[:200],
+            }
     ok, detail = _git_ok(repo_path, "status", "--porcelain")
     if ok and detail.strip():
         return {
@@ -3122,6 +3124,8 @@ def _recent_template_stats(entry, window):
 
 
 def _template_owner_project(config, task_type):
+    if task_type == "orchestrator-self-repair":
+        return "devmini-orchestrator"
     if task_type.startswith("dag-"):
         return "dag-framework"
     if task_type.startswith("trp-"):

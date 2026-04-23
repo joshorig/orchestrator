@@ -1525,6 +1525,54 @@ def _run_telegram_health_backoff(repo_root, scenario):
         }
 
 
+def _run_template_owner_project(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    cfg = {
+        "projects": [
+            {"name": "lvc-standard"},
+            {"name": "dag-framework"},
+            {"name": "trade-research-platform"},
+            {"name": "devmini-orchestrator"},
+        ]
+    }
+    return {
+        "orchestrator_self_repair_owner": orchestrator._template_owner_project(cfg, "orchestrator-self-repair"),
+        "lvc_owner": orchestrator._template_owner_project(cfg, "lvc-reviewer-pass"),
+        "dag_owner": orchestrator._template_owner_project(cfg, "dag-implement-node"),
+    }
+
+
+def _run_fetch_failure_cached_remote_ok(repo_root, scenario):
+    orchestrator, _ = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        project = {"name": "dag-framework", "path": str(pathlib.Path(tmp) / "dag-framework")}
+        pathlib.Path(project["path"]).mkdir(parents=True, exist_ok=True)
+        old = orchestrator._git_ok
+        calls = []
+        def fake_git_ok(repo_path, *args):
+            calls.append(args)
+            if args == ("rev-parse", "--is-inside-work-tree"):
+                return True, "true"
+            if args == ("fetch", "origin", "main"):
+                return False, "ERROR: transient auth"
+            if args == ("rev-parse", "--verify", "refs/remotes/origin/main"):
+                return True, "refs/remotes/origin/main"
+            if args == ("status", "--porcelain"):
+                return True, ""
+            if args == ("merge-base", "--is-ancestor", "main", "origin/main"):
+                return True, ""
+            return True, ""
+        orchestrator._git_ok = fake_git_ok
+        try:
+            issue = orchestrator._project_main_preflight_issue(project)
+        finally:
+            orchestrator._git_ok = old
+    return {
+        "issue_is_none": issue is None,
+        "checked_cached_remote": ("rev-parse", "--verify", "refs/remotes/origin/main") in calls,
+    }
+
+
 def _run_state_engine_mirror(repo_root, scenario):
     orchestrator, _ = _load_repo_modules(repo_root)
     import os
@@ -4532,6 +4580,10 @@ def main(argv):
         actual = _run_telegram_health_dedupe(repo_root, scenario)
     elif kind == "telegram_health_backoff":
         actual = _run_telegram_health_backoff(repo_root, scenario)
+    elif kind == "template_owner_project":
+        actual = _run_template_owner_project(repo_root, scenario)
+    elif kind == "fetch_failure_cached_remote_ok":
+        actual = _run_fetch_failure_cached_remote_ok(repo_root, scenario)
     else:
         raise SystemExit(f"unknown scenario kind: {kind}")
 

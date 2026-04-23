@@ -1,0 +1,5 @@
+{
+  "orchestrator_self_repair_owner": "devmini-orchestrator",
+  "lvc_owner": "lvc-standard",
+  "dag_owner": "dag-framework"
+}
