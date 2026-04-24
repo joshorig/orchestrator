@@ -126,6 +126,7 @@ BLOCKER_CODES = (
     "template_refine_exhausted",
     "template_graph_error",
     "invalid_braid_refine",
+    "planner_slice_format_error",
     "false_blocker_claim",
     "project_main_dirty",
     "project_regression_failed",
@@ -153,6 +154,8 @@ BLOCKER_CODES = (
     "review_gate_protocol_error",
     "council_timeout",
     "review_feedback_exhausted",
+    "review_feedback_target_inflight",
+    "review_feedback_loop",
     "claude_budget_exhausted",
     "slot_paused",
     "llm_timeout",
@@ -167,6 +170,7 @@ BLOCKER_CODES = (
     "delivery_push_failed",
     "attempt_exhausted",
     "untrusted_skill_rejected",
+    "environment_bypass_budget_exceeded",
 )
 WORKFLOW_REPAIR_POLICY = (
     {
@@ -296,6 +300,13 @@ WORKFLOW_REPAIR_POLICY = (
         "diagnosis": "model output violated the contract; retry within bounded attempt budget",
     },
     {
+        "name": "planner_slice_format_retry",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "planner_slice_format_error",
+        "action": "retry_task",
+        "diagnosis": "planner emitted slices with invalid structure; retry with the recorded prior errors",
+    },
+    {
         "name": "invalid_braid_refine_retry",
         "kind": "frontier_task_blocked",
         "blocker_code": "invalid_braid_refine",
@@ -329,6 +340,13 @@ WORKFLOW_REPAIR_POLICY = (
         "blocker_code": "qa_scope_inadequate",
         "action": "retry_task",
         "diagnosis": "semantic QA judged the executed validation scope inadequate; retry after fixes or broader validation",
+    },
+    {
+        "name": "review_feedback_target_inflight_retry",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "review_feedback_target_inflight",
+        "action": "retry_task",
+        "diagnosis": "feedback target is still in-flight; retry once the target reaches a stable reviewable state",
     },
     {
         "name": "template_graph_wait",
@@ -1716,6 +1734,25 @@ def _record_task_bypass(task_id, gate, reason, *, cfg=None):
     return True
 
 
+def env_bypass_rate_1h(project_name):
+    cutoff = dt.datetime.now() - dt.timedelta(hours=1)
+    count = 0
+    for row in read_metrics(name="env_ok_bypass"):
+        tags = dict(row.get("tags") or {})
+        if tags.get("project") != project_name:
+            continue
+        ts = str(row.get("ts") or "")
+        try:
+            ts_dt = dt.datetime.fromisoformat(ts)
+        except ValueError:
+            continue
+        if ts_dt.tzinfo is not None:
+            ts_dt = ts_dt.astimezone().replace(tzinfo=None)
+        if ts_dt >= cutoff:
+            count += 1
+    return count
+
+
 def record_task_cost(
     *,
     task_id,
@@ -2851,6 +2888,8 @@ def task_blocker(task):
         return make_blocker("project_regression_failed", summary="project regression failed", detail=detail, source="legacy", retryable=False)
     if topo.startswith("BRAID_REFINE:"):
         return make_blocker("template_missing_edge", summary="template missing edge/condition", detail=detail, source="legacy", retryable=True)
+    if failure.startswith("planner slice format error") or "planner slice format error" in detail_lower:
+        return make_blocker("planner_slice_format_error", summary="planner slice format error", detail=detail, source="legacy", retryable=True)
     if "refine_rounds_exhausted" in topo:
         return make_blocker("template_refine_exhausted", summary="template refinement exhausted", detail=detail, source="legacy", retryable=False)
     if topo.startswith("BRAID_TOPOLOGY_ERROR:"):
@@ -3918,11 +3957,26 @@ def atomic_claim(slot_engine):
         ):
             if not _task_allows_environment_bypass(task):
                 continue
+            append_metric(
+                "env_ok_bypass",
+                1,
+                metric_type="counter",
+                tags={"project": project_name, "task_id": task["task_id"]},
+                source="atomic-claim",
+            )
             _record_task_bypass(
                 task["task_id"],
                 "project_environment_ok",
                 f"self-repair bypass for degraded project {project_name}",
             )
+            if env_bypass_rate_1h(project_name) >= 10:
+                enqueue_self_repair(
+                    summary=f"Environment bypass budget exceeded for {project_name}",
+                    evidence=f"env_ok_bypass rate exceeded 10/hour for {project_name}",
+                    issue_kind="runtime_bug",
+                    source="env-bypass-budget",
+                    issue_key=f"env:bypass_budget:{project_name}",
+                )
         feature = _task_feature(task)
         if feature and feature.get("status") in TERMINAL_FEATURE_STATES:
             continue
@@ -6526,6 +6580,45 @@ def feature_finalize(dry_run=False):
     config = load_config()
     checked = opened = abandoned = skipped = 0
 
+    def abandon_feature_with_cascade(feature_obj, *, reason, transition_reason):
+        feature_id = feature_obj.get("feature_id")
+        project_name = feature_obj.get("project")
+        live_feature = read_feature(feature_id) or dict(feature_obj)
+        child_ids = list(live_feature.get("child_task_ids") or [])
+
+        def mut_feature(f):
+            f["status"] = "abandoned"
+            f["abandoned_at"] = now_iso()
+            f["abandoned_reason"] = reason
+            for child_id in child_ids:
+                found = find_task(child_id)
+                if not found:
+                    continue
+                child_state, _child = found
+                if child_state in ("done", "failed", "abandoned"):
+                    continue
+                move_task(
+                    child_id,
+                    child_state,
+                    "abandoned",
+                    reason=f"parent feature {feature_id} abandoned",
+                    mutator=lambda t: t.update(
+                        {
+                            "finished_at": now_iso(),
+                            "abandoned_reason": "parent_feature_abandoned",
+                        }
+                    ),
+                )
+
+        update_feature(feature_id, mut_feature)
+        append_transition(feature_id, "open", "abandoned", transition_reason)
+        append_event(
+            "feature-finalize",
+            "feature_abandoned",
+            feature_id=feature_id,
+            details={"project": project_name, "reason": reason},
+        )
+
     for feature in list_features(status="open"):
         checked += 1
         feature_id = feature.get("feature_id")
@@ -6558,17 +6651,10 @@ def feature_finalize(dry_run=False):
                 if dry_run:
                     print(f"DRY-RUN feature-finalize {feature_id}: would mark abandoned (all children failed)")
                 else:
-                    def mut_feature(f):
-                        f["status"] = "abandoned"
-                        f["abandoned_at"] = now_iso()
-                        f["abandoned_reason"] = "all children failed with no retry"
-                    update_feature(feature_id, mut_feature)
-                    append_transition(feature_id, "open", "abandoned", "all children failed")
-                    append_event(
-                        "feature-finalize",
-                        "feature_abandoned",
-                        feature_id=feature_id,
-                        details={"project": project["name"], "reason": "all children failed with no retry"},
+                    abandon_feature_with_cascade(
+                        feature,
+                        reason="all children failed with no retry",
+                        transition_reason="all children failed",
                     )
                     _write_pr_alert(
                         project["name"], feature_id, "feature", "all children failed with no retry", None,
@@ -6584,20 +6670,23 @@ def feature_finalize(dry_run=False):
             continue
 
         if not feature.get("child_task_ids"):
+            planner_state = (workflow.get("planner") or {}).get("state")
+            planner_task_id = (workflow.get("planner") or {}).get("task_id")
+            planner_found = find_task(planner_task_id) if planner_task_id else None
+            planner_task = planner_found[1] if planner_found else None
+            planner_blocker = task_blocker(planner_task) if planner_task else None
+            planner_retryable = bool(planner_blocker and planner_blocker.get("retryable"))
             if dry_run:
-                action = "would defer (live work or incomplete child metadata)" if (has_live_work or not child_meta_complete) else "would mark abandoned (no children)"
+                action = "would defer (live work, retryable planner, or incomplete child metadata)" if (has_live_work or planner_retryable or not child_meta_complete) else "would mark abandoned (no children)"
                 print(f"DRY-RUN feature-finalize {feature_id}: {action}")
-            elif has_live_work or not child_meta_complete:
+            elif has_live_work or planner_retryable or not child_meta_complete:
                 skipped += 1
                 continue
             else:
-                update_feature(feature_id, lambda f: f.update({"status": "abandoned", "abandoned_at": now_iso(), "abandoned_reason": "feature has no child tasks"}))
-                append_transition(feature_id, "open", "abandoned", "feature has no child tasks")
-                append_event(
-                    "feature-finalize",
-                    "feature_abandoned",
-                    feature_id=feature_id,
-                    details={"project": feature.get("project"), "reason": "feature has no child tasks"},
+                abandon_feature_with_cascade(
+                    feature,
+                    reason="feature has no child tasks",
+                    transition_reason="feature has no child tasks",
                 )
                 abandoned += 1
             continue

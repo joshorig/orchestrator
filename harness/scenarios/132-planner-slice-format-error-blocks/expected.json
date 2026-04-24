@@ -1,0 +1,6 @@
+{
+  "final_state": "blocked",
+  "blocker_code": "planner_slice_format_error",
+  "retryable": true,
+  "prompt_has_prior_errors": true
+}

@@ -1,5 +1,8 @@
 {
-  "to_state": "failed",
-  "blocker_code": "invalid_braid_refine",
-  "summary": "BRAID_REFINE missing active template context"
+  "to_state": "blocked",
+  "blocker_code": "template_missing_edge",
+  "summary": "template refinement requested around CheckBaseline",
+  "refine_task_mode": "template-refine",
+  "refine_task_hash": "sha256:abc",
+  "request_hash": "sha256:abc"
 }

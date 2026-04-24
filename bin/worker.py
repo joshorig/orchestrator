@@ -1960,6 +1960,31 @@ def _braid_output_contract_prompt(*, ok_verdicts=None):
     )
 
 
+def _planner_prior_errors_block(task):
+    if int((task or {}).get("attempt", 1) or 1) <= 1:
+        return ""
+    messages = []
+    blocker = o.task_blocker(task or {})
+    if blocker and blocker.get("code") in {"planner_slice_format_error", "model_output_invalid"}:
+        messages.append((blocker.get("detail") or blocker.get("summary") or "").strip())
+    for entry in reversed(list((task or {}).get("attempt_history") or [])):
+        snap = dict((entry.get("snapshot") or {}).get("blocker") or {})
+        if snap.get("code") in {"planner_slice_format_error", "model_output_invalid"}:
+            msg = (snap.get("detail") or snap.get("summary") or "").strip()
+            if msg:
+                messages.append(msg)
+        if len(messages) >= 3:
+            break
+    seen = []
+    for msg in messages:
+        if msg and msg not in seen:
+            seen.append(msg)
+    if not seen:
+        return ""
+    body = "\n".join(f"- {msg[:240]}" for msg in seen[:3])
+    return f"[PRIOR_ERRORS]\n{body}\n\n"
+
+
 def _template_output_contract_prompt():
     return (
         "[OUTPUT CONTRACT]\n"
@@ -3216,6 +3241,7 @@ def planner_council_prompt(task, project, memory_ctx, cfg):
         "Keep at most 3 slices.\n"
         f"Allowed braid_template values: {allowed_templates}\n"
         "Preserve dissent when a risky slice is rejected or narrowed.\n"
+        f"{_planner_prior_errors_block(task)}"
         "Return the JSON object directly. Do not use ```json fences.\n"
     )
     return system_prompt, user_prompt, panel
@@ -4258,24 +4284,18 @@ def enqueue_braid_refine(task, project_name, trailer, *, from_state):
     bt = task.get("braid_template")
     template_hash = task.get("braid_template_hash")
     if not bt or not template_hash:
-        def mut_fail(t):
+        def mut_block(t):
             t["finished_at"] = o.now_iso()
             t["false_blocker_claim"] = trailer
             o.set_task_blocker(
                 t,
-                "invalid_braid_refine",
-                summary="BRAID_REFINE missing active template context",
-                detail=trailer,
+                "template_missing",
+                summary="BRAID template context unavailable",
+                detail="refine needs the origin task's braid_template_hash; will retry once the origin task's context is queryable",
                 source="worker",
-                retryable=False,
+                retryable=True,
             )
-        o.move_task(
-            task["task_id"],
-            from_state,
-            "failed",
-            reason="BRAID_REFINE without active template context",
-            mutator=mut_fail,
-        )
+        o.move_task(task["task_id"], from_state, "blocked", reason="BRAID_REFINE context missing; blocking for recovery", mutator=mut_block)
         return
 
     rounds = int(task.get("refine_round", 0))
@@ -4321,6 +4341,7 @@ def enqueue_braid_refine(task, project_name, trailer, *, from_state):
         summary=f"Refine BRAID template for {bt} around {refine['node_id']}",
         source=f"refine-for:{task['task_id']}",
         braid_template=bt,
+        braid_template_hash=template_hash,
         engine_args={
             "mode": "template-refine",
             "refine_request": {
@@ -4500,6 +4521,16 @@ def run_claude_planner(task, cfg, timeout, log_path):
     if planner_mode == "self-repair-plan":
         system_prompt, user_prompt, council_members = self_repair_council_prompt(task, project, memory_ctx)
     elif planner_mode == "planner-refine":
+        if not planner_refine.get("origin_task_id"):
+            fail_task(
+                task_id,
+                "claimed",
+                "planner-refine missing origin_task_id",
+                blocker_code="runtime_precondition_failed",
+                summary="planner-refine missing origin context",
+                retryable=False,
+            )
+            return
         system_prompt, user_prompt, council_members = planner_council_prompt(task, project, memory_ctx, cfg)
         user_prompt = (
             user_prompt
@@ -4514,6 +4545,18 @@ def run_claude_planner(task, cfg, timeout, log_path):
             + f"Origin execution path: {((planner_refine.get('origin_slice') or {}).get('execution_path')) or '-'}\n"
             "Replan from current repo state and emit replacement runnable slices for this feature.\n"
             "Do not emit a historian slice unless the implementation path is actually complete in this replan.\n"
+        )
+    elif planner_mode == "router-clarify":
+        system_prompt, user_prompt, council_members = planner_council_prompt(task, project, memory_ctx, cfg)
+        clarify = (task.get("engine_args") or {}).get("router_clarify") or {}
+        user_prompt = (
+            user_prompt
+            + "\n"
+            + "[ROUTER CLARIFY]\n"
+            + f"Classification error: {clarify.get('classification_error') or '-'}\n"
+            + f"Origin template: {clarify.get('origin_template') or '-'}\n"
+            + f"Origin summary: {clarify.get('origin_slice_summary') or '-'}\n"
+            "Emit the smallest corrected slice plan for this feature. Prefer one corrected slice unless a hard dependency requires a second.\n"
         )
     else:
         system_prompt, user_prompt, council_members = planner_council_prompt(task, project, memory_ctx, cfg)
@@ -4575,13 +4618,22 @@ def run_claude_planner(task, cfg, timeout, log_path):
             self_repair=(planner_mode == "self-repair-plan"),
         )
     except Exception as exc:
-        fail_task(
+        def mut_block(t):
+            t["finished_at"] = o.now_iso()
+            o.set_task_blocker(
+                t,
+                "model_output_invalid",
+                summary="planner output invalid",
+                detail=(str(exc) or "")[:800],
+                source="worker",
+                retryable=True,
+            )
+        o.move_task(
             task_id,
             "running",
-            str(exc) or "planner output invalid",
-            blocker_code="model_output_invalid",
-            summary="planner output invalid",
-            retryable=False,
+            "blocked",
+            reason="planner JSON parse failed; will retry",
+            mutator=mut_block,
         )
         return
 
@@ -4668,6 +4720,27 @@ def run_claude_planner(task, cfg, timeout, log_path):
             ok, reason = classify_slice(raw_tpl, summ)
         if not ok:
             dropped.append((raw_tpl, summ[:80], reason))
+            if reason and "misrouted" in reason.lower():
+                clarify_task = o.new_task(
+                    role="planner",
+                    engine="claude",
+                    project=project["name"],
+                    summary=f"Clarify routing for slice: {summ[:60]}",
+                    source=f"router-clarify-for:{task['task_id']}",
+                    braid_template=task.get("braid_template"),
+                    feature_id=feature_id,
+                    engine_args={
+                        "mode": "router-clarify",
+                        "roadmap_entry": (task.get("engine_args") or {}).get("roadmap_entry") or {},
+                        "router_clarify": {
+                            "classification_error": reason,
+                            "origin_template": raw_tpl,
+                            "origin_slice_summary": summ[:240],
+                            "origin_task_id": task["task_id"],
+                        },
+                    },
+                )
+                o.enqueue_task(clarify_task)
             sibling_task_ids.append(None)
             continue
         normalized_dep_ids = normalized_slice_depends[idx]
@@ -4724,6 +4797,28 @@ def run_claude_planner(task, cfg, timeout, log_path):
             logf.write(f"\n# dropped {len(dropped)} slice(s):\n")
             for tpl, s80, reason in dropped:
                 logf.write(f"#   template={tpl!r} reason={reason} :: {s80}\n")
+
+    format_drops = [
+        d for d in dropped
+        if any(
+            fragment in str(d[2] or "").lower()
+            for fragment in ("depends_on", "depends on", "slice id", "alias", "unknown template", "braid_template")
+        )
+    ]
+    if format_drops and not enqueued:
+        def mut_block(t):
+            t["finished_at"] = o.now_iso()
+            detail = "\n".join(f"{tpl}: {reason}" for tpl, _summ, reason in format_drops[:5])
+            o.set_task_blocker(
+                t,
+                "planner_slice_format_error",
+                summary=f"planner output had {len(format_drops)} slice-format errors",
+                detail=detail,
+                source="worker",
+                retryable=True,
+            )
+        o.move_task(task_id, "running", "blocked", reason="planner slice format error", mutator=mut_block)
+        return
 
     def mut(t):
         t["artifacts"] = t.get("artifacts", []) + enqueued
@@ -5267,13 +5362,41 @@ def _handle_review_request_change(reviewer_task_id, project_name, target, review
     ((('fail', 'review_feedback_exhausted', False, 21), ('alert', 'review rounds exhausted (8)')), (('enqueue', 2, 'review-address-feedback'), ('move', 'queued', 'review feedback round 2', 2)))
     """
     rounds = int(target.get("review_feedback_rounds", 0)) + 1
-    MAX_ROUNDS = 8
+    MAX_ROUNDS = 4
     target_id = target["task_id"]
     challenge_notes = _review_feedback_challenge_notes(target, review_findings)
+    sig = hashlib.sha256(
+        json.dumps(review_findings, sort_keys=True, default=str).encode()
+    ).hexdigest()[:16]
+    prior_sigs = list(target.get("review_feedback_signatures") or [])
+    if prior_sigs and prior_sigs[-1] == sig:
+        def mut_fail_target(t):
+            mut_target(t)
+            t["review_feedback_rounds"] = rounds
+            t["review_feedback_signatures"] = (prior_sigs + [sig])[-4:]
+        fail_task(
+            target_id,
+            "awaiting-review",
+            f"review feedback loop: identical verdict round {rounds}",
+            blocker_code="review_feedback_loop",
+            summary="review feedback loop detected",
+            detail=review_findings,
+            retryable=False,
+            mutator=mut_fail_target,
+        )
+        o._write_pr_alert(
+            project_name,
+            target_id,
+            target.get("pr_number") or "review-feedback",
+            f"review feedback loop after {rounds} rounds",
+            target.get("pr_url"),
+        )
+        return
     if rounds > MAX_ROUNDS:
         def mut_fail_target(t):
             mut_target(t)
             t["review_feedback_rounds"] = rounds
+            t["review_feedback_signatures"] = (prior_sigs + [sig])[-4:]
         fail_task(
             target_id,
             "awaiting-review",
@@ -5319,6 +5442,7 @@ def _handle_review_request_change(reviewer_task_id, project_name, target, review
     def mut_requeue_target(t):
         mut_target(t)
         t["review_feedback_rounds"] = rounds
+        t["review_feedback_signatures"] = (prior_sigs + [sig])[-4:]
     o.move_task(
         target_id, "awaiting-review", "queued",
         reason=f"review feedback round {rounds}", mutator=mut_requeue_target,
@@ -5435,12 +5559,22 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
 
     target_status, target_state, target = _review_feedback_target_state(target_id)
     if target_status == "inflight":
+        def mut_block(t):
+            t["finished_at"] = o.now_iso()
+            o.set_task_blocker(
+                t,
+                "review_feedback_target_inflight",
+                summary=f"review-feedback target {target_id} still in-flight",
+                detail=f"target state={target_state}",
+                source="worker",
+                retryable=True,
+            )
         o.move_task(
             task_id,
             "claimed",
-            "abandoned",
+            "blocked",
             reason=f"review-feedback target in-flight: {target_id}",
-            mutator=lambda t: t.update({"finished_at": o.now_iso(), "abandoned_reason": f"in-flight target {target_id}"}),
+            mutator=mut_block,
         )
         return
     if target_status == "abandoned":

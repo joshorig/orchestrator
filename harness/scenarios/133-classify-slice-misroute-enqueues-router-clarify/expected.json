@@ -1,0 +1,6 @@
+{
+  "router_mode": "router-clarify",
+  "router_error": "non-historian trp slice misrouted to lvc historian",
+  "normal_template": "lvc-implement-operator",
+  "planner_done": true
+}

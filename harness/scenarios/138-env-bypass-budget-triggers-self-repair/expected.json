@@ -1,0 +1,6 @@
+{
+  "claimed_task_id": "task-sr",
+  "bypass_logged": 1,
+  "metric_logged": 1,
+  "self_repair_issue_key": "env:bypass_budget:demo"
+}

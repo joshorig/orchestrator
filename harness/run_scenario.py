@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import importlib.util
+import hashlib
 import json
 import os
 import pathlib
@@ -4317,6 +4318,52 @@ def _run_planner_refine_route(repo_root, scenario):
 
 def _run_template_refine_route_requires_template_context(repo_root, scenario):
     orchestrator, worker = _load_repo_modules(repo_root)
+    enqueued = []
+    moved = []
+    old_move = worker.o.move_task
+    old_now = worker.o.now_iso
+    old_new_task = worker.o.new_task
+    old_enqueue = worker.o.enqueue_task
+    try:
+        worker.o.new_task = lambda **kwargs: {"task_id": "task-template-refine", **kwargs}
+        worker.o.enqueue_task = lambda task: enqueued.append(task)
+        def fake_move(task_id, from_state, to_state, reason="", mutator=None):
+            task_obj = {
+                "task_id": task_id,
+                "state": from_state,
+                "braid_template": "demo-template",
+                "braid_template_hash": "sha256:abc",
+            }
+            if mutator:
+                mutator(task_obj)
+            moved.append({"task_id": task_id, "to_state": to_state, "task": task_obj, "reason": reason})
+        worker.o.move_task = fake_move
+        worker.o.now_iso = lambda: "2026-04-24T01:00:00"
+        worker.enqueue_braid_refine(
+            {"task_id": "task-impl", "braid_template": "demo-template", "braid_template_hash": "sha256:abc"},
+            "lvc-standard",
+            "BRAID_REFINE: CheckBaseline: add baseline_red edge to End",
+            from_state="running",
+        )
+    finally:
+        worker.o.move_task = old_move
+        worker.o.now_iso = old_now
+        worker.o.new_task = old_new_task
+        worker.o.enqueue_task = old_enqueue
+    result = moved[0]
+    blocker = orchestrator.task_blocker(result["task"])
+    return {
+        "to_state": result["to_state"],
+        "blocker_code": (blocker or {}).get("code"),
+        "summary": (blocker or {}).get("summary"),
+        "refine_task_mode": ((enqueued[0].get("engine_args") or {}).get("mode")),
+        "refine_task_hash": enqueued[0].get("braid_template_hash"),
+        "request_hash": (((enqueued[0].get("engine_args") or {}).get("refine_request") or {}).get("template_hash")),
+    }
+
+
+def _run_template_refine_missing_hash_blocks(repo_root, scenario):
+    orchestrator, worker = _load_repo_modules(repo_root)
     moved = []
     old_move = worker.o.move_task
     old_now = worker.o.now_iso
@@ -4343,6 +4390,459 @@ def _run_template_refine_route_requires_template_context(repo_root, scenario):
         "to_state": result["to_state"],
         "blocker_code": (blocker or {}).get("code"),
         "summary": (blocker or {}).get("summary"),
+        "retryable": bool((blocker or {}).get("retryable")),
+    }
+
+
+def _run_planner_json_parse_retryable_block(repo_root, scenario):
+    orchestrator, worker = _load_repo_modules(repo_root)
+    task = {
+        "task_id": "task-plan",
+        "project": "demo",
+        "summary": "plan",
+        "engine_args": {"roadmap_entry": {"id": "R-1", "title": "Title", "body": "Body"}},
+    }
+    moves = []
+    old_worker = {
+        "get_project": worker.o.get_project,
+        "move_task": worker.o.move_task,
+        "now_iso": worker.o.now_iso,
+        "read_memory_context": worker.read_memory_context,
+        "planner_council_prompt": worker.planner_council_prompt,
+        "_run_bounded": worker._run_bounded,
+        "_record_task_costs_from_text": worker._record_task_costs_from_text,
+    }
+    old_feature = {
+        name: orchestrator.feature_finalize.__globals__[name]
+        for name in (
+            "shutil",
+            "load_config",
+            "list_features",
+            "feature_workflow_summary",
+            "_load_feature_children",
+            "find_task",
+            "update_feature",
+            "append_transition",
+            "append_event",
+        )
+    }
+    try:
+        worker.o.get_project = lambda cfg, project_name: {"name": project_name, "path": "/tmp/demo"}
+        worker.o.now_iso = lambda: "2026-04-24T01:00:00"
+        worker.read_memory_context = lambda *args, **kwargs: "memory"
+        worker.planner_council_prompt = lambda *args, **kwargs: ("system", "user", ("aristotle",))
+        worker._run_bounded = lambda *args, **kwargs: types.SimpleNamespace(returncode=0, stdout='{"type":"result","result":"not json at all{"}')
+        worker._record_task_costs_from_text = lambda *args, **kwargs: None
+        def fake_move(task_id, from_state, to_state, reason="", mutator=None):
+            task_obj = dict(task)
+            task_obj["state"] = from_state
+            if mutator:
+                mutator(task_obj)
+            moves.append({"task_id": task_id, "to_state": to_state, "task": task_obj, "reason": reason})
+        worker.o.move_task = fake_move
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = pathlib.Path(tmp) / "planner.log"
+            worker.run_claude_planner(dict(task), {"council": {}}, 30, log_path)
+        blocked = moves[-1]
+        blocker = orchestrator.task_blocker(blocked["task"])
+
+        feature = {"feature_id": "feature-1", "status": "open", "project": "demo", "child_task_ids": []}
+        orchestrator.feature_finalize.__globals__["shutil"] = types.SimpleNamespace(which=lambda _name: "/opt/homebrew/bin/gh")
+        orchestrator.feature_finalize.__globals__["load_config"] = lambda: {"projects": [{"name": "demo", "path": "/tmp/demo"}]}
+        orchestrator.feature_finalize.__globals__["list_features"] = lambda status="open": [dict(feature)] if status == "open" else []
+        orchestrator.feature_finalize.__globals__["feature_workflow_summary"] = lambda _feature: {
+            "has_live_work": False,
+            "child_metadata_complete": True,
+            "planner": {"task_id": "task-plan", "state": "blocked"},
+        }
+        orchestrator.feature_finalize.__globals__["_load_feature_children"] = lambda _feature: []
+        orchestrator.feature_finalize.__globals__["find_task"] = lambda task_id, states=None: ("blocked", dict(blocked["task"])) if task_id == "task-plan" else None
+        counts = {"updated": 0, "transitions": 0, "events": 0}
+        orchestrator.feature_finalize.__globals__["update_feature"] = lambda *args, **kwargs: counts.__setitem__("updated", counts["updated"] + 1)
+        orchestrator.feature_finalize.__globals__["append_transition"] = lambda *args, **kwargs: counts.__setitem__("transitions", counts["transitions"] + 1)
+        orchestrator.feature_finalize.__globals__["append_event"] = lambda *args, **kwargs: counts.__setitem__("events", counts["events"] + 1)
+        checked, opened, abandoned, skipped = orchestrator.feature_finalize()
+    finally:
+        worker.o.get_project = old_worker["get_project"]
+        worker.o.move_task = old_worker["move_task"]
+        worker.o.now_iso = old_worker["now_iso"]
+        worker.read_memory_context = old_worker["read_memory_context"]
+        worker.planner_council_prompt = old_worker["planner_council_prompt"]
+        worker._run_bounded = old_worker["_run_bounded"]
+        worker._record_task_costs_from_text = old_worker["_record_task_costs_from_text"]
+        for key, value in old_feature.items():
+            orchestrator.feature_finalize.__globals__[key] = value
+    return {
+        "final_state": blocked["to_state"],
+        "blocker_code": blocker.get("code"),
+        "retryable": bool(blocker.get("retryable")),
+        "feature_finalize_abandoned": abandoned,
+        "feature_finalize_skipped": skipped,
+    }
+
+
+def _run_planner_depends_on_format_error_blocks(repo_root, scenario):
+    orchestrator, worker = _load_repo_modules(repo_root)
+    task = {
+        "task_id": "task-plan",
+        "project": "lvc-standard",
+        "summary": "plan",
+        "attempt": 1,
+        "engine_args": {"roadmap_entry": {"id": "R-2", "title": "Title", "body": "Body"}},
+    }
+    moves = []
+    old = {
+        "get_project": worker.o.get_project,
+        "move_task": worker.o.move_task,
+        "now_iso": worker.o.now_iso,
+        "read_memory_context": worker.read_memory_context,
+        "planner_council_prompt": worker.planner_council_prompt,
+        "_run_bounded": worker._run_bounded,
+        "_record_task_costs_from_text": worker._record_task_costs_from_text,
+    }
+    try:
+        worker.o.get_project = lambda cfg, project_name: {"name": project_name, "path": "/tmp/demo"}
+        worker.o.now_iso = lambda: "2026-04-24T01:00:00"
+        worker.read_memory_context = lambda *args, **kwargs: "memory"
+        worker.planner_council_prompt = lambda *args, **kwargs: ("system", "user", ("aristotle",))
+        worker._run_bounded = lambda *args, **kwargs: types.SimpleNamespace(returncode=0, stdout='{"type":"result","result":"{\\"execution_path\\":\\"slice-1\\",\\"slices\\":[{\\"id\\":\\"slice-1\\",\\"summary\\":\\"writer\\",\\"braid_template\\":\\"lvc-implement-operator\\",\\"depends_on\\":[42]}]}"}')
+        worker._record_task_costs_from_text = lambda *args, **kwargs: None
+        def fake_move(task_id, from_state, to_state, reason="", mutator=None):
+            task_obj = dict(task)
+            task_obj["state"] = from_state
+            if mutator:
+                mutator(task_obj)
+            moves.append({"task_id": task_id, "to_state": to_state, "task": task_obj, "reason": reason})
+        worker.o.move_task = fake_move
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = pathlib.Path(tmp) / "planner.log"
+            worker.run_claude_planner(dict(task), {"council": {}}, 30, log_path)
+        blocked = moves[-1]
+        blocker = orchestrator.task_blocker(blocked["task"])
+        prompt_task = dict(blocked["task"])
+        prompt_task["attempt"] = 2
+        prompt_task["attempt_history"] = [{"snapshot": {"blocker": {"code": "planner_slice_format_error", "detail": "lvc-implement-operator: depends_on index out of range: 42"}}}]
+        prompt_task["engine_args"] = {"roadmap_entry": {"id": "R-2", "title": "Title", "body": "Body"}}
+        _sys, prompt, _panel = old["planner_council_prompt"](prompt_task, {"name": "lvc-standard"}, "memory", {"council": {}})
+    finally:
+        for key, value in old.items():
+            if key in {"get_project", "move_task", "now_iso"}:
+                setattr(worker.o, key, value)
+            else:
+                setattr(worker, key, value)
+    return {
+        "final_state": blocked["to_state"],
+        "blocker_code": blocker.get("code"),
+        "retryable": bool(blocker.get("retryable")),
+        "prompt_has_prior_errors": "[PRIOR_ERRORS]" in prompt and "depends_on index out of range: 42" in prompt,
+    }
+
+
+def _run_classify_slice_misroute_enqueues_router_clarify(repo_root, scenario):
+    _orchestrator, worker = _load_repo_modules(repo_root)
+    task = {
+        "task_id": "task-plan",
+        "project": "lvc-standard",
+        "summary": "plan",
+        "engine_args": {"roadmap_entry": {"id": "R-3", "title": "Title", "body": "Body"}},
+        "feature_id": "feature-1",
+    }
+    enqueued = []
+    moves = []
+    old = {
+        "get_project": worker.o.get_project,
+        "move_task": worker.o.move_task,
+        "new_task": worker.o.new_task,
+        "enqueue_task": worker.o.enqueue_task,
+        "append_feature_child": worker.o.append_feature_child,
+        "now_iso": worker.o.now_iso,
+        "read_memory_context": worker.read_memory_context,
+        "planner_council_prompt": worker.planner_council_prompt,
+        "_run_bounded": worker._run_bounded,
+        "_record_task_costs_from_text": worker._record_task_costs_from_text,
+    }
+    try:
+        worker.o.get_project = lambda cfg, project_name: {"name": project_name, "path": "/tmp/demo"}
+        worker.o.now_iso = lambda: "2026-04-24T01:00:00"
+        worker.read_memory_context = lambda *args, **kwargs: "memory"
+        worker.planner_council_prompt = lambda *args, **kwargs: ("system", "user", ("aristotle",))
+        worker._run_bounded = lambda *args, **kwargs: types.SimpleNamespace(returncode=0, stdout='{"type":"result","result":"{\\"execution_path\\":\\"slice-1 -> slice-2\\",\\"slices\\":[{\\"id\\":\\"slice-1\\",\\"summary\\":\\"Build trade-research-platform UI dashboard card\\",\\"braid_template\\":\\"lvc-historian-update\\"},{\\"id\\":\\"slice-2\\",\\"summary\\":\\"Optimize hot path poller zero alloc jmh gate\\",\\"braid_template\\":\\"lvc-implement-operator\\"}]}"}')
+        worker._record_task_costs_from_text = lambda *args, **kwargs: None
+        worker.o.new_task = lambda **kwargs: {"task_id": f"task-{len(enqueued)+1}", **kwargs}
+        worker.o.enqueue_task = lambda task_obj: enqueued.append(task_obj)
+        worker.o.append_feature_child = lambda *args, **kwargs: None
+        def fake_move(task_id, from_state, to_state, reason="", mutator=None):
+            task_obj = dict(task)
+            if mutator:
+                mutator(task_obj)
+            moves.append({"task_id": task_id, "to_state": to_state, "task": task_obj})
+        worker.o.move_task = fake_move
+        with tempfile.TemporaryDirectory() as tmp:
+            worker.run_claude_planner(dict(task), {"council": {}}, 30, pathlib.Path(tmp) / "planner.log")
+    finally:
+        for key, value in old.items():
+            if key in {"get_project", "move_task", "new_task", "enqueue_task", "append_feature_child", "now_iso"}:
+                setattr(worker.o, key, value)
+            else:
+                setattr(worker, key, value)
+    router = next(item for item in enqueued if str(item.get("source") or "").startswith("router-clarify-for:"))
+    normal = next(item for item in enqueued if item.get("source") == "slice-of:task-plan")
+    return {
+        "router_mode": ((router.get("engine_args") or {}).get("mode")),
+        "router_error": (((router.get("engine_args") or {}).get("router_clarify") or {}).get("classification_error")),
+        "normal_template": normal.get("braid_template"),
+        "planner_done": moves[-1]["to_state"] == "done",
+    }
+
+
+def _run_review_feedback_loop_detection(repo_root, scenario):
+    _orchestrator, worker = _load_repo_modules(repo_root)
+    calls = []
+    class FakeO:
+        def new_task(self, **kwargs):
+            return {"task_id": "task-feedback", **kwargs}
+        def enqueue_task(self, task):
+            calls.append(("enqueue", task["engine_args"]["round"]))
+        def move_task(self, task_id, from_state, to_state, reason="", mutator=None):
+            body = {"review_feedback_rounds": 0, "review_feedback_signatures": []}
+            if mutator:
+                mutator(body)
+            calls.append(("move", to_state, body.get("review_feedback_rounds"), list(body.get("review_feedback_signatures") or [])))
+        def _write_pr_alert(self, *args):
+            calls.append(("alert", args[3]))
+    old_o = worker.o
+    old_fail = worker.fail_task
+    worker.o = FakeO()
+    def fake_fail(task_id, from_state, reason, **kwargs):
+        body = {"review_feedback_rounds": 0, "review_feedback_signatures": []}
+        if kwargs.get("mutator"):
+            kwargs["mutator"](body)
+        calls.append(("fail", kwargs.get("blocker_code"), kwargs.get("retryable"), body.get("review_feedback_rounds"), list(body.get("review_feedback_signatures") or [])))
+    worker.fail_task = fake_fail
+    try:
+        findings = {"issue": "need docs"}
+        sig = hashlib.sha256(json.dumps(findings, sort_keys=True, default=str).encode()).hexdigest()[:16]
+        worker._handle_review_request_change(
+            "reviewer-1",
+            "demo",
+            {"task_id": "task-a", "project": "demo", "feature_id": "f1", "base_branch": "main", "worktree": "/tmp/wt", "review_feedback_rounds": 1, "review_feedback_signatures": [sig]},
+            findings,
+            lambda t: t.update({"reviewed_by": "reviewer-1"}),
+        )
+        loop_fail = next(item for item in calls if item[0] == "fail")
+        calls.clear()
+        worker._handle_review_request_change(
+            "reviewer-2",
+            "demo",
+            {"task_id": "task-b", "project": "demo", "feature_id": "f2", "base_branch": "main", "worktree": "/tmp/wt", "review_feedback_rounds": 4, "review_feedback_signatures": []},
+            {"issue": "need tests"},
+            lambda t: t.update({"reviewed_by": "reviewer-2"}),
+        )
+        cap_fail = next(item for item in calls if item[0] == "fail")
+    finally:
+        worker.o = old_o
+        worker.fail_task = old_fail
+    return {
+        "loop_blocker_code": loop_fail[1],
+        "loop_rounds": loop_fail[3],
+        "cap_blocker_code": cap_fail[1],
+        "cap_rounds": cap_fail[3],
+    }
+
+
+def _run_feature_abandon_cascades_children(repo_root, scenario):
+    orchestrator, _worker = _load_repo_modules(repo_root)
+    feature = {
+        "feature_id": "feature-cascade",
+        "status": "open",
+        "project": "demo",
+        "child_task_ids": ["task-queued", "task-claimed", "task-done"],
+    }
+    moved = []
+    old = {
+        name: orchestrator.feature_finalize.__globals__[name]
+        for name in (
+            "shutil", "load_config", "list_features", "feature_workflow_summary", "_load_feature_children",
+            "_feature_all_children_failed_without_retry", "_feature_finalize_blocking_issue", "subprocess", "read_feature", "find_task", "move_task",
+            "update_feature", "append_transition", "append_event",
+        )
+    }
+    try:
+        orchestrator.feature_finalize.__globals__["shutil"] = types.SimpleNamespace(which=lambda _name: "/opt/homebrew/bin/gh")
+        orchestrator.feature_finalize.__globals__["load_config"] = lambda: {"projects": [{"name": "demo", "path": "/tmp/demo"}]}
+        orchestrator.feature_finalize.__globals__["list_features"] = lambda status="open": [dict(feature)] if status == "open" else []
+        orchestrator.feature_finalize.__globals__["feature_workflow_summary"] = lambda _feature: {"has_live_work": False, "child_metadata_complete": True, "planner": {}}
+        orchestrator.feature_finalize.__globals__["_load_feature_children"] = lambda _feature: [
+            {"task_id": "task-queued", "state": "failed"},
+            {"task_id": "task-claimed", "state": "failed"},
+            {"task_id": "task-done", "state": "failed"},
+        ]
+        orchestrator.feature_finalize.__globals__["_feature_all_children_failed_without_retry"] = lambda _feature: True
+        orchestrator.feature_finalize.__globals__["_feature_finalize_blocking_issue"] = lambda _project_name: None
+        orchestrator.feature_finalize.__globals__["subprocess"] = types.SimpleNamespace(run=lambda *args, **kwargs: types.SimpleNamespace(returncode=0, stderr=""))
+        orchestrator.feature_finalize.__globals__["read_feature"] = lambda feature_id: dict(feature)
+        state_map = {"task-queued": ("queued", {"task_id": "task-queued"}), "task-claimed": ("claimed", {"task_id": "task-claimed"}), "task-done": ("done", {"task_id": "task-done"})}
+        orchestrator.feature_finalize.__globals__["find_task"] = lambda task_id, states=None: state_map.get(task_id)
+        orchestrator.feature_finalize.__globals__["move_task"] = lambda task_id, from_state, to_state, reason="", mutator=None: moved.append((task_id, from_state, to_state, reason))
+        orchestrator.feature_finalize.__globals__["update_feature"] = lambda feature_id, mutator: mutator(feature)
+        orchestrator.feature_finalize.__globals__["append_transition"] = lambda *args, **kwargs: None
+        orchestrator.feature_finalize.__globals__["append_event"] = lambda *args, **kwargs: None
+        checked, opened, abandoned, skipped = orchestrator.feature_finalize()
+    finally:
+        for key, value in old.items():
+            orchestrator.feature_finalize.__globals__[key] = value
+    return {
+        "checked": checked,
+        "abandoned": abandoned,
+        "queued_child_state": next(item[2] for item in moved if item[0] == "task-queued"),
+        "claimed_child_state": next(item[2] for item in moved if item[0] == "task-claimed"),
+        "done_child_moved": any(item[0] == "task-done" for item in moved),
+    }
+
+
+def _run_review_feedback_blocks_on_inflight_target(repo_root, scenario):
+    orchestrator, worker = _load_repo_modules(repo_root)
+    moves = []
+    old_state = worker._review_feedback_target_state
+    old_move = worker.o.move_task
+    old_now = worker.o.now_iso
+    old_retry = orchestrator.reset_task_for_retry
+    old_find = orchestrator.find_task
+    try:
+        worker._review_feedback_target_state = lambda target_id: ("inflight", "running", {"task_id": target_id})
+        worker.o.now_iso = lambda: "2026-04-24T01:00:00"
+        def fake_move(task_id, from_state, to_state, reason="", mutator=None):
+            task_obj = {"task_id": task_id, "state": from_state}
+            if mutator:
+                mutator(task_obj)
+            moves.append({"task_id": task_id, "to_state": to_state, "task": task_obj})
+        worker.o.move_task = fake_move
+        worker.run_review_feedback_task(
+            {"task_id": "feedback-1", "project": "demo", "feature_id": "f1", "engine_args": {"target_task_id": "target-1", "round": 2, "review_findings": "x"}, "braid_template": "review-address-feedback"},
+            {},
+            30,
+            pathlib.Path(tempfile.gettempdir()) / "feedback.log",
+        )
+        blocked = moves[0]
+        blocker = orchestrator.task_blocker(blocked["task"])
+        retried = {}
+        orchestrator.reset_task_for_retry = lambda task_id, from_state, reason, source=None, mutator=None: retried.update({"task_id": task_id, "from_state": from_state, "reason": reason}) or {"task_id": task_id}
+        orchestrator.find_task = lambda task_id, states=None: ("queued", {"task_id": task_id}) if task_id == "feedback-1" else None
+        ok = orchestrator._workflow_check_retry_task({"task_id": "feedback-1"}, "blocked", "target stabilized")
+    finally:
+        worker._review_feedback_target_state = old_state
+        worker.o.move_task = old_move
+        worker.o.now_iso = old_now
+        orchestrator.reset_task_for_retry = old_retry
+        orchestrator.find_task = old_find
+    return {
+        "blocked_code": blocker.get("code"),
+        "retryable": bool(blocker.get("retryable")),
+        "workflow_retry_called": ok and retried.get("task_id") == "feedback-1",
+    }
+
+
+def _run_env_bypass_budget_triggers_self_repair(repo_root, scenario):
+    orchestrator, _worker = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        queue_root = root / "queue"
+        for state in orchestrator.STATES:
+            (queue_root / state).mkdir(parents=True, exist_ok=True)
+        task = {
+            "task_id": "task-sr",
+            "state": "queued",
+            "engine": "claude",
+            "role": "implementer",
+            "project": "demo",
+            "summary": "repair env",
+            "source": "manual",
+            "engine_args": {"self_repair": {"enabled": True}},
+            "created_at": "2026-04-24T01:00:00",
+        }
+        (queue_root / "queued" / "task-sr.json").write_text(json.dumps(task))
+        old = {
+            "QUEUE_ROOT": orchestrator.QUEUE_ROOT,
+            "project_hard_stopped": orchestrator.project_hard_stopped,
+            "project_environment_ok": orchestrator.project_environment_ok,
+            "_task_allows_environment_bypass": orchestrator._task_allows_environment_bypass,
+            "_state_engine_read_enabled": orchestrator._state_engine_read_enabled,
+            "_record_task_bypass": orchestrator._record_task_bypass,
+            "append_metric": orchestrator.append_metric,
+            "env_bypass_rate_1h": orchestrator.env_bypass_rate_1h,
+            "enqueue_self_repair": orchestrator.enqueue_self_repair,
+        }
+        calls = {"bypass": 0, "metric": 0, "repair": []}
+        try:
+            orchestrator.QUEUE_ROOT = queue_root
+            orchestrator.project_hard_stopped = lambda project: False
+            orchestrator.project_environment_ok = lambda project: False
+            orchestrator._task_allows_environment_bypass = lambda task: True
+            orchestrator._state_engine_read_enabled = lambda: False
+            orchestrator._record_task_bypass = lambda *args, **kwargs: calls.__setitem__("bypass", calls["bypass"] + 1) or True
+            orchestrator.append_metric = lambda *args, **kwargs: calls.__setitem__("metric", calls["metric"] + 1) or {}
+            orchestrator.env_bypass_rate_1h = lambda project: 10
+            orchestrator.enqueue_self_repair = lambda **kwargs: calls["repair"].append(kwargs) or {"enqueued": 1}
+            claimed = orchestrator.atomic_claim("claude")
+        finally:
+            for key, value in old.items():
+                setattr(orchestrator, key, value)
+        return {
+            "claimed_task_id": claimed.get("task_id"),
+            "bypass_logged": calls["bypass"],
+            "metric_logged": calls["metric"],
+            "self_repair_issue_key": calls["repair"][0]["issue_key"],
+        }
+
+
+def _run_planner_refine_missing_origin_context(repo_root, scenario):
+    _orchestrator, worker = _load_repo_modules(repo_root)
+    failures = []
+    old = {
+        "get_project": worker.o.get_project,
+        "move_task": worker.o.move_task,
+        "now_iso": worker.o.now_iso,
+        "read_memory_context": worker.read_memory_context,
+        "fail_task": worker.fail_task,
+    }
+    try:
+        worker.o.get_project = lambda cfg, project_name: {"name": project_name, "path": "/tmp/demo"}
+        worker.o.move_task = lambda *args, **kwargs: None
+        worker.o.now_iso = lambda: "2026-04-24T01:00:00"
+        worker.read_memory_context = lambda *args, **kwargs: "memory"
+        worker.fail_task = lambda task_id, from_state, reason, **kwargs: failures.append((kwargs.get("blocker_code"), kwargs.get("summary")))
+        with tempfile.TemporaryDirectory() as tmp:
+            worker.run_claude_planner(
+                {"task_id": "task-plan", "project": "demo", "engine_args": {"mode": "planner-refine", "planner_refine": {}}},
+                {"council": {}},
+                30,
+                pathlib.Path(tmp) / "planner.log",
+            )
+    finally:
+        worker.o.get_project = old["get_project"]
+        worker.o.move_task = old["move_task"]
+        worker.o.now_iso = old["now_iso"]
+        worker.read_memory_context = old["read_memory_context"]
+        worker.fail_task = old["fail_task"]
+    return {"blocker_code": failures[0][0], "summary": failures[0][1]}
+
+
+def _run_slice_alias_custom_id_not_hijacked(repo_root, scenario):
+    _orchestrator, worker = _load_repo_modules(repo_root)
+    slice_ids, aliases = worker._slice_alias_maps([{"id": "my-custom-id", "summary": "x"}])
+    return {
+        "normalized_custom_id": worker._normalize_slice_ref("my-custom-id"),
+        "canonical_first_id": slice_ids[0],
+        "custom_alias_present": aliases.get("my-custom-id"),
+    }
+
+
+def _run_slice_context_block_handles_null_plan(repo_root, scenario):
+    _orchestrator, worker = _load_repo_modules(repo_root)
+    block = worker._render_slice_context_block({"engine_args": {"slice": {"id": "slice-1", "index": 1, "depends_on": [], "execution_path": "slice-1", "plan": None}}})
+    return {
+        "has_slice_id": "slice_id: slice-1" in block,
+        "has_none_plan_fallback": "- (none)" in block,
     }
 
 
@@ -5527,6 +6027,28 @@ def main(argv):
         actual = _run_template_owner_project(repo_root, scenario)
     elif kind == "fetch_failure_cached_remote_ok":
         actual = _run_fetch_failure_cached_remote_ok(repo_root, scenario)
+    elif kind == "planner_json_parse_retryable_block":
+        actual = _run_planner_json_parse_retryable_block(repo_root, scenario)
+    elif kind == "planner_slice_format_error_blocks":
+        actual = _run_planner_depends_on_format_error_blocks(repo_root, scenario)
+    elif kind == "classify_slice_misroute_enqueues_router_clarify":
+        actual = _run_classify_slice_misroute_enqueues_router_clarify(repo_root, scenario)
+    elif kind == "template_refine_missing_hash_blocks":
+        actual = _run_template_refine_missing_hash_blocks(repo_root, scenario)
+    elif kind == "review_feedback_loop_detection":
+        actual = _run_review_feedback_loop_detection(repo_root, scenario)
+    elif kind == "feature_abandon_cascades_children":
+        actual = _run_feature_abandon_cascades_children(repo_root, scenario)
+    elif kind == "review_feedback_blocks_on_inflight_target":
+        actual = _run_review_feedback_blocks_on_inflight_target(repo_root, scenario)
+    elif kind == "env_bypass_budget_triggers_self_repair":
+        actual = _run_env_bypass_budget_triggers_self_repair(repo_root, scenario)
+    elif kind == "planner_refine_missing_origin_context":
+        actual = _run_planner_refine_missing_origin_context(repo_root, scenario)
+    elif kind == "slice_alias_custom_id_not_hijacked":
+        actual = _run_slice_alias_custom_id_not_hijacked(repo_root, scenario)
+    elif kind == "slice_context_block_handles_null_plan":
+        actual = _run_slice_context_block_handles_null_plan(repo_root, scenario)
     else:
         raise SystemExit(f"unknown scenario kind: {kind}")
 

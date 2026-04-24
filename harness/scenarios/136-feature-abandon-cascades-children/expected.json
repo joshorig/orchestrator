@@ -1,0 +1,7 @@
+{
+  "checked": 1,
+  "abandoned": 1,
+  "queued_child_state": "abandoned",
+  "claimed_child_state": "abandoned",
+  "done_child_moved": false
+}

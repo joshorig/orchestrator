@@ -1,0 +1,6 @@
+{
+  "to_state": "blocked",
+  "blocker_code": "template_missing",
+  "summary": "BRAID template context unavailable",
+  "retryable": true
+}

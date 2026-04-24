@@ -1,0 +1,7 @@
+{
+  "final_state": "blocked",
+  "blocker_code": "model_output_invalid",
+  "retryable": true,
+  "feature_finalize_abandoned": 0,
+  "feature_finalize_skipped": 1
+}
