@@ -1,0 +1,9 @@
+{
+  "state": "queued",
+  "attempt": 2,
+  "retry_kind": "ull_lock_guard",
+  "retry_findings_count": 2,
+  "history_blocker_code": "runtime_precondition_failed",
+  "history_failure": "ULL lock guard violated",
+  "prompt_has_retry_context": true
+}

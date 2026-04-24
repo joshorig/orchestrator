@@ -4034,6 +4034,66 @@ def _render_slice_context_block(task):
     )
 
 
+def _render_retry_context_block(task):
+    engine_args = task.get("engine_args") or {}
+    retry_ctx = engine_args.get("retry_context") or {}
+    if not isinstance(retry_ctx, dict) or not retry_ctx:
+        return ""
+    kind = str(retry_ctx.get("kind") or "-")
+    reason = str(retry_ctx.get("reason") or "-")
+    findings = []
+    for item in retry_ctx.get("findings") or []:
+        if item:
+            findings.append(f"- {str(item)}")
+    return (
+        "[RETRY CONTEXT]\n"
+        f"kind: {kind}\n"
+        f"reason: {reason}\n"
+        "findings:\n"
+        f"{chr(10).join(findings) if findings else '- (none)'}\n\n"
+    )
+
+
+def _retry_task_for_ull_lock_guard(task, findings, *, from_state):
+    detail = "; ".join(str(item) for item in (findings or []) if item)[:500]
+    findings_list = [str(item) for item in (findings or []) if item]
+
+    def mut_current(t):
+        t["finished_at"] = o.now_iso()
+        t["failure"] = "ULL lock guard violated"
+        merged = list(t.get("policy_review_findings") or []) + findings_list
+        t["policy_review_findings"] = list(dict.fromkeys(merged))
+        o.set_task_blocker(
+            t,
+            "runtime_precondition_failed",
+            summary="ULL lock guard violated",
+            detail=detail,
+            source="worker",
+            retryable=True,
+        )
+
+    o.update_task_in_place(o.task_path(task["task_id"], from_state), mut_current)
+
+    def mut_retry(t):
+        merged = list(t.get("policy_review_findings") or []) + findings_list
+        t["policy_review_findings"] = list(dict.fromkeys(merged))
+        engine_args = dict(t.get("engine_args") or {})
+        retry_ctx = dict(engine_args.get("retry_context") or {})
+        retry_ctx["kind"] = "ull_lock_guard"
+        retry_ctx["reason"] = "Previous attempt hit the ULL lock guard: remove forbidden locking or blocking primitives from ULL code."
+        retry_ctx["findings"] = findings_list
+        engine_args["retry_context"] = retry_ctx
+        t["engine_args"] = engine_args
+
+    o.reset_task_for_retry(
+        task["task_id"],
+        from_state,
+        reason="ULL lock guard violated; retry with guard findings",
+        source="worker",
+        mutator=mut_retry,
+    )
+
+
 _BRAID_REFINE_NODE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 
 
@@ -6797,29 +6857,7 @@ def run_codex_slot(task, cfg):
             o.braid_template_record_use(bt, topology_error=False)
             ull_lock_findings = _ull_lock_guard_findings(project["name"], str(wt_path), base_branch)
             if ull_lock_findings:
-                detail = "; ".join(ull_lock_findings)[:500]
-                def mut_fail_lock(t):
-                    t["finished_at"] = o.now_iso()
-                    t["failure"] = "ULL lock guard violated"
-                    t["policy_review_findings"] = list(t.get("policy_review_findings") or []) + ull_lock_findings
-                    o.set_task_blocker(
-                        t,
-                        "runtime_precondition_failed",
-                        summary="ULL lock guard violated",
-                        detail=detail,
-                        source="worker",
-                        retryable=True,
-                    )
-                fail_task(
-                    task_id,
-                    "running",
-                    "ULL lock guard violated",
-                    blocker_code="runtime_precondition_failed",
-                    summary="ULL lock guard violated",
-                    detail=detail,
-                    retryable=True,
-                    mutator=mut_fail_lock,
-                )
+                _retry_task_for_ull_lock_guard(task, ull_lock_findings, from_state="running")
                 return
             ok, info = _autocommit_worktree(pathlib.Path(wt_path), task, log_path)
             if not ok:
@@ -6891,6 +6929,7 @@ def build_codex_prompt(task, graph_body, memory_ctx):
             ""
         )
         + _render_slice_context_block(task)
+        + _render_retry_context_block(task)
         +
         "[REPO LAYOUT]\n"
         "All repo-memory files live under `repo-memory/` at the worktree root:\n"

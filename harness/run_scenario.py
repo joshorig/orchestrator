@@ -4846,6 +4846,73 @@ def _run_slice_context_block_handles_null_plan(repo_root, scenario):
     }
 
 
+def _run_ull_lock_guard_retries_with_context(repo_root, scenario):
+    orchestrator, worker = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        old_root = orchestrator.QUEUE_ROOT
+        old_subprocess = orchestrator.reset_task_for_retry.__globals__["subprocess"]
+        old_cache = orchestrator._STATE_ENGINE_CACHE
+        old_mode = os.environ.get("STATE_ENGINE_MODE")
+        old_transitions = orchestrator.TRANSITIONS_LOG
+        old_events = orchestrator.EVENTS_LOG
+        old_append_metric = orchestrator.append_metric
+        orchestrator.QUEUE_ROOT = root / "queue"
+        orchestrator.TRANSITIONS_LOG = root / "state" / "runtime" / "transitions.jsonl"
+        orchestrator.EVENTS_LOG = root / "state" / "runtime" / "events.jsonl"
+        orchestrator.append_metric = lambda *args, **kwargs: {}
+        orchestrator.reset_task_for_retry.__globals__["subprocess"] = subprocess
+        orchestrator._STATE_ENGINE_CACHE = {"key": None, "engine": None}
+        os.environ["STATE_ENGINE_MODE"] = "off"
+        try:
+            for state in orchestrator.STATES:
+                (orchestrator.QUEUE_ROOT / state).mkdir(parents=True, exist_ok=True)
+            task = orchestrator.new_task(
+                role="implementer",
+                engine="codex",
+                project="lvc-standard",
+                summary="Implement snapshot writer",
+                source="scenario",
+                braid_template="lvc-implement-operator",
+                engine_args={"slice": {"id": "slice-1", "depends_on": [], "execution_path": "slice-1", "plan": []}},
+            )
+            task["task_id"] = "task-ull"
+            task["state"] = "running"
+            task["attempt"] = 1
+            orchestrator.write_json_atomic(orchestrator.task_path("task-ull", "running"), task)
+            findings = [
+                "core/src/main/java/com/joshorig/ull/lvc/metrics/LvcMetricsRegistry.java: contains `synchronized`; ULL/hot-path code must avoid monitor-based locking.",
+                "store/src/test/java/com/joshorig/ull/lvc/store/mmap/MmapStoreSnapshotTest.java: contains blocking coordination primitive; ULL hot paths must avoid blocking synchronization.",
+            ]
+            worker._retry_task_for_ull_lock_guard(task, findings, from_state="running")
+            queued = orchestrator.read_json(orchestrator.task_path("task-ull", "queued"), {})
+            prompt = worker.build_codex_prompt(queued, "graph", "memory")
+        finally:
+            orchestrator.QUEUE_ROOT = old_root
+            orchestrator.TRANSITIONS_LOG = old_transitions
+            orchestrator.EVENTS_LOG = old_events
+            orchestrator.append_metric = old_append_metric
+            orchestrator.reset_task_for_retry.__globals__["subprocess"] = old_subprocess
+            orchestrator._STATE_ENGINE_CACHE = old_cache
+            if old_mode is None:
+                os.environ.pop("STATE_ENGINE_MODE", None)
+            else:
+                os.environ["STATE_ENGINE_MODE"] = old_mode
+    history = list(queued.get("attempt_history") or [])
+    snap = (history[0] or {}).get("snapshot") or {}
+    blocker = snap.get("blocker") or {}
+    retry_ctx = ((queued.get("engine_args") or {}).get("retry_context") or {})
+    return {
+        "state": queued.get("state"),
+        "attempt": queued.get("attempt"),
+        "retry_kind": retry_ctx.get("kind"),
+        "retry_findings_count": len(retry_ctx.get("findings") or []),
+        "history_blocker_code": blocker.get("code"),
+        "history_failure": snap.get("failure"),
+        "prompt_has_retry_context": "[RETRY CONTEXT]" in prompt and "ULL lock guard" in prompt and "contains `synchronized`" in prompt,
+    }
+
+
 def _run_feature_finalize_planner_live_no_children(repo_root, scenario):
     orchestrator, _worker = _load_repo_modules(repo_root)
     feature = {
@@ -6049,6 +6116,8 @@ def main(argv):
         actual = _run_slice_alias_custom_id_not_hijacked(repo_root, scenario)
     elif kind == "slice_context_block_handles_null_plan":
         actual = _run_slice_context_block_handles_null_plan(repo_root, scenario)
+    elif kind == "ull_lock_guard_retries_with_context":
+        actual = _run_ull_lock_guard_retries_with_context(repo_root, scenario)
     else:
         raise SystemExit(f"unknown scenario kind: {kind}")
 
