@@ -6,8 +6,9 @@
   <string>com.devmini.orchestrator.dashboard-feed</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/python3</string>
-    <string>/Volumes/devssd/orchestrator/bin/dashboard_feed.py</string>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>set -a; source /Volumes/devssd/orchestrator/config/runtime.env; set +a; exec /opt/homebrew/bin/python3 /Volumes/devssd/orchestrator/bin/dashboard_feed.py</string>
   </array>
   <key>WorkingDirectory</key>
   <string>/Volumes/devssd/orchestrator</string>

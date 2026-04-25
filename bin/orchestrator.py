@@ -25,6 +25,7 @@ import ipaddress
 import json
 import os
 import pathlib
+import plistlib
 import re
 import shutil
 import subprocess
@@ -37,6 +38,8 @@ STATE_ROOT = pathlib.Path(__file__).resolve().parent.parent
 DEV_ROOT = pathlib.Path(os.environ.get("DEV_ROOT", str(STATE_ROOT.parent)))
 CONFIG_LOCAL_PATH = STATE_ROOT / "config" / "orchestrator.local.json"
 CONFIG_EXAMPLE_PATH = STATE_ROOT / "config" / "orchestrator.example.json"
+RUNTIME_ENV_PATH = STATE_ROOT / "config" / "runtime.env"
+RUNTIME_ENV_EXAMPLE_PATH = STATE_ROOT / "config" / "runtime.env.example"
 CONTEXT_SOURCES_LOCAL_PATH = STATE_ROOT / "config" / "context-sources.json"
 CONTEXT_SOURCES_EXAMPLE_PATH = STATE_ROOT / "config" / "context-sources.example.json"
 GH_TOKEN_PATH = STATE_ROOT / "config" / "gh-token"
@@ -46,6 +49,7 @@ GITIGNORED_OPERATOR_CONFIGS = (
     "config/context-sources.json",
     "config/telegram.json",
     "config/claude.env",
+    "config/runtime.env",
 )
 QUEUE_ROOT = STATE_ROOT / "queue"
 AGENT_STATE_DIR = STATE_ROOT / "state" / "agents"
@@ -10879,6 +10883,91 @@ def _workflow_check_worker_plists():
 def orchestrator_launch_agent_plists():
     home = pathlib.Path.home() / "Library" / "LaunchAgents"
     return sorted(home.glob("com.devmini.orchestrator*.plist"))
+
+
+def launchd_runtime_env_prefix(runtime_env_path=RUNTIME_ENV_PATH):
+    """Return the shell prefix every orchestrator LaunchAgent should use.
+
+    >>> launchd_runtime_env_prefix(pathlib.Path("/tmp/runtime.env"))
+    'set -a; source /tmp/runtime.env; set +a; '
+    """
+    return f"set -a; source {runtime_env_path}; set +a; "
+
+
+def launchd_command_sources_runtime_env(command, runtime_env_path=RUNTIME_ENV_PATH):
+    """Return True when a launchd shell command sources the shared runtime env.
+
+    >>> launchd_command_sources_runtime_env("set -a; source /x/runtime.env; set +a; exec worker", pathlib.Path("/x/runtime.env"))
+    True
+    >>> launchd_command_sources_runtime_env("exec worker", pathlib.Path("/x/runtime.env"))
+    False
+    """
+    text = str(command or "")
+    env = str(runtime_env_path)
+    return bool(
+        re.search(r"(^|[;&]\s*)source\s+" + re.escape(env) + r"(\s|[;&]|$)", text)
+        and "set -a" in text
+        and "set +a" in text
+    )
+
+
+def launchd_plist_runtime_env_status(plist_path, runtime_env_path=RUNTIME_ENV_PATH):
+    """Inspect one LaunchAgent plist for the shared runtime env source contract.
+
+    >>> import tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     p = pathlib.Path(tmp) / "ok.plist"
+    ...     _ = p.write_bytes(plistlib.dumps({"Label": "com.devmini.orchestrator.worker.codex", "ProgramArguments": ["/bin/bash", "-c", "set -a; source /tmp/runtime.env; set +a; exec worker"]}))
+    ...     launchd_plist_runtime_env_status(p, pathlib.Path("/tmp/runtime.env"))["ok"]
+    True
+    """
+    path = pathlib.Path(plist_path)
+    try:
+        data = plistlib.loads(path.read_bytes())
+    except Exception as exc:
+        return {
+            "plist": str(path),
+            "label": path.stem,
+            "ok": False,
+            "reason": f"plist_parse_failed: {exc}",
+        }
+    args = list(data.get("ProgramArguments") or [])
+    label = data.get("Label") or path.stem
+    command = args[2] if len(args) >= 3 and args[0] in ("/bin/bash", "/bin/sh") and args[1] == "-c" else ""
+    ok = bool(command and launchd_command_sources_runtime_env(command, runtime_env_path))
+    return {
+        "plist": str(path),
+        "label": label,
+        "ok": ok,
+        "reason": "ok" if ok else "ProgramArguments must run /bin/bash -c and source config/runtime.env",
+        "program": args[:3],
+    }
+
+
+def launchd_runtime_env_contract(plist_paths=None, runtime_env_path=RUNTIME_ENV_PATH):
+    """Validate the runtime env source contract for orchestrator launchd plists.
+
+    >>> import tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     good = root / "com.devmini.orchestrator.worker.codex.plist"
+    ...     bad = root / "com.devmini.orchestrator.worker.claude.plist"
+    ...     _ = good.write_bytes(plistlib.dumps({"Label": "com.devmini.orchestrator.worker.codex", "ProgramArguments": ["/bin/bash", "-c", "set -a; source /tmp/runtime.env; set +a; exec worker"]}))
+    ...     _ = bad.write_bytes(plistlib.dumps({"Label": "com.devmini.orchestrator.worker.claude", "ProgramArguments": ["/opt/homebrew/bin/python3", "bin/worker.py"]}))
+    ...     out = launchd_runtime_env_contract([good, bad], pathlib.Path("/tmp/runtime.env"))
+    ...     (out["checked"], out["ok"], out["missing"])
+    (2, False, ['com.devmini.orchestrator.worker.claude'])
+    """
+    paths = list(plist_paths) if plist_paths is not None else orchestrator_launch_agent_plists()
+    rows = [launchd_plist_runtime_env_status(path, runtime_env_path) for path in paths]
+    missing = [row["label"] for row in rows if not row.get("ok")]
+    return {
+        "checked": len(rows),
+        "ok": not missing,
+        "missing": missing,
+        "runtime_env_path": str(runtime_env_path),
+        "rows": rows,
+    }
 
 
 def restart_orchestrator_launch_agents(*, exclude_labels=None):

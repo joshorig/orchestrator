@@ -232,6 +232,14 @@ The live runtime counter file (untracked, gitignored) holds one entry per task t
 
 The orchestrator is launchd-driven. All plists live in `~/Library/LaunchAgents/com.devmini.orchestrator.*.plist`:
 
+Every LaunchAgent must source the shared non-secret runtime environment before executing:
+
+```bash
+set -a; source /Volumes/devssd/orchestrator/config/runtime.env; set +a; exec ...
+```
+
+`config/runtime.env` is local and gitignored; seed it from `config/runtime.env.example`. Secrets stay in their dedicated files such as `config/claude.env`, `config/gh-token`, and the Telegram token store.
+
 | Plist | Cadence | Purpose |
 |---|---|---|
 | `worker.claude` / `worker.qa` | KeepAlive + ThrottleInterval | One task per run |

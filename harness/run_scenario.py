@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import pathlib
+import plistlib
 import shutil
 import signal
 import sqlite3
@@ -58,7 +59,7 @@ def _scenario_cluster(name, scenario_kind):
         "clean_state_wipe_and_restart",
     }:
         return "state-engine"
-    if scenario_kind in {"telegram_surface", "task_cost_capture", "supply_chain_gate", "security_secret_gate", "untrusted_skill_refusal"}:
+    if scenario_kind in {"telegram_surface", "task_cost_capture", "supply_chain_gate", "security_secret_gate", "untrusted_skill_refusal", "launchd_runtime_env_contract"}:
         return "wave-c"
     if scenario_kind in {"review_feedback_exhaustion", "issue_replan_cap", "self_repair_resolution", "self_repair_observation",
                          "observation_orphan", "observation_idempotent", "clock_skew_backward", "council_timeout",
@@ -6640,6 +6641,38 @@ def _run_untrusted_skill_refusal(repo_root, scenario):
         }
 
 
+def _run_launchd_runtime_env_contract(repo_root, scenario):
+    orchestrator, _worker = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        runtime_env = root / "runtime.env"
+        runtime_env.write_text("DEV_ROOT=/Volumes/devssd\n")
+        labels = list(scenario.get("labels") or [])
+        plists = []
+        for label in labels:
+            plist = root / f"{label}.plist"
+            command = (
+                f"set -a; source {runtime_env}; set +a; "
+                f"exec /opt/homebrew/bin/python3 /Volumes/devssd/orchestrator/bin/orchestrator.py status"
+            )
+            plist.write_bytes(
+                plistlib.dumps(
+                    {
+                        "Label": label,
+                        "ProgramArguments": ["/bin/bash", "-c", command],
+                    }
+                )
+            )
+            plists.append(plist)
+        result = orchestrator.launchd_runtime_env_contract(plists, runtime_env)
+        return {
+            "checked": result["checked"],
+            "ok": result["ok"],
+            "missing": result["missing"],
+            "labels": [row["label"] for row in result["rows"]],
+        }
+
+
 def main(argv):
     if len(argv) < 2 or len(argv) > 3:
         raise SystemExit("usage: harness/run_scenario.py <scenario-dir> | summary [runs-dir]")
@@ -6875,6 +6908,8 @@ def main(argv):
         actual = _run_review_feedback_challenge(repo_root, scenario)
     elif kind == "untrusted_skill_refusal":
         actual = _run_untrusted_skill_refusal(repo_root, scenario)
+    elif kind == "launchd_runtime_env_contract":
+        actual = _run_launchd_runtime_env_contract(repo_root, scenario)
     elif kind == "self_repair_review_state_live":
         actual = _run_self_repair_review_state_live(repo_root, scenario)
     elif kind == "orchestrator_template_candidate_only":

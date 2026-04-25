@@ -1,0 +1,19 @@
+{
+  "kind": "launchd_runtime_env_contract",
+  "scenario_version": 1,
+  "wall_time_budget": 5.0,
+  "labels": [
+    "com.devmini.orchestrator.worker.claude",
+    "com.devmini.orchestrator.worker.codex",
+    "com.devmini.orchestrator.worker.codex-2",
+    "com.devmini.orchestrator.worker.codex-3",
+    "com.devmini.orchestrator.worker.qa",
+    "com.devmini.orchestrator.planner",
+    "com.devmini.orchestrator.reviewer",
+    "com.devmini.orchestrator.qa-scheduler",
+    "com.devmini.orchestrator.workflow-check",
+    "com.devmini.orchestrator.dashboard-feed",
+    "com.devmini.orchestrator.dashboard-server",
+    "com.devmini.orchestrator.telegram-bot"
+  ]
+}
