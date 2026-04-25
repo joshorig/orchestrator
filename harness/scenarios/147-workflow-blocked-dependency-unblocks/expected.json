@@ -1,0 +1,23 @@
+{
+  "story": "blocked_dependency_unblocks",
+  "final_status": "done",
+  "final_issue": false,
+  "has_live_work": false,
+  "frontier_state": null,
+  "snapshots": [
+    {
+      "label": "blocked-dependency",
+      "frontier": "task-1",
+      "state": "blocked",
+      "issue_action": "retry_task",
+      "issue_policy": "template_missing_retry"
+    },
+    {
+      "label": "after-upstream",
+      "frontier": "task-2",
+      "state": "queued",
+      "issue_action": null,
+      "issue_policy": null
+    }
+  ]
+}

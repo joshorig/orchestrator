@@ -1,0 +1,31 @@
+{
+  "story": "deadend_sweep",
+  "checked": [
+    {
+      "task_id": "task-template",
+      "action": "retry_task",
+      "policy": "template_missing_retry",
+      "diagnosis": true
+    },
+    {
+      "task_id": "task-worker",
+      "action": "retry_task",
+      "policy": "worker_crash_retry",
+      "diagnosis": true
+    },
+    {
+      "task_id": "task-model",
+      "action": "retry_task",
+      "policy": "model_output_retry",
+      "diagnosis": true
+    },
+    {
+      "task_id": "task-qa",
+      "action": "retry_task",
+      "policy": "qa_smoke_retry",
+      "diagnosis": true
+    }
+  ],
+  "all_have_action": true,
+  "silent_deadends": []
+}

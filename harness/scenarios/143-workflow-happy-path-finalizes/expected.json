@@ -1,0 +1,23 @@
+{
+  "story": "happy_path_finalizes",
+  "final_status": "done",
+  "final_issue": false,
+  "has_live_work": false,
+  "frontier_state": null,
+  "snapshots": [
+    {
+      "label": "initial",
+      "frontier": "task-1",
+      "state": "queued",
+      "issue_action": null,
+      "issue_policy": null
+    },
+    {
+      "label": "after-slice-1",
+      "frontier": "task-2",
+      "state": "queued",
+      "issue_action": null,
+      "issue_policy": null
+    }
+  ]
+}

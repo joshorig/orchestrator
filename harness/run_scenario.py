@@ -47,6 +47,8 @@ def _write_json(path, payload):
 def _scenario_cluster(name, scenario_kind):
     if name.startswith("runner-r") or scenario_kind in {"runner_fixture_restore", "runner_trace_dirs", "runner_version_budgets", "runner_summary"}:
         return "runner"
+    if scenario_kind == "workflow_e2e_story":
+        return "workflow-e2e"
     if scenario_kind in {
         "state_engine_mirror", "fs_to_engine_migration", "atomic_claim_concurrency", "atomic_claim_concurrency_10",
         "kill9_integrity", "backup_roundtrip", "wal_backup_restore", "corrupt_db_fallback", "disk_full_insert",
@@ -4995,6 +4997,322 @@ def _run_frontier_surfaces_blocked_dependency(repo_root, scenario):
     }
 
 
+def _run_workflow_e2e_story(repo_root, scenario):
+    orchestrator, worker = _load_repo_modules(repo_root)
+    story = scenario["story"]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        queue_root = root / "queue"
+        features_dir = root / "features"
+        runtime_dir = root / "runtime"
+        reports_dir = root / "reports"
+        for state in orchestrator.STATES:
+            (queue_root / state).mkdir(parents=True, exist_ok=True)
+        features_dir.mkdir(parents=True, exist_ok=True)
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        templates_dir = root / "templates"
+        templates_dir.mkdir()
+        (templates_dir / "lvc-implement-operator.mmd").write_text("flowchart TD\nStart[Start] --> End[End]\n")
+        (templates_dir / "review-address-feedback.mmd").write_text("flowchart TD\nStart[Start] --> End[End]\n")
+
+        old_env = {"STATE_ENGINE_MODE": os.environ.get("STATE_ENGINE_MODE")}
+        old = {
+            "QUEUE_ROOT": orchestrator.QUEUE_ROOT,
+            "FEATURES_DIR": orchestrator.FEATURES_DIR,
+            "RUNTIME_DIR": orchestrator.RUNTIME_DIR,
+            "TRANSITIONS_LOG": orchestrator.TRANSITIONS_LOG,
+            "EVENTS_LOG": orchestrator.EVENTS_LOG,
+            "METRICS_LOG": orchestrator.METRICS_LOG,
+            "REPORT_DIR": orchestrator.REPORT_DIR,
+            "PROJECT_HARD_STOPS_PATH": orchestrator.PROJECT_HARD_STOPS_PATH,
+            "BRAID_TEMPLATES": orchestrator.BRAID_TEMPLATES,
+            "load_config": orchestrator.load_config,
+            "emit_runtime_metrics_snapshot": orchestrator.emit_runtime_metrics_snapshot,
+            "write_agent_status": orchestrator.write_agent_status,
+            "reap": orchestrator.reap,
+            "environment_health": orchestrator.environment_health,
+            "project_environment_ok": orchestrator.project_environment_ok,
+            "project_hard_stopped": orchestrator.project_hard_stopped,
+            "_nudge_engine_workers": orchestrator._nudge_engine_workers,
+            "_write_pr_alert": orchestrator._write_pr_alert,
+            "_write_workflow_check_report": orchestrator._write_workflow_check_report,
+            "tick_self_repair_resolution": orchestrator.tick_self_repair_resolution,
+            "tick_self_repair_queue": orchestrator.tick_self_repair_queue,
+            "_workflow_check_restart_workers": orchestrator._workflow_check_restart_workers,
+        }
+        old_worker_o = worker.o
+        alerts = []
+        os.environ["STATE_ENGINE_MODE"] = "off"
+        orchestrator.QUEUE_ROOT = queue_root
+        orchestrator.FEATURES_DIR = features_dir
+        orchestrator.RUNTIME_DIR = runtime_dir
+        orchestrator.TRANSITIONS_LOG = runtime_dir / "transitions.log"
+        orchestrator.EVENTS_LOG = runtime_dir / "events.jsonl"
+        orchestrator.METRICS_LOG = runtime_dir / "metrics.jsonl"
+        orchestrator.REPORT_DIR = reports_dir
+        orchestrator.PROJECT_HARD_STOPS_PATH = runtime_dir / "project-hard-stops.json"
+        orchestrator.BRAID_TEMPLATES = templates_dir
+        orchestrator.load_config = lambda: {
+            "workflow_check_max_attempts": int(scenario.get("max_attempts", 3)),
+            "projects": [
+                {"name": "lvc-standard", "path": str(root / "lvc")},
+                {"name": "devmini-orchestrator", "path": str(root / "orchestrator")},
+            ],
+            "synthetic_canary": {"enabled": False},
+        }
+        orchestrator.emit_runtime_metrics_snapshot = lambda **kwargs: None
+        orchestrator.write_agent_status = lambda *args, **kwargs: None
+        orchestrator.reap = lambda: 0
+        orchestrator.environment_health = lambda refresh=False: {"ok": True, "issues": []}
+        orchestrator.project_environment_ok = lambda project_name, refresh=False: True
+        orchestrator.project_hard_stopped = lambda project_name: False
+        orchestrator._nudge_engine_workers = lambda engine: []
+        orchestrator._write_pr_alert = lambda *args, **kwargs: alerts.append(args) or "alert.md"
+        orchestrator._write_workflow_check_report = lambda issues, reaped=0: None
+        orchestrator.tick_self_repair_resolution = lambda: {"resolved": 0, "stalled": 0}
+        orchestrator.tick_self_repair_queue = lambda: {"scheduled": 0}
+        orchestrator._workflow_check_restart_workers = lambda: (["worker.codex"], [])
+        worker.o = orchestrator
+
+        def write_feature(feature):
+            orchestrator.write_json_atomic(features_dir / f"{feature['feature_id']}.json", feature)
+
+        def read_feature():
+            return orchestrator.read_json(features_dir / "feature-e2e.json", {})
+
+        def set_feature_status(status):
+            orchestrator.update_feature("feature-e2e", lambda f: f.update({"status": status, "finished_at": orchestrator.now_iso()}))
+
+        def add_task(task_id, state, *, role="implementer", engine="codex", source="scenario", depends_on=None, blocker=None, summary=None, parent_task_id=None, braid_template="lvc-implement-operator", engine_args=None):
+            task = orchestrator.new_task(
+                role=role,
+                engine=engine,
+                project="lvc-standard",
+                summary=summary or task_id,
+                source=source,
+                feature_id="feature-e2e",
+                parent_task_id=parent_task_id,
+                braid_template=braid_template,
+                engine_args=engine_args or {},
+                depends_on=depends_on or [],
+            )
+            task["task_id"] = task_id
+            task["state"] = state
+            task["created_at"] = f"2026-04-25T06:{len(list(orchestrator.iter_tasks(states=orchestrator.STATES))) % 60:02d}:00"
+            if blocker:
+                task["blocker"] = blocker
+            orchestrator.write_json_atomic(orchestrator.task_path(task_id, state), task)
+            return task
+
+        def move(task_id, from_state, to_state, reason):
+            orchestrator.move_task(task_id, from_state, to_state, reason=reason)
+
+        def snapshot(label):
+            feature = read_feature()
+            workflow = orchestrator.feature_workflow_summary(feature)
+            issue = orchestrator._workflow_issue_from_summary(feature, workflow, orchestrator.load_config()) if feature else None
+            return {
+                "label": label,
+                "frontier": (workflow.get("frontier") or {}).get("task_id"),
+                "state": (workflow.get("frontier") or {}).get("state"),
+                "issue_action": issue.get("action") if issue else None,
+                "issue_policy": issue.get("policy") if issue else None,
+            }
+
+        try:
+            feature = {
+                "feature_id": "feature-e2e",
+                "status": "open",
+                "project": "lvc-standard",
+                "summary": f"e2e {story}",
+                "child_task_ids": [],
+                "created_at": "2026-04-25T06:00:00",
+            }
+            write_feature(feature)
+            add_task("task-plan", "done", role="planner", engine="claude", source="tick-planner", braid_template=None)
+
+            snapshots = []
+            if story == "happy_path_finalizes":
+                add_task("task-1", "queued", summary="slice one")
+                add_task("task-2", "queued", summary="slice two", depends_on=["task-1"])
+                orchestrator.append_feature_child("feature-e2e", "task-1")
+                orchestrator.append_feature_child("feature-e2e", "task-2")
+                snapshots.append(snapshot("initial"))
+                move("task-1", "queued", "running", "worker claimed")
+                move("task-1", "running", "done", "implemented")
+                snapshots.append(snapshot("after-slice-1"))
+                move("task-2", "queued", "running", "dependency satisfied")
+                move("task-2", "running", "awaiting-review", "ready for review")
+                move("task-2", "awaiting-review", "awaiting-qa", "review approved")
+                move("task-2", "awaiting-qa", "done", "qa passed")
+                set_feature_status("done")
+
+            elif story == "review_retry_then_approve":
+                target = add_task("task-1", "awaiting-review", summary="needs review", engine_args={"slice": {"id": "slice-1"}})
+                orchestrator.append_feature_child("feature-e2e", "task-1")
+                worker._handle_review_request_change(
+                    "reviewer-1",
+                    "lvc-standard",
+                    target,
+                    "missing assertion",
+                    lambda t: t.update({"reviewed_by": "reviewer-1"}),
+                )
+                feedback = next(t for t in orchestrator.iter_tasks(states=("queued",)) if str(t.get("source") or "").startswith("review-feedback:"))
+                snapshots.append(snapshot("feedback-enqueued"))
+                move(feedback["task_id"], "queued", "running", "feedback claimed")
+                move(feedback["task_id"], "running", "done", "feedback applied")
+                move("task-1", "queued", "awaiting-review", "feedback returned")
+                move("task-1", "awaiting-review", "awaiting-qa", "review approved")
+                move("task-1", "awaiting-qa", "done", "qa passed")
+                set_feature_status("done")
+
+            elif story == "review_exhaustion_replans":
+                target = add_task(
+                    "task-old-1",
+                    "awaiting-review",
+                    summary="old slice",
+                    engine_args={"slice": {"id": "slice-1", "execution_path": "slice-1 -> slice-2"}},
+                )
+                target["parent_task_id"] = "task-plan"
+                target["review_feedback_rounds"] = 4
+                orchestrator.write_json_atomic(orchestrator.task_path("task-old-1", "awaiting-review"), target)
+                add_task("task-old-2", "queued", summary="old dependent", depends_on=["task-old-1"], parent_task_id="task-plan")
+                orchestrator.append_feature_child("feature-e2e", "task-old-1")
+                orchestrator.append_feature_child("feature-e2e", "task-old-2")
+                worker._handle_review_request_change(
+                    "reviewer-1",
+                    "lvc-standard",
+                    target,
+                    "still wrong",
+                    lambda t: t.update({"reviewed_by": "reviewer-1"}),
+                )
+                planner = next(t for t in orchestrator.iter_tasks(states=("queued",), engine="claude") if (t.get("engine_args") or {}).get("mode") == "planner-refine")
+                move(planner["task_id"], "queued", "done", "planner refined")
+                orchestrator.remove_feature_children("feature-e2e", ["task-old-1", "task-old-2"])
+                add_task("task-new-1", "queued", summary="replacement slice", parent_task_id=planner["task_id"])
+                orchestrator.append_feature_child("feature-e2e", "task-new-1")
+                move("task-new-1", "queued", "running", "replacement claimed")
+                move("task-new-1", "running", "done", "replacement complete")
+                orchestrator.update_feature("feature-e2e", lambda f: f.update({"child_task_ids": ["task-new-1"]}))
+                set_feature_status("done")
+
+            elif story == "template_refine_retry":
+                blocker = orchestrator.make_blocker(
+                    "template_missing",
+                    summary="BRAID template context unavailable",
+                    detail="template now exists",
+                    source="worker",
+                    retryable=True,
+                )
+                add_task("task-1", "blocked", summary="template blocked", blocker=blocker)
+                orchestrator.append_feature_child("feature-e2e", "task-1")
+                snapshots.append(snapshot("blocked"))
+                out = orchestrator.tick_workflow_check()
+                snapshots.append({"label": "workflow-check", "issues": out.get("issues")})
+                move("task-1", "queued", "running", "retry claimed")
+                move("task-1", "running", "done", "template retry complete")
+                set_feature_status("done")
+
+            elif story == "blocked_dependency_unblocks":
+                blocker = orchestrator.make_blocker(
+                    "template_missing",
+                    summary="BRAID template context unavailable",
+                    detail="template now exists",
+                    source="worker",
+                    retryable=True,
+                )
+                add_task("task-1", "blocked", summary="blocked upstream", blocker=blocker)
+                add_task("task-2", "queued", summary="dependent", depends_on=["task-1"])
+                orchestrator.append_feature_child("feature-e2e", "task-1")
+                orchestrator.append_feature_child("feature-e2e", "task-2")
+                snapshots.append(snapshot("blocked-dependency"))
+                orchestrator.tick_workflow_check()
+                move("task-1", "queued", "running", "retry claimed")
+                move("task-1", "running", "done", "upstream done")
+                snapshots.append(snapshot("after-upstream"))
+                move("task-2", "queued", "running", "dependent claimed")
+                move("task-2", "running", "done", "dependent done")
+                set_feature_status("done")
+
+            elif story == "qa_fail_retry_then_pass":
+                blocker = orchestrator.make_blocker(
+                    "qa_smoke_failed",
+                    summary="QA smoke failed",
+                    detail="first pass failed",
+                    source="qa",
+                    retryable=True,
+                )
+                add_task("task-1", "blocked", role="qa", engine="qa", summary="qa blocked", blocker=blocker, braid_template=None)
+                orchestrator.append_feature_child("feature-e2e", "task-1")
+                snapshots.append(snapshot("qa-blocked"))
+                orchestrator.tick_workflow_check()
+                move("task-1", "queued", "running", "qa retry claimed")
+                move("task-1", "running", "done", "qa passed")
+                set_feature_status("done")
+
+            elif story == "deadend_sweep":
+                blockers = [
+                    ("task-template", "template_missing", "lvc-implement-operator"),
+                    ("task-worker", "worker_crash", "lvc-implement-operator"),
+                    ("task-model", "model_output_invalid", "lvc-implement-operator"),
+                    ("task-qa", "qa_smoke_failed", None),
+                ]
+                for task_id, code, template in blockers:
+                    add_task(
+                        task_id,
+                        "blocked",
+                        role="qa" if code == "qa_smoke_failed" else "implementer",
+                        engine="qa" if code == "qa_smoke_failed" else "codex",
+                        summary=f"blocked {code}",
+                        blocker=orchestrator.make_blocker(code, summary=code, detail=code, source="scenario", retryable=True),
+                        braid_template=template,
+                    )
+                    orchestrator.append_feature_child("feature-e2e", task_id)
+                checked = []
+                for task_id, _, _ in blockers:
+                    task = orchestrator.find_task(task_id)[1]
+                    issue = {
+                        "kind": "frontier_task_blocked",
+                        "task_state": "blocked",
+                        "blocker": orchestrator.task_blocker(task),
+                    }
+                    action, diagnosis, policy = orchestrator._workflow_policy_decision(issue, task, {"name": "lvc-standard", "path": str(root / "lvc")})
+                    checked.append({"task_id": task_id, "action": action, "policy": policy, "diagnosis": bool(diagnosis)})
+                return {
+                    "story": story,
+                    "checked": checked,
+                    "all_have_action": all(item["action"] for item in checked),
+                    "silent_deadends": [item["task_id"] for item in checked if not item["action"]],
+                }
+            else:
+                raise AssertionError(f"unknown workflow e2e story: {story}")
+
+            final_feature = read_feature()
+            final_workflow = orchestrator.feature_workflow_summary(final_feature)
+            final_issue = (
+                orchestrator._workflow_issue_from_summary(final_feature, final_workflow, orchestrator.load_config())
+                if final_feature.get("status") in ("open", "finalizing") else None
+            )
+            return {
+                "story": story,
+                "final_status": final_feature.get("status"),
+                "final_issue": bool(final_issue),
+                "has_live_work": final_workflow.get("has_live_work"),
+                "frontier_state": (final_workflow.get("frontier") or {}).get("state") if final_issue else None,
+                "snapshots": snapshots,
+            }
+        finally:
+            for key, value in old.items():
+                setattr(orchestrator, key, value)
+            worker.o = old_worker_o
+            if old_env["STATE_ENGINE_MODE"] is None:
+                os.environ.pop("STATE_ENGINE_MODE", None)
+            else:
+                os.environ["STATE_ENGINE_MODE"] = old_env["STATE_ENGINE_MODE"]
+
+
 def _run_ull_lock_guard_retries_with_context(repo_root, scenario):
     orchestrator, worker = _load_repo_modules(repo_root)
     with tempfile.TemporaryDirectory() as tmp:
@@ -6267,6 +6585,8 @@ def main(argv):
         actual = _run_slice_context_block_handles_null_plan(repo_root, scenario)
     elif kind == "frontier_surfaces_blocked_dependency":
         actual = _run_frontier_surfaces_blocked_dependency(repo_root, scenario)
+    elif kind == "workflow_e2e_story":
+        actual = _run_workflow_e2e_story(repo_root, scenario)
     elif kind == "ull_lock_guard_retries_with_context":
         actual = _run_ull_lock_guard_retries_with_context(repo_root, scenario)
     else:

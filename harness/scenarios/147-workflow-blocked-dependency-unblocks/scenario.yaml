@@ -1,0 +1,6 @@
+{
+  "kind": "workflow_e2e_story",
+  "scenario_version": 1,
+  "story": "blocked_dependency_unblocks",
+  "wall_time_budget": 10.0
+}

@@ -1,0 +1,20 @@
+{
+  "story": "template_refine_retry",
+  "final_status": "done",
+  "final_issue": false,
+  "has_live_work": false,
+  "frontier_state": null,
+  "snapshots": [
+    {
+      "label": "blocked",
+      "frontier": "task-1",
+      "state": "blocked",
+      "issue_action": "retry_task",
+      "issue_policy": "template_missing_retry"
+    },
+    {
+      "label": "workflow-check",
+      "issues": 1
+    }
+  ]
+}
