@@ -1,0 +1,8 @@
+{
+  "frontier_task_id": "task-blocked",
+  "frontier_state": "blocked",
+  "frontier_blocker_code": "template_missing",
+  "issue_task_id": "task-blocked",
+  "issue_action": "retry_task",
+  "issue_policy": "template_missing_retry"
+}

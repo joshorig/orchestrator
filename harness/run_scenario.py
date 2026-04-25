@@ -4911,6 +4911,90 @@ def _run_slice_context_block_handles_null_plan(repo_root, scenario):
     }
 
 
+def _run_frontier_surfaces_blocked_dependency(repo_root, scenario):
+    orchestrator, _worker = _load_repo_modules(repo_root)
+    feature = {
+        "feature_id": "feature-dep-blocked",
+        "status": "open",
+        "project": "lvc-standard",
+        "summary": "dependency blocked",
+        "child_task_ids": ["task-blocked", "task-dependent"],
+    }
+    tasks = {
+        "task-blocked": (
+            "blocked",
+            {
+                "task_id": "task-blocked",
+                "state": "blocked",
+                "project": "lvc-standard",
+                "feature_id": "feature-dep-blocked",
+                "role": "implementer",
+                "engine": "codex",
+                "depends_on": [],
+                "braid_template": "lvc-implement-operator",
+                "blocker": orchestrator.make_blocker(
+                    "template_missing",
+                    summary="BRAID template context unavailable",
+                    detail="template exists; retry should be offered",
+                    source="worker",
+                    retryable=True,
+                ),
+            },
+        ),
+        "task-dependent": (
+            "queued",
+            {
+                "task_id": "task-dependent",
+                "state": "queued",
+                "project": "lvc-standard",
+                "feature_id": "feature-dep-blocked",
+                "role": "implementer",
+                "engine": "codex",
+                "depends_on": ["task-blocked"],
+            },
+        ),
+    }
+    old = {
+        "find_task": orchestrator.find_task,
+        "task_state_entered_at": orchestrator.task_state_entered_at,
+        "_latest_feature_planner_task": orchestrator._latest_feature_planner_task,
+        "_feature_related_tasks": orchestrator._feature_related_tasks,
+        "read_events": orchestrator.read_events,
+        "BRAID_TEMPLATES": orchestrator.BRAID_TEMPLATES,
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            template_dir = pathlib.Path(tmp) / "templates"
+            template_dir.mkdir()
+            (template_dir / "lvc-implement-operator.mmd").write_text("flowchart TD\nA[Start] --> B[End]\n")
+            orchestrator.BRAID_TEMPLATES = template_dir
+            orchestrator.find_task = lambda task_id, states=orchestrator.STATES: tasks.get(task_id)
+            orchestrator.task_state_entered_at = lambda task_id, state: ("2026-04-25T06:00:00", "scenario")
+            orchestrator._latest_feature_planner_task = lambda feature_id: None
+            orchestrator._feature_related_tasks = lambda feature_id: [
+                {"task_id": task_id, "state": state, "task": task}
+                for task_id, (state, task) in tasks.items()
+            ]
+            orchestrator.read_events = lambda **kwargs: []
+            workflow = orchestrator.feature_workflow_summary(feature)
+            issue = orchestrator._workflow_issue_from_summary(
+                feature,
+                workflow,
+                {"projects": [{"name": "lvc-standard", "path": "/tmp/lvc-standard"}]},
+            )
+        finally:
+            for key, value in old.items():
+                setattr(orchestrator, key, value)
+    return {
+        "frontier_task_id": workflow["frontier"]["task_id"],
+        "frontier_state": workflow["frontier"]["state"],
+        "frontier_blocker_code": (workflow["frontier"]["blocker"] or {}).get("code"),
+        "issue_task_id": issue.get("task_id") if issue else None,
+        "issue_action": issue.get("action") if issue else None,
+        "issue_policy": issue.get("policy") if issue else None,
+    }
+
+
 def _run_ull_lock_guard_retries_with_context(repo_root, scenario):
     orchestrator, worker = _load_repo_modules(repo_root)
     with tempfile.TemporaryDirectory() as tmp:
@@ -6181,6 +6265,8 @@ def main(argv):
         actual = _run_slice_alias_custom_id_not_hijacked(repo_root, scenario)
     elif kind == "slice_context_block_handles_null_plan":
         actual = _run_slice_context_block_handles_null_plan(repo_root, scenario)
+    elif kind == "frontier_surfaces_blocked_dependency":
+        actual = _run_frontier_surfaces_blocked_dependency(repo_root, scenario)
     elif kind == "ull_lock_guard_retries_with_context":
         actual = _run_ull_lock_guard_retries_with_context(repo_root, scenario)
     else:

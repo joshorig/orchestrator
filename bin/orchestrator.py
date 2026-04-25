@@ -10568,6 +10568,39 @@ def _suppress_superseded_follow_ups(items):
     return kept
 
 
+def _unresolved_dependency_frontier(item, child_by_id, *, seen=None):
+    """Return the first unresolved dependency that makes a child non-runnable.
+
+    >>> child_by_id = {
+    ...     "task-a": {"task_id": "task-a", "state": "blocked", "task": {"task_id": "task-a", "depends_on": []}},
+    ...     "task-b": {"task_id": "task-b", "state": "queued", "task": {"task_id": "task-b", "depends_on": ["task-a"]}},
+    ... }
+    >>> _unresolved_dependency_frontier(child_by_id["task-b"], child_by_id)["task_id"]
+    'task-a'
+    """
+    task = item.get("task") or {}
+    deps = list(task.get("depends_on") or [])
+    if not deps:
+        return None
+    seen = set(seen or ())
+    seen.add(item.get("task_id"))
+    for dep_id in deps:
+        if dep_id in seen:
+            continue
+        dep_item = child_by_id.get(dep_id)
+        if dep_item is None:
+            found = find_task(dep_id)
+            dep_item = (
+                {"task_id": dep_id, "state": found[0], "task": found[1]}
+                if found else {"task_id": dep_id, "state": "missing", "task": None}
+            )
+        if dep_item.get("state") == "done":
+            continue
+        nested = _unresolved_dependency_frontier(dep_item, child_by_id, seen=seen)
+        return nested or dep_item
+    return None
+
+
 def feature_workflow_summary(feature):
     """Build a compact workflow summary with event-backed timing for the frontier task."""
     feature_id = feature.get("feature_id")
@@ -10609,9 +10642,21 @@ def feature_workflow_summary(feature):
         else:
             state, task = found
             children.append({"task_id": child_id, "state": state, "task": task})
+    child_by_id = {child["task_id"]: child for child in children}
 
     frontier = None
-    child_frontier = [child for child in children if child["state"] != "done"]
+    child_frontier = []
+    seen_frontier_ids = set()
+    for child in children:
+        if child["state"] == "done":
+            continue
+        dependency_frontier = _unresolved_dependency_frontier(child, child_by_id)
+        candidate = dependency_frontier or child
+        candidate_id = candidate.get("task_id")
+        if candidate_id in seen_frontier_ids:
+            continue
+        seen_frontier_ids.add(candidate_id)
+        child_frontier.append(candidate)
     if child_frontier:
         child_frontier.sort(key=frontier_sort_key)
         frontier = child_frontier[0]
@@ -11572,8 +11617,7 @@ def _workflow_issue_from_summary(feature, workflow, config):
         if found:
             state, task = found
             blocker = task_blocker(task)
-            action, diagnosis = _workflow_check_known_task_action(task, state, project)
-            return {
+            issue = {
                 "feature_id": feature_id,
                 "project": project["name"],
                 "summary": feature.get("summary") or feature_id,
@@ -11582,11 +11626,10 @@ def _workflow_issue_from_summary(feature, workflow, config):
                 "task_id": task["task_id"],
                 "task_state": state,
                 "blocker": blocker,
-                "diagnosis": diagnosis,
                 "workflow": workflow,
-                "action": action,
                 "task": task,
             }
+            return _issue_with_policy(issue, task, project)
     if feature_status == "open":
         if frontier.get("task_id") and frontier.get("state") not in (None, "done"):
             if frontier.get("state") == "awaiting-review" and (frontier.get("blocker") or {}).get("code"):
