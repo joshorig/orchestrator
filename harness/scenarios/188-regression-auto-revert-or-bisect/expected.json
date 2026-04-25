@@ -1,0 +1,6 @@
+{
+  "single_commit_action": "auto_revert_culprit_and_reopen_feature",
+  "single_commit_policy": "project_regression_auto_revert",
+  "multi_commit_action": "git_bisect_regression_test_then_revert",
+  "multi_commit_policy": "project_regression_bisect"
+}

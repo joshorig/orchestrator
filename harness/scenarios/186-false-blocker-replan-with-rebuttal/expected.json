@@ -1,0 +1,7 @@
+{
+  "policy_action": "replan_with_prior_false_claim_rebuttal",
+  "policy_name": "false_blocker_replan_with_rebuttal",
+  "task_requeued": true,
+  "retry_kind": "prior_false_claim",
+  "rebuttal_in_prompt_context": true
+}

@@ -1,0 +1,6 @@
+{
+  "policy_action": "pause_project_until_daily_reset",
+  "policy_name": "claude_budget_wait",
+  "slot_paused": true,
+  "resume_scheduled": true
+}

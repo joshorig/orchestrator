@@ -1,0 +1,6 @@
+{
+  "policy_action": "resolve_via_alias_map_then_retry",
+  "policy_name": "runtime_unknown_project_resolve_alias",
+  "resolved": true,
+  "project_rewritten": true
+}

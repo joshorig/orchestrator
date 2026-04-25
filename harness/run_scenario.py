@@ -59,7 +59,7 @@ def _scenario_cluster(name, scenario_kind):
         "clean_state_wipe_and_restart",
     }:
         return "state-engine"
-    if scenario_kind in {"telegram_surface", "task_cost_capture", "supply_chain_gate", "security_secret_gate", "untrusted_skill_refusal", "launchd_runtime_env_contract", "template_contract_yaml_validates", "blocker_tier_routing", "c2_assumption_discharge_blocks", "blocker_registry_refined"}:
+    if scenario_kind in {"telegram_surface", "task_cost_capture", "supply_chain_gate", "security_secret_gate", "untrusted_skill_refusal", "launchd_runtime_env_contract", "template_contract_yaml_validates", "blocker_tier_routing", "c2_assumption_discharge_blocks", "blocker_registry_refined", "tier4_credential_rotation_paged_not_auto", "false_blocker_replan_with_rebuttal", "claude_budget_daily_pause_resume", "regression_auto_revert_or_bisect", "runtime_env_network_backoff", "canary_auto_disable_reattempt", "runtime_unknown_project_alias"}:
         return "wave-c"
     if scenario_kind in {"review_feedback_exhaustion", "issue_replan_cap", "self_repair_resolution", "self_repair_observation",
                          "observation_orphan", "observation_idempotent", "clock_skew_backward", "council_timeout",
@@ -7374,8 +7374,8 @@ def _run_blocker_tier_routing(repo_root, scenario):
     return {
         "all_codes_have_tier": all(code in orchestrator.BLOCKER_TIER for code in orchestrator.BLOCKER_CODES),
         "tier_3_stops_codex": tier3_action is None and tier3_policy == "tier_3_autonomy_reduction",
-        "tier_4_opens_self_repair": tier4_action == "enqueue_self_repair_and_alert",
-        "tier_4_alerts_telegram": env_action == "enqueue_self_repair_and_alert" and env_policy == "environment_bypass_budget_alert",
+        "tier_3_attempt_exhausted_replans": tier4_action == "replan_feature_with_attempt_history_summary",
+        "transient_env_bypass_cooldown": env_action == "pause_project_for_cooldown_then_retry" and env_policy == "environment_bypass_budget_transient_cooldown",
         "tier_5_empty": 5 not in set(orchestrator.BLOCKER_TIER.values()),
         "deprecated_missing_child_alias_tier_3": missing_child_action is None and missing_child_policy == "tier_3_autonomy_reduction",
     }
@@ -7469,6 +7469,264 @@ def _run_blocker_registry_refined(repo_root, scenario):
         "daily_budget_classified": orchestrator.classify_claude_budget_blocker("daily budget limit exhausted") == "claude_budget_exhausted_daily",
         "monthly_budget_classified": orchestrator.classify_claude_budget_blocker("monthly billing period budget exhausted") == "claude_budget_exhausted_monthly",
         "qa_contract_classified": orchestrator.classify_qa_contract_blocker("QA contract fails schema", "yaml parse error") == "qa_contract_malformed",
+    }
+
+
+def _run_tier4_credential_rotation_paged_not_auto(repo_root, scenario):
+    orchestrator, _worker = _load_repo_modules(repo_root)
+    issue = {
+        "kind": "environment_degraded",
+        "task_state": "idle",
+        "blocker": orchestrator.make_blocker(
+            "runtime_env_dirty_credential",
+            summary="telegram bot token unavailable",
+            detail="missing token",
+            source="scenario",
+            retryable=False,
+        ),
+        "diagnosis": "credential rotation required",
+    }
+    action, diagnosis, policy = orchestrator._workflow_policy_decision(
+        issue,
+        None,
+        {"name": "global", "path": str(repo_root)},
+    )
+    return {
+        "action": action,
+        "policy": policy,
+        "mentions_credential": "credential" in diagnosis.lower(),
+        "no_auto_retry": action != "retry_task",
+    }
+
+
+def _run_false_blocker_replan_with_rebuttal(repo_root, scenario):
+    orchestrator, _worker = _load_repo_modules(repo_root)
+    task = {
+        "task_id": "task-false",
+        "state": "blocked",
+        "engine_args": {},
+        "blocker": orchestrator.make_blocker(
+            "false_blocker_claim",
+            summary="false blocker",
+            detail="claimed smoke red, but smoke is unrelated",
+            source="scenario",
+            retryable=True,
+        ),
+    }
+    old = {
+        "reset_task_for_retry": orchestrator.reset_task_for_retry,
+        "find_task": orchestrator.find_task,
+    }
+    captured = {}
+    try:
+        def fake_reset(task_id, from_state, *, reason, source=None, mutator=None):
+            retried = dict(task)
+            if mutator:
+                mutator(retried)
+            captured["task_id"] = task_id
+            captured["from_state"] = from_state
+            captured["reason"] = reason
+            captured["source"] = source
+            captured["task"] = retried
+
+        orchestrator.reset_task_for_retry = fake_reset
+        orchestrator.find_task = lambda task_id: ("queued", captured.get("task", task)) if task_id == "task-false" else None
+        action, _diagnosis, policy = orchestrator._workflow_policy_decision(
+            {"kind": "frontier_task_blocked", "task_state": "blocked", "blocker": task["blocker"]},
+            task,
+            {"name": "demo", "path": str(repo_root)},
+        )
+        ok = orchestrator._workflow_check_retry_task_with_context(
+            task,
+            "blocked",
+            "Previous run raised a false blocker claim. Rejected claim: claimed smoke red, but smoke is unrelated",
+            kind="prior_false_claim",
+            findings=["claimed smoke red, but smoke is unrelated"],
+        )
+    finally:
+        for key, value in old.items():
+            setattr(orchestrator, key, value)
+    retry_ctx = (((captured.get("task") or {}).get("engine_args") or {}).get("retry_context") or {})
+    return {
+        "policy_action": action,
+        "policy_name": policy,
+        "task_requeued": ok,
+        "retry_kind": retry_ctx.get("kind"),
+        "rebuttal_in_prompt_context": "false blocker" in (retry_ctx.get("reason") or "").lower(),
+    }
+
+
+def _run_claude_budget_daily_pause_resume(repo_root, scenario):
+    orchestrator, _worker = _load_repo_modules(repo_root)
+    task = {
+        "task_id": "task-budget",
+        "project": "demo",
+        "blocker": orchestrator.make_blocker(
+            "claude_budget_exhausted_daily",
+            summary="daily budget exhausted",
+            detail="daily budget limit exhausted",
+            source="scenario",
+            retryable=True,
+        ),
+    }
+    calls = []
+    old_slot_paused = orchestrator.slot_paused
+    old_set = orchestrator.set_slot_paused
+    old_event = orchestrator.append_event
+    try:
+        orchestrator.slot_paused = lambda slot: True
+        action, diagnosis, policy = orchestrator._workflow_policy_decision(
+            {"kind": "frontier_task_blocked", "task_state": "blocked", "blocker": task["blocker"]},
+            task,
+            {"name": "demo", "path": str(repo_root)},
+        )
+        orchestrator.set_slot_paused = lambda slot, paused, **kwargs: calls.append(("pause", slot, paused, kwargs)) or {"slot": slot, "paused": paused}
+        orchestrator.append_event = lambda *args, **kwargs: calls.append(("event", args, kwargs))
+        if action == "pause_project_until_daily_reset":
+            orchestrator.set_slot_paused("claude", True, reason=diagnosis, source="workflow-check")
+            orchestrator.append_event("workflow-check", "daily_budget_pause_until_reset", task_id=task["task_id"], details={"project": task["project"], "reset": "next UTC day"})
+    finally:
+        orchestrator.slot_paused = old_slot_paused
+        orchestrator.set_slot_paused = old_set
+        orchestrator.append_event = old_event
+    return {
+        "policy_action": action,
+        "policy_name": policy,
+        "slot_paused": any(call[0] == "pause" and call[1] == "claude" and call[2] is True for call in calls),
+        "resume_scheduled": any(call[0] == "event" and call[2].get("details", {}).get("reset") == "next UTC day" for call in calls),
+    }
+
+
+def _run_regression_auto_revert_or_bisect(repo_root, scenario):
+    orchestrator, _worker = _load_repo_modules(repo_root)
+    blocker = orchestrator.make_blocker(
+        "project_regression_failed",
+        summary="regression failed",
+        detail="post-merge regression failed",
+        source="scenario",
+        retryable=True,
+    )
+    auto_task = {"task_id": "task-regression-auto", "blocker": blocker, "finished_at": "2999-01-01T00:00:00"}
+    bisect_task = {"task_id": "task-regression-bisect", "blocker": blocker, "bisect_required": True, "finished_at": "2999-01-01T00:00:00"}
+    auto_action, _auto_diag, auto_policy = orchestrator._workflow_policy_decision(
+        {"kind": "frontier_task_blocked", "task_state": "blocked", "blocker": blocker},
+        auto_task,
+        {"name": "demo", "path": str(repo_root)},
+    )
+    bisect_action, _bisect_diag, bisect_policy = orchestrator._workflow_policy_decision(
+        {"kind": "frontier_task_blocked", "task_state": "blocked", "blocker": blocker},
+        bisect_task,
+        {"name": "demo", "path": str(repo_root)},
+    )
+    return {
+        "single_commit_action": auto_action,
+        "single_commit_policy": auto_policy,
+        "multi_commit_action": bisect_action,
+        "multi_commit_policy": bisect_policy,
+    }
+
+
+def _run_runtime_env_network_backoff(repo_root, scenario):
+    orchestrator, _worker = _load_repo_modules(repo_root)
+    blocker = orchestrator.make_blocker(
+        "runtime_env_dirty_network",
+        summary="fetch origin main failed",
+        detail="DNS lookup failed",
+        source="scenario",
+        retryable=True,
+    )
+    action, diagnosis, policy = orchestrator._workflow_policy_decision(
+        {"kind": "environment_degraded", "task_state": "idle", "blocker": blocker},
+        None,
+        {"name": "demo", "path": str(repo_root)},
+    )
+    return {
+        "policy_action": action,
+        "policy_name": policy,
+        "diagnosis_mentions_backoff": "back" in diagnosis.lower(),
+        "no_human_page": action != "push_alert",
+    }
+
+
+def _run_canary_auto_disable_reattempt(repo_root, scenario):
+    orchestrator, _worker = _load_repo_modules(repo_root)
+    issue = {
+        "feature_id": "feature-canary",
+        "project": "demo",
+        "diagnosis": "canary disabled after exhaustion",
+        "blocker": orchestrator.make_blocker(
+            "canary_recoverable",
+            summary="canary exhausted",
+            detail="primary and fallback canaries stale",
+            source="scenario",
+            retryable=False,
+        ),
+    }
+    action, _diagnosis, policy = orchestrator._workflow_policy_decision(
+        {"kind": "project_canary_health", "task_state": "idle", "blocker": issue["blocker"]},
+        None,
+        {"name": "demo", "path": str(repo_root)},
+    )
+    calls = []
+    old_write = orchestrator._write_local_config_patch
+    old_event = orchestrator.append_event
+    try:
+        orchestrator._write_local_config_patch = lambda mutator: calls.append(("config", mutator)) or {}
+        orchestrator.append_event = lambda *args, **kwargs: calls.append(("event", args, kwargs))
+        out = orchestrator._workflow_check_disable_canary_until_tomorrow(issue, {"synthetic_canary": {"enabled": True, "project": "demo"}})
+    finally:
+        orchestrator._write_local_config_patch = old_write
+        orchestrator.append_event = old_event
+    return {
+        "policy_action": action,
+        "policy_name": policy,
+        "disabled": out.get("disabled") is True,
+        "reattempt_scheduled": bool(out.get("reattempt_after")),
+        "event_emitted": any(call[0] == "event" and call[1][1] == "canary_auto_disabled" for call in calls),
+    }
+
+
+def _run_runtime_unknown_project_alias(repo_root, scenario):
+    orchestrator, _worker = _load_repo_modules(repo_root)
+    task = {
+        "task_id": "task-alias",
+        "project": "old-demo",
+        "engine_args": {},
+        "blocker": orchestrator.make_blocker(
+            "runtime_unknown_project",
+            summary="unknown project",
+            detail="unknown project: old-demo",
+            source="scenario",
+            retryable=True,
+        ),
+    }
+    cfg = {"projects": [{"name": "demo", "path": str(repo_root)}], "project_aliases": {"old-demo": "demo"}}
+    old_load = orchestrator.load_config
+    old_reset = orchestrator.reset_task_for_retry
+    captured = {}
+    try:
+        orchestrator.load_config = lambda: cfg
+        action, _diagnosis, policy = orchestrator._workflow_policy_decision(
+            {"kind": "frontier_task_blocked", "task_state": "blocked", "blocker": task["blocker"]},
+            task,
+            {"name": "demo", "path": str(repo_root)},
+        )
+        def fake_reset(task_id, from_state, *, reason, source=None, mutator=None):
+            retried = dict(task)
+            if mutator:
+                mutator(retried)
+            captured["task"] = retried
+            captured["reason"] = reason
+        orchestrator.reset_task_for_retry = fake_reset
+        out = orchestrator._workflow_check_resolve_unknown_project(task, "blocked", cfg, diagnosis="project alias resolved")
+    finally:
+        orchestrator.load_config = old_load
+        orchestrator.reset_task_for_retry = old_reset
+    return {
+        "policy_action": action,
+        "policy_name": policy,
+        "resolved": out.get("resolved") is True,
+        "project_rewritten": (captured.get("task") or {}).get("project") == "demo",
     }
 
 
@@ -7721,6 +7979,20 @@ def main(argv):
         actual = _run_c2_assumption_discharge_blocks(repo_root, scenario)
     elif kind == "blocker_registry_refined":
         actual = _run_blocker_registry_refined(repo_root, scenario)
+    elif kind == "tier4_credential_rotation_paged_not_auto":
+        actual = _run_tier4_credential_rotation_paged_not_auto(repo_root, scenario)
+    elif kind == "false_blocker_replan_with_rebuttal":
+        actual = _run_false_blocker_replan_with_rebuttal(repo_root, scenario)
+    elif kind == "claude_budget_daily_pause_resume":
+        actual = _run_claude_budget_daily_pause_resume(repo_root, scenario)
+    elif kind == "regression_auto_revert_or_bisect":
+        actual = _run_regression_auto_revert_or_bisect(repo_root, scenario)
+    elif kind == "runtime_env_network_backoff":
+        actual = _run_runtime_env_network_backoff(repo_root, scenario)
+    elif kind == "canary_auto_disable_reattempt":
+        actual = _run_canary_auto_disable_reattempt(repo_root, scenario)
+    elif kind == "runtime_unknown_project_alias":
+        actual = _run_runtime_unknown_project_alias(repo_root, scenario)
     elif kind == "self_repair_review_state_live":
         actual = _run_self_repair_review_state_live(repo_root, scenario)
     elif kind == "orchestrator_template_candidate_only":

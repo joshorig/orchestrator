@@ -1,0 +1,6 @@
+{
+  "action": "push_alert",
+  "policy": "runtime_env_credential_alert",
+  "mentions_credential": true,
+  "no_auto_retry": true
+}

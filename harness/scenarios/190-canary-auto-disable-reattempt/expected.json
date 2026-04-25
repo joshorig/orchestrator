@@ -1,0 +1,7 @@
+{
+  "policy_action": "disable_canary_mode_then_schedule_reattempt_24h",
+  "policy_name": "canary_unrecoverable_auto_disable",
+  "disabled": true,
+  "reattempt_scheduled": true,
+  "event_emitted": true
+}

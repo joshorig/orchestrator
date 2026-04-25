@@ -442,16 +442,16 @@ WORKFLOW_REPAIR_POLICY = (
         "name": "template_refine_exhausted_report",
         "kind": "frontier_task_blocked",
         "blocker_code": "template_refine_exhausted",
-        "action": "retry_task",
-        "diagnosis": "template changed after refinement exhaustion; retry the blocked task",
+        "action": "swap_decomposition_strategy_then_retry",
+        "diagnosis": "refine cap hit; swap topology before paging",
         "when": "template_graph_ready",
     },
     {
-        "name": "template_refine_exhausted_self_repair",
+        "name": "template_refine_exhausted_degraded_fallback",
         "kind": "frontier_task_blocked",
         "blocker_code": "template_refine_exhausted",
-        "action": "enqueue_self_repair",
-        "diagnosis": "template refinement attempts exhausted and no new template landed; escalate into self-repair",
+        "action": "fallback_to_degraded_template",
+        "diagnosis": "primary refine path exhausted; running degraded template variant",
         "when": "template_graph_waiting",
     },
     {
@@ -479,11 +479,20 @@ WORKFLOW_REPAIR_POLICY = (
         "when": "project_regression_human_push",
     },
     {
-        "name": "regression_self_repair",
+        "name": "project_regression_auto_revert",
         "kind": "frontier_task_blocked",
         "blocker_code": "project_regression_failed",
-        "action": "enqueue_self_repair",
-        "diagnosis": "hard-stopped by regression failure; attach a repair issue so the project does not deadlock silently",
+        "action": "auto_revert_culprit_and_reopen_feature",
+        "diagnosis": "regression detected; reverting identified culprit",
+        "when": "auto_revert_suitable",
+    },
+    {
+        "name": "project_regression_bisect",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "project_regression_failed",
+        "action": "git_bisect_regression_test_then_revert",
+        "diagnosis": "multiple commits suspect; bisecting to identify culprit",
+        "when": "auto_revert_unsuitable",
     },
     {
         "name": "delivery_auth_wait",
@@ -501,11 +510,11 @@ WORKFLOW_REPAIR_POLICY = (
         "when": "control_plane_feedback_bug",
     },
     {
-        "name": "false_blocker_claim_retry",
+        "name": "false_blocker_replan_with_rebuttal",
         "kind": "frontier_task_blocked",
         "blocker_code": "false_blocker_claim",
-        "action": "retry_task",
-        "diagnosis": "solver emitted a false blocker claim; retry with the archived blocker as challenge context",
+        "action": "replan_with_prior_false_claim_rebuttal",
+        "diagnosis": "verifier rejected blocker claim; replanning with rebuttal injected",
     },
     {
         "name": "qa_contract_repair",
@@ -518,15 +527,15 @@ WORKFLOW_REPAIR_POLICY = (
         "name": "qa_contract_semantic_drift_replan",
         "kind": "frontier_task_blocked",
         "blocker_code": "qa_contract_semantic_drift",
-        "action": "enqueue_qa_contract_repair",
+        "action": "replan_qa_against_current_implementation",
         "diagnosis": "QA contract disagreed with implementation; replan QA against current code",
     },
     {
         "name": "qa_target_missing_retry",
         "kind": "frontier_task_blocked",
         "blocker_code": "qa_target_missing",
-        "action": "retry_task",
-        "diagnosis": "target exists but moved to a different queue state; retry with the updated lifecycle logic",
+        "action": "redirect_to_renamed_target_or_abandon_as_moot",
+        "diagnosis": "QA target resolved or marked moot",
         "when": "qa_target_relocated",
     },
     {
@@ -545,17 +554,17 @@ WORKFLOW_REPAIR_POLICY = (
         "diagnosis": "QA target state or worktree is missing; page an operator to inspect queue/worktree lifecycle",
     },
     {
-        "name": "runtime_env_dirty_repair",
+        "name": "runtime_env_network_backoff_retry",
         "kind": "environment_degraded",
         "blocker_code": "runtime_env_dirty_network",
-        "action": "repair_environment",
-        "diagnosis": "runtime environment is degraded; attempt bounded autonomous repair first",
+        "action": "exponential_backoff_then_retry",
+        "diagnosis": "network transient; backing off before retry",
     },
     {
         "name": "runtime_env_lock_auto_cleanup",
         "kind": "environment_degraded",
         "blocker_code": "runtime_env_dirty_lock_stale",
-        "action": "repair_environment",
+        "action": "verify_pid_dead_then_remove_lock_then_retry",
         "diagnosis": "stale lock detected; verify holder is dead before cleanup",
     },
     {
@@ -587,11 +596,11 @@ WORKFLOW_REPAIR_POLICY = (
         "diagnosis": "review-gate protocol failed; retry the reviewer lane once with typed blocker context",
     },
     {
-        "name": "review_feedback_exhausted_alert",
+        "name": "review_feedback_exhausted_replan_from_scratch",
         "kind": "frontier_task_blocked",
         "blocker_code": "review_feedback_exhausted",
-        "action": "push_alert",
-        "diagnosis": "review feedback rounds were exhausted and the task now requires human triage",
+        "action": "abandon_task_replan_feature_with_disagreement_summary",
+        "diagnosis": "review feedback exhausted; replanning feature with disagreement summary as input",
     },
     {
         "name": "claude_budget_resume_retry",
@@ -605,8 +614,8 @@ WORKFLOW_REPAIR_POLICY = (
         "name": "claude_budget_wait",
         "kind": "frontier_task_blocked",
         "blocker_code": "claude_budget_exhausted_daily",
-        "action": "push_alert",
-        "diagnosis": "Claude slot budget is exhausted and has been auto-paused; page an operator to resume the slot",
+        "action": "pause_project_until_daily_reset",
+        "diagnosis": "daily soft cap reached; resuming at next reset",
     },
     {
         "name": "claude_budget_monthly_wait",
@@ -616,24 +625,33 @@ WORKFLOW_REPAIR_POLICY = (
         "diagnosis": "Claude monthly budget exhausted; budget increase requires operator approval",
     },
     {
-        "name": "unknown_project_report",
+        "name": "runtime_unknown_project_resolve_alias",
         "kind": "frontier_task_blocked",
         "blocker_code": "runtime_unknown_project",
-        "action": "push_alert",
-        "diagnosis": "task references an unknown project; page an operator to repair configuration",
+        "action": "resolve_via_alias_map_then_retry",
+        "diagnosis": "project alias resolved",
+        "when": "unknown_project_alias_exists",
     },
     {
-        "name": "attempt_exhausted_alert",
+        "name": "runtime_unknown_project_deleted",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "runtime_unknown_project",
+        "action": "abandon_task_with_project_deleted_reason",
+        "diagnosis": "project no longer exists; cascading abandonment",
+        "when": "unknown_project_deleted",
+    },
+    {
+        "name": "attempt_exhausted_replan_from_scratch",
         "kind": "frontier_task_blocked",
         "blocker_code": "attempt_exhausted",
-        "action": "enqueue_self_repair_and_alert",
-        "diagnosis": "task exceeded the cumulative retry limit; open self-repair and page the operator before any further execution",
+        "action": "replan_feature_with_attempt_history_summary",
+        "diagnosis": "attempt cap hit; replanning feature with attempt-history summary as input",
     },
     {
-        "name": "environment_bypass_budget_alert",
+        "name": "environment_bypass_budget_transient_cooldown",
         "blocker_code": "environment_bypass_budget_exceeded_transient",
-        "action": "enqueue_self_repair_and_alert",
-        "diagnosis": "environment bypass budget was exceeded; open self-repair and alert the operator",
+        "action": "pause_project_for_cooldown_then_retry",
+        "diagnosis": "transient environment bypass budget exceeded; pausing project for cooldown",
     },
     {
         "name": "environment_bypass_budget_persistent_alert",
@@ -649,6 +667,13 @@ WORKFLOW_REPAIR_POLICY = (
         "diagnosis": "feature child task file is missing; reconstruct it from the transition log if possible",
     },
     {
+        "name": "missing_child_auto_abandon_cascade",
+        "kind": "missing_child",
+        "blocker_code": "missing_child_recoverable",
+        "action": "abandon_feature_with_cascade",
+        "diagnosis": "child task irrecoverably missing; abandoning feature and cascading",
+    },
+    {
         "name": "planner_empty_retry",
         "kind": "planner_emitted_no_children",
         "blocker_code": "planner_emitted_no_children",
@@ -659,8 +684,8 @@ WORKFLOW_REPAIR_POLICY = (
         "name": "feature_no_children_self_repair",
         "kind": "feature_has_no_children",
         "blocker_code": "feature_has_no_children",
-        "action": "enqueue_self_repair",
-        "diagnosis": "feature is open but has no child tasks to make progress; open self-repair to replan or retire the feature",
+        "action": "replan_with_must_emit_slice_directive",
+        "diagnosis": "planner emitted zero slices; replanning with mandatory-slice directive",
     },
     {
         "name": "feature_finalize_ready",
@@ -695,6 +720,13 @@ WORKFLOW_REPAIR_POLICY = (
         "blocker_code": "canary_stale",
         "action": "enqueue_canary_fallback",
         "diagnosis": "synthetic canary has been in-flight too long; rotate to the configured fallback canary project before paging an operator",
+    },
+    {
+        "name": "canary_unrecoverable_auto_disable",
+        "kind": "project_canary_health",
+        "blocker_code": "canary_recoverable",
+        "action": "disable_canary_mode_then_schedule_reattempt_24h",
+        "diagnosis": "canary disabled after exhaustion; re-attempt scheduled",
     },
 )
 ATTEMPT_ARCHIVE_FIELDS = (
@@ -11286,6 +11318,139 @@ def _workflow_check_retry_task(task, state, reason):
     return bool(found and found[0] in ("queued", "claimed", "running"))
 
 
+def _workflow_check_retry_task_with_context(task, state, reason, *, kind, findings=None):
+    def mut(t):
+        engine_args = dict(t.get("engine_args") or {})
+        retry_ctx = dict(engine_args.get("retry_context") or {})
+        retry_ctx["kind"] = kind
+        retry_ctx["reason"] = reason
+        retry_ctx["findings"] = list(findings or [])
+        engine_args["retry_context"] = retry_ctx
+        t["engine_args"] = engine_args
+
+    reset_task_for_retry(
+        task["task_id"],
+        state,
+        reason=reason,
+        source="workflow-check",
+        mutator=mut,
+    )
+    found = find_task(task["task_id"])
+    return bool(found and found[0] in ("queued", "claimed", "running"))
+
+
+def _workflow_check_enqueue_feature_replan(feature, issue, *, reason, mode, context):
+    project_name = issue.get("project") or feature.get("project")
+    source = f"{mode}:{feature['feature_id']}:{issue.get('issue_key') or 'issue'}"
+    for existing in iter_tasks(states=("queued", "claimed", "running", "awaiting-review", "awaiting-qa")):
+        if existing.get("source") == source:
+            return {"enqueued": False, "reason": "already_exists", "task_id": existing.get("task_id")}
+    planner = new_task(
+        role="planner",
+        engine="claude",
+        project=project_name,
+        summary=f"Replan feature: {feature.get('summary') or feature['feature_id']}"[:240],
+        source=source,
+        feature_id=feature.get("feature_id"),
+        braid_template=(issue.get("task") or {}).get("braid_template"),
+        engine_args={
+            "mode": "planner-refine",
+            "roadmap_entry": feature.get("roadmap_entry") or {},
+            "planner_refine": {
+                "origin_task_id": (issue.get("task") or {}).get("task_id"),
+                "summary": reason,
+                "question": context,
+                "context": context,
+                "task_summary": (issue.get("task") or {}).get("summary") or "",
+                "feature_summary": feature.get("summary") or "",
+            },
+        },
+    )
+    enqueue_task(planner)
+    append_feature_child(feature["feature_id"], planner["task_id"])
+    return {"enqueued": True, "task_id": planner["task_id"]}
+
+
+def _unknown_project_name(task, blocker):
+    name = (task or {}).get("project")
+    if name:
+        return name
+    text = " ".join(str((blocker or {}).get(k) or "") for k in ("detail", "summary"))
+    m = re.search(r"unknown project[:= ]+([A-Za-z0-9_.-]+)", text)
+    return m.group(1) if m else ""
+
+
+def _project_alias_target(cfg, name):
+    aliases = cfg.get("project_aliases") or {}
+    if isinstance(aliases, dict) and aliases.get(name):
+        return aliases[name]
+    for project in cfg.get("projects", []):
+        for alias in project.get("aliases", []) or []:
+            if alias == name:
+                return project.get("name")
+    return None
+
+
+def _workflow_check_resolve_unknown_project(task, state, cfg, *, diagnosis):
+    if not task:
+        return {"resolved": False, "reason": "task_missing"}
+    blocker = task_blocker(task)
+    unknown = _unknown_project_name(task, blocker)
+    target = _project_alias_target(cfg, unknown)
+    if not target:
+        return {"resolved": False, "reason": "alias_not_found", "unknown": unknown}
+
+    def mut(t):
+        t["project"] = target
+        engine_args = dict(t.get("engine_args") or {})
+        retry_ctx = dict(engine_args.get("retry_context") or {})
+        retry_ctx["kind"] = "project_alias_resolution"
+        retry_ctx["reason"] = diagnosis
+        retry_ctx["findings"] = [f"project alias {unknown} -> {target}"]
+        engine_args["retry_context"] = retry_ctx
+        t["engine_args"] = engine_args
+
+    reset_task_for_retry(task["task_id"], state, reason=f"workflow-check: project alias {unknown} -> {target}", source="workflow-check", mutator=mut)
+    return {"resolved": True, "unknown": unknown, "project": target}
+
+
+def _workflow_check_abandon_project_deleted(task, state, cfg, *, diagnosis):
+    if not task:
+        return {"abandoned": False, "reason": "task_missing"}
+    blocker = task_blocker(task)
+    unknown = _unknown_project_name(task, blocker)
+    deleted = set(cfg.get("deleted_projects") or cfg.get("retired_projects") or [])
+    if unknown not in deleted:
+        return {"abandoned": False, "reason": "project_not_marked_deleted", "unknown": unknown}
+    ok = _workflow_check_abandon_task(
+        task,
+        state,
+        reason=f"workflow-check: project {unknown} was deleted; {diagnosis[:100]}",
+    )
+    return {"abandoned": ok, "unknown": unknown}
+
+
+def _workflow_check_disable_canary_until_tomorrow(issue, cfg):
+    now = dt.datetime.now(dt.timezone.utc)
+    reattempt = (now + dt.timedelta(hours=24)).replace(microsecond=0).isoformat()
+
+    def mut(local):
+        canary = dict(local.get("synthetic_canary") or {})
+        canary["enabled"] = False
+        canary["disabled_reason"] = issue.get("diagnosis") or "canary exhausted"
+        canary["reattempt_after"] = reattempt
+        local["synthetic_canary"] = canary
+
+    _write_local_config_patch(mut)
+    append_event(
+        "workflow-check",
+        "canary_auto_disabled",
+        feature_id=issue.get("feature_id"),
+        details={"project": issue.get("project"), "reattempt_after": reattempt},
+    )
+    return {"disabled": True, "reattempt_after": reattempt}
+
+
 def _workflow_check_abandon_task(task, state, reason):
     move_task(
         task["task_id"],
@@ -11642,6 +11807,16 @@ def _workflow_policy_matches(policy, issue, task, project):
     if when == "project_regression_human_push":
         failed_at = (task or {}).get("finished_at") or (task or {}).get("updated_at") or ""
         return _project_human_push_after(project, failed_at)
+    if when == "auto_revert_suitable":
+        return not bool((task or {}).get("regression_suspects") or (task or {}).get("bisect_required"))
+    if when == "auto_revert_unsuitable":
+        return bool((task or {}).get("regression_suspects") or (task or {}).get("bisect_required"))
+    if when == "unknown_project_alias_exists":
+        return bool(_project_alias_target(load_config(), _unknown_project_name(task, issue.get("blocker") or {})))
+    if when == "unknown_project_deleted":
+        unknown = _unknown_project_name(task, issue.get("blocker") or {})
+        cfg = load_config()
+        return unknown in set(cfg.get("deleted_projects") or cfg.get("retired_projects") or [])
     if when == "control_plane_feedback_bug":
         source = str((task or {}).get("source") or "")
         detail = str((issue.get("blocker") or {}).get("detail") or "")
@@ -12285,7 +12460,7 @@ def tick_workflow_check():
 
     for env_issue in _environment_health_issues():
         outcome = "diagnosed only"
-        if env_issue.get("action") == "repair_environment":
+        if env_issue.get("action") in ("repair_environment", "exponential_backoff_then_retry", "verify_pid_dead_then_remove_lock_then_retry"):
             repair = cached_action("repair_environment", repair_environment)
             still_present = any(
                 row.get("issue_key") == env_issue.get("issue_key")
@@ -12329,6 +12504,13 @@ def tick_workflow_check():
                 f"operator alert written: {alert_path}" if alert_path else
                 f"self-repair result: {json.dumps(out, sort_keys=True)}; operator alert already recently sent"
             )
+        elif env_issue.get("action") == "pause_project_for_cooldown_then_retry":
+            set_project_hard_stop(env_issue.get("project") or "global", "environment_bypass_cooldown", env_issue["diagnosis"])
+            append_event("workflow-check", "environment_bypass_cooldown", feature_id=env_issue.get("feature_id"), details={"project": env_issue.get("project"), "cooldown_seconds": 3600})
+            outcome = "project paused for environment bypass cooldown"
+        elif env_issue.get("action") == "push_alert":
+            alert_path = _write_workflow_alert(env_issue, env_issue["diagnosis"])
+            outcome = f"operator alert written: {alert_path}" if alert_path else "operator alert already recently sent"
         env_issue["outcome"] = outcome
         issues.append(env_issue)
 
@@ -12346,6 +12528,9 @@ def tick_workflow_check():
             if canary_issue["action"] == "enqueue_canary":
                 out = cached_action("enqueue_canary", lambda: tick_canary_workflows(force=True))
                 outcome = f"canary scheduler result: {json.dumps(out, sort_keys=True)}"
+            elif canary_issue["action"] == "disable_canary_mode_then_schedule_reattempt_24h":
+                out = _workflow_check_disable_canary_until_tomorrow(canary_issue, cfg)
+                outcome = f"canary auto-disabled: {json.dumps(out, sort_keys=True)}"
             else:
                 outcome = f"unknown action {canary_issue['action']}"
             if canary_issue["feature_id"].startswith("feature-"):
@@ -12378,6 +12563,84 @@ def tick_workflow_check():
                     reason=f"workflow-check: {issue['diagnosis'][:120]}",
                 )
                 outcome = "task requeued" if ok else "retry failed"
+            elif action == "replan_with_prior_false_claim_rebuttal":
+                blocker = issue.get("blocker") or {}
+                rebuttal = (
+                    "Previous run raised a false blocker claim. "
+                    f"Rejected claim: {blocker.get('detail') or blocker.get('summary') or 'unknown'}"
+                )
+                ok = _workflow_check_retry_task_with_context(
+                    issue["task"],
+                    issue["task_state"],
+                    reason=rebuttal,
+                    kind="prior_false_claim",
+                    findings=[rebuttal],
+                )
+                outcome = "task requeued with false-claim rebuttal" if ok else "false-claim rebuttal retry failed"
+            elif action in (
+                "replan_with_must_emit_slice_directive",
+                "replan_feature_with_attempt_history_summary",
+                "abandon_task_replan_feature_with_disagreement_summary",
+            ):
+                context = issue["diagnosis"]
+                if issue.get("task"):
+                    history = issue["task"].get("attempt_history") or []
+                    if history:
+                        context += "\n\n[ATTEMPT HISTORY]\n" + json.dumps(history[-5:], indent=2, sort_keys=True)[:4000]
+                    if (issue["task"].get("review_exhaustion_context") or ""):
+                        context += "\n\n[REVIEW DISAGREEMENT]\n" + str(issue["task"].get("review_exhaustion_context"))[:4000]
+                if action == "replan_with_must_emit_slice_directive":
+                    context += "\n\nDirective: emit at least one runnable slice or explain the missing dependency as planner_refine context."
+                out = _workflow_check_enqueue_feature_replan(
+                    feature,
+                    issue,
+                    reason=issue["diagnosis"],
+                    mode=action,
+                    context=context,
+                )
+                if issue.get("task") and issue.get("task_state") in ("blocked", "failed"):
+                    _workflow_check_abandon_task(issue["task"], issue["task_state"], reason=f"workflow-check: {issue['diagnosis'][:120]}")
+                outcome = f"feature replan result: {json.dumps(out, sort_keys=True)}"
+            elif action in ("swap_decomposition_strategy_then_retry", "fallback_to_degraded_template"):
+                def mut_strategy(t, action=action):
+                    engine_args = dict(t.get("engine_args") or {})
+                    retry_ctx = dict(engine_args.get("retry_context") or {})
+                    retry_ctx["kind"] = action
+                    retry_ctx["reason"] = issue["diagnosis"]
+                    retry_ctx["findings"] = [issue["diagnosis"]]
+                    engine_args["retry_context"] = retry_ctx
+                    if action == "fallback_to_degraded_template":
+                        engine_args["degraded_run"] = True
+                    t["engine_args"] = engine_args
+                reset_task_for_retry(
+                    issue["task"]["task_id"],
+                    issue["task_state"],
+                    reason=f"workflow-check: {issue['diagnosis'][:120]}",
+                    source="workflow-check",
+                    mutator=mut_strategy,
+                )
+                outcome = f"task requeued via {action}"
+            elif action == "redirect_to_renamed_target_or_abandon_as_moot":
+                ok = _workflow_check_abandon_task(
+                    issue["task"],
+                    issue["task_state"],
+                    reason=f"workflow-check: QA target moot or terminal: {issue['diagnosis'][:100]}",
+                )
+                outcome = "QA task abandoned as moot" if ok else "QA moot abandon failed"
+            elif action == "pause_project_until_daily_reset":
+                set_slot_paused("claude", True, reason=issue["diagnosis"], source="workflow-check")
+                append_event("workflow-check", "daily_budget_pause_until_reset", task_id=issue.get("task_id"), feature_id=issue.get("feature_id"), details={"project": issue.get("project"), "reset": "next UTC day"})
+                outcome = "claude slot paused until daily budget reset"
+            elif action == "pause_project_for_cooldown_then_retry":
+                set_project_hard_stop(project["name"], "environment_bypass_cooldown", issue["diagnosis"])
+                append_event("workflow-check", "environment_bypass_cooldown", task_id=issue.get("task_id"), feature_id=issue.get("feature_id"), details={"project": project["name"], "cooldown_seconds": 3600})
+                outcome = "project paused for environment bypass cooldown"
+            elif action == "resolve_via_alias_map_then_retry":
+                out = _workflow_check_resolve_unknown_project(issue["task"], issue["task_state"], cfg, diagnosis=issue["diagnosis"])
+                outcome = f"unknown project alias resolution: {json.dumps(out, sort_keys=True)}"
+            elif action == "abandon_task_with_project_deleted_reason":
+                out = _workflow_check_abandon_project_deleted(issue["task"], issue["task_state"], cfg, diagnosis=issue["diagnosis"])
+                outcome = f"unknown project deleted handling: {json.dumps(out, sort_keys=True)}"
             elif action == "abandon_task":
                 ok = _workflow_check_abandon_task(
                     issue["task"],
@@ -12464,6 +12727,12 @@ def tick_workflow_check():
                     lambda: _enqueue_qa_contract_repair(issue["task"]),
                 )
                 outcome = f"qa-contract repair task: {json.dumps(out, sort_keys=True)}"
+            elif action == "replan_qa_against_current_implementation":
+                out = cached_action(
+                    f"repair_qa_semantic:{issue.get('task_id')}",
+                    lambda: _enqueue_qa_contract_repair(issue["task"]),
+                )
+                outcome = f"qa semantic drift replan task: {json.dumps(out, sort_keys=True)}"
             elif action == "mark_ready_for_merge":
                 ok = _workflow_check_mark_ready_for_merge(
                     feature,
@@ -12475,6 +12744,30 @@ def tick_workflow_check():
                 cleared_by = "green_run" if _project_green_regression_after(project["name"], (issue.get("task") or {}).get("finished_at")) else "human_push"
                 ok = _clear_regression_hard_stop(issue["task"], issue["task_state"], project, cleared_by=cleared_by)
                 outcome = f"regression hard-stop cleared via {cleared_by}" if ok else "regression hard-stop clear failed"
+            elif action == "auto_revert_culprit_and_reopen_feature":
+                out = cached_action(
+                    f"self_repair:regression:{issue['issue_key']}",
+                    lambda: enqueue_self_repair(
+                        summary=_workflow_issue_self_repair_summary(issue),
+                        evidence=_workflow_issue_self_repair_evidence(issue) + "\n\nRequested strategy: identify culprit commit, revert if unambiguous, and reopen the originating feature with regression context.",
+                        issue_kind=issue.get("kind") or "post_merge_regression",
+                        source="workflow-check",
+                        issue_key=issue.get("issue_key"),
+                    ),
+                )
+                outcome = f"regression auto-revert self-repair result: {json.dumps(out, sort_keys=True)}"
+            elif action == "git_bisect_regression_test_then_revert":
+                out = cached_action(
+                    f"self_repair:regression-bisect:{issue['issue_key']}",
+                    lambda: enqueue_self_repair(
+                        summary=_workflow_issue_self_repair_summary(issue),
+                        evidence=_workflow_issue_self_repair_evidence(issue) + "\n\nRequested strategy: run a bounded git bisect against the regression command, revert the identified culprit if unambiguous, and reopen the originating feature with bisect evidence.",
+                        issue_kind=issue.get("kind") or "post_merge_regression",
+                        source="workflow-check",
+                        issue_key=issue.get("issue_key"),
+                    ),
+                )
+                outcome = f"regression bisect self-repair result: {json.dumps(out, sort_keys=True)}"
             elif action == "recover_missing_child":
                 recover = _recover_missing_child_task(issue["task_id"])
                 if recover.get("recovered"):
@@ -12483,6 +12776,12 @@ def tick_workflow_check():
                     abandoned = _abandon_feature_missing_child(feature["feature_id"], issue["task_id"])
                     _write_workflow_alert(issue, "missing child could not be reconstructed; feature abandoned")
                     outcome = f"missing child unrecoverable; feature abandoned with {abandoned.get('blocker_code')}"
+            elif action == "abandon_feature_with_cascade":
+                abandoned = _abandon_feature_missing_child(feature["feature_id"], issue.get("task_id") or "unknown")
+                outcome = f"feature abandoned with cascade: {json.dumps(abandoned, sort_keys=True)}"
+            elif action == "disable_canary_mode_then_schedule_reattempt_24h":
+                out = _workflow_check_disable_canary_until_tomorrow(issue, cfg)
+                outcome = f"canary auto-disabled: {json.dumps(out, sort_keys=True)}"
             elif action == "enqueue_self_repair":
                 out = cached_action(
                     f"self_repair:{issue['issue_key']}",

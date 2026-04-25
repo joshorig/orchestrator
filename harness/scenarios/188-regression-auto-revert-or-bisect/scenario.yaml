@@ -1,0 +1,4 @@
+{
+  "kind": "regression_auto_revert_or_bisect",
+  "scenario_version": 1
+}
