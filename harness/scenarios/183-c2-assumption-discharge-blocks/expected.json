@@ -1,0 +1,6 @@
+{
+  "consumer_state_after_check": "blocked",
+  "consumer_blocker_code": "handoff_assumption_undischarged",
+  "producer_replanned": true,
+  "consumer_replanned": false
+}

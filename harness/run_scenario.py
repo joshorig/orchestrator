@@ -59,7 +59,7 @@ def _scenario_cluster(name, scenario_kind):
         "clean_state_wipe_and_restart",
     }:
         return "state-engine"
-    if scenario_kind in {"telegram_surface", "task_cost_capture", "supply_chain_gate", "security_secret_gate", "untrusted_skill_refusal", "launchd_runtime_env_contract", "template_contract_yaml_validates", "blocker_tier_routing"}:
+    if scenario_kind in {"telegram_surface", "task_cost_capture", "supply_chain_gate", "security_secret_gate", "untrusted_skill_refusal", "launchd_runtime_env_contract", "template_contract_yaml_validates", "blocker_tier_routing", "c2_assumption_discharge_blocks"}:
         return "wave-c"
     if scenario_kind in {"review_feedback_exhaustion", "issue_replan_cap", "self_repair_resolution", "self_repair_observation",
                          "observation_orphan", "observation_idempotent", "clock_skew_backward", "council_timeout",
@@ -7380,6 +7380,82 @@ def _run_blocker_tier_routing(repo_root, scenario):
     }
 
 
+def _run_c2_assumption_discharge_blocks(repo_root, scenario):
+    orchestrator, worker = _load_repo_modules(repo_root)
+    calls = {"enqueued": [], "moved": []}
+    producer = {
+        "task_id": "task-producer",
+        "state": "done",
+        "project": "lvc-standard",
+        "summary": "Produce snapshot API",
+        "braid_template": "lvc-implement-operator",
+        "engine_args": {"slice": {"id": "slice-1"}},
+    }
+    consumer = {
+        "task_id": "task-consumer",
+        "state": "claimed",
+        "project": "lvc-standard",
+        "summary": "Consume snapshot API",
+        "braid_template": "lvc-implement-operator",
+        "depends_on": ["task-producer"],
+        "engine_args": {
+            "handoff_assertion": {
+                "version": 1,
+                "edges": [
+                    {
+                        "producer_slice_id": "slice-1",
+                        "producer_task_id": "task-producer",
+                        "conditions": {
+                            "C1_interface": [{"field": "producer.state", "operator": "eq", "value": "done"}],
+                            "C2_assumption_discharge": [{"field": "producer.postcond.snapshot_format_frozen", "operator": "eq", "value": True}],
+                            "C3_governance_consistency": [{"field": "producer.project", "operator": "eq", "value": "lvc-standard"}],
+                            "C4_recovery_independence": [{"field": "producer.blocker", "operator": "absent"}],
+                        },
+                    }
+                ],
+            }
+        },
+    }
+    old = {
+        "find_task": worker.o.find_task,
+        "iter_tasks": worker.o.iter_tasks,
+        "new_task": worker.o.new_task,
+        "enqueue_task": worker.o.enqueue_task,
+        "move_task": worker.o.move_task,
+        "now_iso": worker.o.now_iso,
+        "set_task_blocker": worker.o.set_task_blocker,
+    }
+    try:
+        worker.o.find_task = lambda task_id, states=None: ("done", dict(producer)) if task_id == "task-producer" else None
+        worker.o.iter_tasks = lambda **kwargs: []
+        worker.o.new_task = lambda **kwargs: {"task_id": "task-planner-replan", **kwargs}
+        worker.o.enqueue_task = lambda task: calls["enqueued"].append(task)
+        worker.o.now_iso = lambda: "2026-04-25T11:30:00"
+        worker.o.set_task_blocker = orchestrator.set_task_blocker
+
+        def fake_move(task_id, from_state, to_state, reason="", mutator=None):
+            moved = dict(consumer)
+            if mutator:
+                mutator(moved)
+            calls["moved"].append({"task_id": task_id, "from_state": from_state, "to_state": to_state, "task": moved, "reason": reason})
+
+        worker.o.move_task = fake_move
+        result = worker._check_handoff_assertions(dict(consumer))
+        if not result.get("ok"):
+            worker._block_on_handoff_failure(dict(consumer), "claimed", result)
+    finally:
+        for key, value in old.items():
+            setattr(worker.o, key, value)
+    moved = calls["moved"][0]
+    planner = calls["enqueued"][0]
+    return {
+        "consumer_state_after_check": moved["to_state"],
+        "consumer_blocker_code": ((moved["task"].get("blocker") or {}).get("code")),
+        "producer_replanned": planner.get("source") == "handoff-replan-for:task-producer:task-consumer",
+        "consumer_replanned": planner.get("source") == "handoff-replan-for:task-consumer:task-producer",
+    }
+
+
 def main(argv):
     if len(argv) < 2 or len(argv) > 3:
         raise SystemExit("usage: harness/run_scenario.py <scenario-dir> | summary [runs-dir]")
@@ -7625,6 +7701,8 @@ def main(argv):
         actual = _run_template_contract_yaml_validates(repo_root, scenario)
     elif kind == "blocker_tier_routing":
         actual = _run_blocker_tier_routing(repo_root, scenario)
+    elif kind == "c2_assumption_discharge_blocks":
+        actual = _run_c2_assumption_discharge_blocks(repo_root, scenario)
     elif kind == "self_repair_review_state_live":
         actual = _run_self_repair_review_state_live(repo_root, scenario)
     elif kind == "orchestrator_template_candidate_only":

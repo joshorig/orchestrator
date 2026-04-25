@@ -167,6 +167,7 @@ _BLOCKER_REGISTRY = (
     ("review_feedback_exhausted", 4),
     ("review_feedback_target_inflight", 2),
     ("review_feedback_loop", 3),
+    ("handoff_assumption_undischarged", 2),
     ("claude_budget_exhausted", 4),
     ("slot_paused", 4),
     ("llm_timeout", 2),
@@ -367,6 +368,13 @@ WORKFLOW_REPAIR_POLICY = (
         "blocker_code": "review_feedback_target_inflight",
         "action": "retry_task",
         "diagnosis": "feedback target is still in-flight; retry once the target reaches a stable reviewable state",
+    },
+    {
+        "name": "handoff_assumption_retry",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "handoff_assumption_undischarged",
+        "action": "retry_task",
+        "diagnosis": "dependent producer handoff is being replanned; retry the consumer after the producer replan completes",
     },
     {
         "name": "template_graph_wait",

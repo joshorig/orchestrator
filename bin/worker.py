@@ -4316,6 +4316,212 @@ def _render_slice_context_block(task):
     )
 
 
+HANDOFF_CONDITION_KEYS = (
+    "C1_interface",
+    "C2_assumption_discharge",
+    "C3_governance_consistency",
+    "C4_recovery_independence",
+)
+
+
+def _default_handoff_conditions(*, producer_task_id, project_name):
+    return {
+        "C1_interface": [
+            {"field": "producer.state", "operator": "eq", "value": "done"},
+            {"field": "producer.task_id", "operator": "eq", "value": producer_task_id},
+        ],
+        "C2_assumption_discharge": [
+            {"field": "producer.task_id", "operator": "present"},
+        ],
+        "C3_governance_consistency": [
+            {"field": "producer.project", "operator": "eq", "value": project_name},
+        ],
+        "C4_recovery_independence": [
+            {"field": "producer.blocker", "operator": "absent"},
+        ],
+    }
+
+
+def _slice_handoff_conditions(raw_assertion, *, producer_task_id, project_name):
+    conditions = _default_handoff_conditions(
+        producer_task_id=producer_task_id,
+        project_name=project_name,
+    )
+    if isinstance(raw_assertion, dict):
+        for key in HANDOFF_CONDITION_KEYS:
+            value = raw_assertion.get(key)
+            if isinstance(value, list):
+                conditions[key] = [item for item in value if isinstance(item, dict)]
+    return conditions
+
+
+def _build_handoff_assertion(slice_obj, *, normalized_dep_ids, resolved_dep_task_ids, slice_plan, project_name):
+    if not normalized_dep_ids:
+        return {}
+    raw_assertion = (slice_obj or {}).get("handoff_assertion")
+    by_slice = {row.get("id"): row for row in slice_plan if isinstance(row, dict)}
+    edges = []
+    for dep_slice_id, dep_task_id in zip(normalized_dep_ids, resolved_dep_task_ids):
+        producer = dict(by_slice.get(dep_slice_id) or {})
+        edges.append(
+            {
+                "producer_slice_id": dep_slice_id,
+                "producer_task_id": dep_task_id,
+                "producer_template": producer.get("braid_template"),
+                "conditions": _slice_handoff_conditions(
+                    raw_assertion,
+                    producer_task_id=dep_task_id,
+                    project_name=project_name,
+                ),
+            }
+        )
+    return {"version": 1, "edges": edges}
+
+
+def _handoff_lookup_value(field, *, producer_state, producer_task, consumer_task):
+    if field.startswith("producer."):
+        parts = field.split(".")[1:]
+        if not parts:
+            return None
+        if parts[0] == "state":
+            return producer_state
+        value = producer_task
+    elif field.startswith("consumer."):
+        parts = field.split(".")[1:]
+        value = consumer_task
+    else:
+        return None
+    for part in parts:
+        if isinstance(value, dict):
+            value = value.get(part)
+        else:
+            return None
+    return value
+
+
+def _handoff_check_passes(check, *, producer_state, producer_task, consumer_task):
+    field = check.get("field")
+    operator = check.get("operator")
+    actual = _handoff_lookup_value(str(field or ""), producer_state=producer_state, producer_task=producer_task, consumer_task=consumer_task)
+    expected = check.get("value")
+    if operator == "present":
+        return actual is not None and actual != ""
+    if operator == "absent":
+        return actual in (None, "", [], {})
+    if operator == "eq":
+        return actual == expected
+    if operator == "neq":
+        return actual != expected
+    if operator == "in_set":
+        return actual in (expected or [])
+    if operator == "subset_of":
+        return set(actual or ()).issubset(set(expected or ()))
+    return False
+
+
+def _enqueue_handoff_producer_replan(consumer_task, producer_task, reason):
+    source = f"handoff-replan-for:{producer_task['task_id']}:{consumer_task['task_id']}"
+    for existing in o.iter_tasks(states=("queued", "claimed", "running", "awaiting-review", "awaiting-qa")):
+        if existing.get("source") == source:
+            return existing.get("task_id")
+    parent = None
+    parent_id = consumer_task.get("parent_task_id") or producer_task.get("parent_task_id")
+    if parent_id:
+        found = o.find_task(parent_id)
+        parent = found[1] if found else None
+    planner_task = o.new_task(
+        role="planner",
+        engine="claude",
+        project=producer_task.get("project") or consumer_task.get("project"),
+        summary=f"Replan producer handoff for {producer_task.get('summary') or producer_task['task_id']}"[:240],
+        source=source,
+        braid_template=producer_task.get("braid_template") or consumer_task.get("braid_template"),
+        feature_id=consumer_task.get("feature_id") or producer_task.get("feature_id"),
+        engine_args={
+            "mode": "planner-refine",
+            "roadmap_entry": ((parent or {}).get("engine_args") or {}).get("roadmap_entry") or {},
+            "planner_refine": {
+                "origin_task_id": producer_task["task_id"],
+                "origin_parent_task_id": parent_id,
+                "origin_slice": dict((producer_task.get("engine_args") or {}).get("slice") or {}),
+                "summary": "handoff assumption undischarged",
+                "question": reason,
+                "context": f"Consumer {consumer_task['task_id']} could not verify producer handoff: {reason}",
+                "task_summary": producer_task.get("summary") or "",
+                "feature_summary": "",
+            },
+        },
+    )
+    o.enqueue_task(planner_task)
+    return planner_task.get("task_id")
+
+
+def _check_handoff_assertions(task):
+    assertion = (task.get("engine_args") or {}).get("handoff_assertion") or {}
+    edges = assertion.get("edges") if isinstance(assertion, dict) else None
+    if not edges:
+        return {"ok": True}
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        producer_task_id = edge.get("producer_task_id")
+        found = o.find_task(producer_task_id, states=("done", "failed", "abandoned", "blocked", "queued", "claimed", "running"))
+        if not found:
+            reason = f"producer task missing: {producer_task_id}"
+            return {"ok": False, "reason": reason, "producer_task_id": producer_task_id}
+        producer_state, producer_task = found
+        conditions = edge.get("conditions") or {}
+        for condition_key in HANDOFF_CONDITION_KEYS:
+            for check in conditions.get(condition_key) or []:
+                if _handoff_check_passes(check, producer_state=producer_state, producer_task=producer_task, consumer_task=task):
+                    continue
+                reason = (
+                    f"{condition_key} failed for producer {producer_task_id}: "
+                    f"{check.get('field')} {check.get('operator')} {check.get('value')}"
+                )
+                planner_task_id = _enqueue_handoff_producer_replan(task, producer_task, reason)
+                return {
+                    "ok": False,
+                    "reason": reason,
+                    "producer_task_id": producer_task_id,
+                    "planner_task_id": planner_task_id,
+                }
+    return {"ok": True}
+
+
+def _block_on_handoff_failure(task, from_state, handoff):
+    planner_task_id = handoff.get("planner_task_id")
+    def mut_handoff(t):
+        deps = list(t.get("depends_on") or [])
+        if planner_task_id and planner_task_id not in deps:
+            deps.append(planner_task_id)
+        t["depends_on"] = deps
+        t["handoff_failure"] = {
+            "reason": handoff.get("reason"),
+            "producer_task_id": handoff.get("producer_task_id"),
+            "planner_task_id": planner_task_id,
+        }
+        o.set_task_blocker(
+            t,
+            "handoff_assumption_undischarged",
+            summary="producer handoff assumption undischarged",
+            detail=handoff.get("reason") or "handoff assertion failed",
+            source="worker",
+            retryable=True,
+            metadata={
+                "producer_task_id": handoff.get("producer_task_id"),
+                "planner_task_id": planner_task_id,
+            },
+        )
+    o.move_task(
+        task["task_id"],
+        from_state,
+        "blocked",
+        reason=(handoff.get("reason") or "handoff assertion failed")[:120],
+        mutator=mut_handoff,
+    )
+
+
 def _render_retry_context_block(task):
     engine_args = task.get("engine_args") or {}
     retry_ctx = engine_args.get("retry_context") or {}
@@ -5269,6 +5475,15 @@ def run_claude_planner(task, cfg, timeout, log_path):
             sibling_task_ids.append(None)
             continue
         child["depends_on"] = resolved
+        handoff_assertion = _build_handoff_assertion(
+            s,
+            normalized_dep_ids=normalized_dep_ids,
+            resolved_dep_task_ids=resolved,
+            slice_plan=slice_plan,
+            project_name=project["name"],
+        )
+        if handoff_assertion:
+            child["engine_args"]["handoff_assertion"] = handoff_assertion
         o.enqueue_task(child)
         enqueued.append(child["task_id"])
         sibling_task_ids.append(child["task_id"])
@@ -6959,6 +7174,11 @@ def run_codex_slot(task, cfg):
     except KeyError:
         fail_task(task_id, "claimed", "unknown project",
                   blocker_code="runtime_unknown_project", summary="unknown project", retryable=False)
+        return
+
+    handoff = _check_handoff_assertions(task)
+    if not handoff.get("ok"):
+        _block_on_handoff_failure(task, "claimed", handoff)
         return
 
     lock_fh = None
