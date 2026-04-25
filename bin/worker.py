@@ -1985,6 +1985,36 @@ def _planner_prior_errors_block(task):
     return f"[PRIOR_ERRORS]\n{body}\n\n"
 
 
+def _planner_context_roadmap_id(task):
+    engine_args = (task or {}).get("engine_args") or {}
+    roadmap_entry = engine_args.get("roadmap_entry") or {}
+    roadmap_id = str(roadmap_entry.get("id") or "").strip()
+    if roadmap_id:
+        return roadmap_id
+    planner_refine = engine_args.get("planner_refine") or {}
+    context = str(planner_refine.get("context") or "")
+    match = re.search(r"\b([A-Z]+-\d+(?:\.\d+)?)\b", context)
+    return match.group(1) if match else ""
+
+
+def _planner_context_block(task):
+    roadmap_id = _planner_context_roadmap_id(task)
+    if not roadmap_id:
+        return ""
+    context_path = o.RUNTIME_DIR / "planner-context" / f"{roadmap_id}.md"
+    try:
+        body = context_path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return ""
+    except OSError as exc:
+        return f"[PLANNER CONTEXT ERROR]\nCould not read {context_path}: {exc}\n\n"
+    if not body:
+        return ""
+    if len(body) > 12000:
+        body = body[:12000] + "\n[truncated]"
+    return f"[PLANNER CONTEXT]\n{body}\n\n"
+
+
 def _template_output_contract_prompt():
     return (
         "[OUTPUT CONTRACT]\n"
@@ -3517,6 +3547,7 @@ def planner_council_prompt(task, project, memory_ctx, cfg):
         f"{roadmap_entry.get('body') or '(none)'}\n\n"
         "[PROJECT MEMORY]\n"
         f"{memory_ctx}\n\n"
+        f"{_planner_context_block(task)}"
         "Decide the smallest safe next execution plan.\n"
         "Keep at most 3 slices.\n"
         f"Allowed braid_template values: {allowed_templates}\n"
@@ -4816,6 +4847,65 @@ def _parse_planner_output(raw, *, council_members, self_repair=False):
     return plan, list(slices or [])
 
 
+def _planner_refine_origin_slice_count(task):
+    planner_refine = ((task or {}).get("engine_args") or {}).get("planner_refine") or {}
+    origin_slice = planner_refine.get("origin_slice") or {}
+    origin_plan = origin_slice.get("plan")
+    if isinstance(origin_plan, list) and origin_plan:
+        return len(origin_plan)
+    return 0
+
+
+def _planner_refine_merged_count(task):
+    feature_id = (task or {}).get("feature_id")
+    if not feature_id:
+        return 0
+    try:
+        related = o.iter_tasks(states=("done",), project=(task or {}).get("project"))
+    except Exception:
+        return 0
+    count = 0
+    for row in related:
+        if row.get("feature_id") != feature_id:
+            continue
+        if row.get("role") == "planner":
+            continue
+        final_state = str(row.get("pr_final_state") or row.get("delivery_state") or "").upper()
+        if final_state == "MERGED" or row.get("merged_at"):
+            count += 1
+    return count
+
+
+def _planner_refine_scope_shrink_justification(plan):
+    for key in ("scope_shrink_justification", "slice_shrink_justification", "shrink_justification"):
+        value = (plan or {}).get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _planner_refine_scope_drift(task, plan, candidate_slices):
+    origin_count = _planner_refine_origin_slice_count(task)
+    refined_count = len(candidate_slices or [])
+    if origin_count <= 0 or refined_count >= origin_count:
+        return None
+    if _planner_refine_scope_shrink_justification(plan):
+        return None
+    merged_count = _planner_refine_merged_count(task)
+    if merged_count >= origin_count:
+        return None
+    return {
+        "origin_slice_count": origin_count,
+        "refined_slice_count": refined_count,
+        "merged_count": merged_count,
+        "detail": (
+            f"planner-refine emitted {refined_count} slice(s) for an origin plan with "
+            f"{origin_count} slice(s), but only {merged_count} prior slice(s) appear merged "
+            "and no scope_shrink_justification was provided"
+        ),
+    }
+
+
 def _extract_review_verdict(raw):
     payload = _extract_braid_result_payload(raw)
     if payload:
@@ -5237,6 +5327,9 @@ def run_claude_planner(task, cfg, timeout, log_path):
             + f"{planner_refine.get('context') or '(none)'}\n"
             "Replan from current repo state and emit replacement runnable slices for this feature.\n"
             "Do not emit a historian slice unless the implementation path is actually complete in this replan.\n"
+            "If this replan emits fewer slices than the origin plan and the prior topology is not already mostly merged, "
+            "include a top-level scope_shrink_justification field explaining why the reduced topology is still complete. "
+            "Without that field, the refine is rejected as planner_refine_scope_drift.\n"
         )
     elif planner_mode == "router-clarify":
         system_prompt, user_prompt, council_members = planner_council_prompt(task, project, memory_ctx, cfg)
@@ -5371,6 +5464,27 @@ def run_claude_planner(task, cfg, timeout, log_path):
         candidate_slices = candidate_slices[:1]
         if len(slices) > 1:
             dropped.append(("self-repair-plan", task.get("summary", "")[:80], f"extra self-repair slices suppressed: {len(slices) - 1}"))
+    if planner_mode == "planner-refine":
+        drift = _planner_refine_scope_drift(task, plan, candidate_slices)
+        if drift:
+            def mut_block(t):
+                t["finished_at"] = o.now_iso()
+                t["planner_refine_scope_drift"] = drift
+                o.set_task_blocker(
+                    t,
+                    "planner_refine_scope_drift",
+                    summary="planner refine shrank slice topology without justification",
+                    detail=drift["detail"],
+                    source="worker",
+                    retryable=True,
+                    metadata={
+                        "origin_slice_count": drift["origin_slice_count"],
+                        "refined_slice_count": drift["refined_slice_count"],
+                        "merged_count": drift["merged_count"],
+                    },
+                )
+            o.move_task(task_id, "running", "blocked", reason="planner refine scope drift", mutator=mut_block)
+            return
     candidate_slice_ids, slice_aliases = _slice_alias_maps(candidate_slices)
     normalized_slice_depends = []
     for idx, s in enumerate(candidate_slices):

@@ -138,6 +138,7 @@ _BLOCKER_REGISTRY = (
     ("template_graph_error", 3),
     ("invalid_braid_refine", 2),
     ("planner_slice_format_error", 2),
+    ("planner_refine_scope_drift", 3),
     ("false_blocker_claim", 2),
     ("project_main_dirty", 3),
     ("project_regression_failed", 3),

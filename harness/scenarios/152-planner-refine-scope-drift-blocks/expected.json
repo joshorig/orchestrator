@@ -1,0 +1,8 @@
+{
+  "blocked": true,
+  "blocker_code": "planner_refine_scope_drift",
+  "retryable": true,
+  "enqueued_count": 0,
+  "origin_slice_count": 3,
+  "refined_slice_count": 1
+}

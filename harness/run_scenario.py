@@ -66,7 +66,8 @@ def _scenario_cluster(name, scenario_kind):
                          "council_malformed", "council_deleted_task_ref", "false_blocker_attach", "qa_preflight",
                          "project_main_dirty_cap", "regression_clear", "missing_child", "canary_fallback", "qa_contract_scoped",
                          "qa_contract_full_tick", "self_repair_issue_backfill", "attempt_cap", "fix2_reopen_after_manual_abandon",
-                         "r16_override", "review_feedback_reaper_stale_target", "atomic_claim_feature_race_requeues_newer"}:
+                         "r16_override", "review_feedback_reaper_stale_target", "atomic_claim_feature_race_requeues_newer",
+                         "planner_context_block_inline", "planner_refine_scope_drift_blocks"}:
         return "self-repair"
     return "other"
 
@@ -4301,7 +4302,12 @@ def _run_planner_refine_route(repo_root, scenario):
         )
     }
     try:
-        worker.o.iter_tasks = lambda **kwargs: [dict(sibling)] if kwargs.get("states") == ("queued",) and kwargs.get("project") == "lvc-standard" else []
+        worker.o.iter_tasks = (
+            lambda **kwargs: [dict(sibling)]
+            if kwargs.get("project") == "lvc-standard"
+            and "queued" in tuple(kwargs.get("states") or ())
+            else []
+        )
         worker.o.new_task = lambda **kwargs: {"task_id": "task-planner-refine-1", **kwargs}
         worker.o.enqueue_task = lambda task: calls["enqueued"].append(task)
         worker.o.read_feature = lambda feature_id: dict(feature) if feature_id == "feature-1" else None
@@ -5026,6 +5032,118 @@ def _run_planner_refine_missing_origin_context(repo_root, scenario):
         worker.read_memory_context = old["read_memory_context"]
         worker.fail_task = old["fail_task"]
     return {"blocker_code": failures[0][0], "summary": failures[0][1]}
+
+
+def _run_planner_context_block_inline(repo_root, scenario):
+    _orchestrator, worker = _load_repo_modules(repo_root)
+    old_runtime = worker.o.RUNTIME_DIR
+    with tempfile.TemporaryDirectory() as tmp:
+        runtime = pathlib.Path(tmp)
+        context_dir = runtime / "planner-context"
+        context_dir.mkdir(parents=True)
+        (context_dir / "R-002.md").write_text("R-002 restart context: preserve snapshot/restore API scope\n", encoding="utf-8")
+        worker.o.RUNTIME_DIR = runtime
+        try:
+            block = worker._planner_context_block(
+                {"engine_args": {"roadmap_entry": {"id": "R-002"}}}
+            )
+            system_prompt, user_prompt, _panel = worker.planner_council_prompt(
+                {"engine_args": {"roadmap_entry": {"id": "R-002", "title": "Snapshot/restore", "body": "body"}}},
+                {"name": "lvc-standard"},
+                "memory",
+                {"council": {}},
+            )
+        finally:
+            worker.o.RUNTIME_DIR = old_runtime
+    return {
+        "block_has_header": "[PLANNER CONTEXT]" in block,
+        "prompt_has_context": "R-002 restart context" in user_prompt,
+        "system_mentions_json": "Output ONLY one JSON object" in system_prompt,
+    }
+
+
+def _run_planner_refine_scope_drift_blocks(repo_root, scenario):
+    orchestrator, worker = _load_repo_modules(repo_root)
+    moves = []
+    enqueued = []
+    old = {
+        "get_project": worker.o.get_project,
+        "move_task": worker.o.move_task,
+        "now_iso": worker.o.now_iso,
+        "iter_tasks": worker.o.iter_tasks,
+        "enqueue_task": worker.o.enqueue_task,
+        "read_memory_context": worker.read_memory_context,
+        "_run_bounded": worker._run_bounded,
+        "_record_task_costs_from_text": worker._record_task_costs_from_text,
+    }
+    plan = {
+        "panel": ["aristotle"],
+        "key_agreements": ["shrink"],
+        "dissent": [],
+        "execution_path": "slice-1",
+        "slices": [
+            {"id": "slice-1", "summary": "Implement only rollback buffer lifecycle", "braid_template": "lvc-implement-operator"}
+        ],
+    }
+    stdout = json.dumps({"type": "result", "result": json.dumps(plan)})
+    task = {
+        "task_id": "task-plan-refine",
+        "project": "lvc-standard",
+        "feature_id": "feature-r002",
+        "engine_args": {
+            "mode": "planner-refine",
+            "roadmap_entry": {"id": "R-002", "title": "Snapshot/restore", "body": "body"},
+            "planner_refine": {
+                "origin_task_id": "task-origin",
+                "origin_slice": {
+                    "id": "slice-1",
+                    "execution_path": "slice-1 -> slice-2 -> slice-3",
+                    "plan": [
+                        {"id": "slice-1"},
+                        {"id": "slice-2"},
+                        {"id": "slice-3"},
+                    ],
+                },
+                "summary": "review exhausted",
+                "question": "replan without dropping scope",
+                "context": "prior review context",
+            },
+        },
+    }
+    try:
+        worker.o.get_project = lambda cfg, project_name: {"name": project_name, "path": "/tmp/lvc"}
+        worker.o.now_iso = lambda: "2026-04-25T13:40:00"
+        worker.o.iter_tasks = lambda **kwargs: []
+        worker.o.enqueue_task = lambda child: enqueued.append(child)
+        worker.read_memory_context = lambda *args, **kwargs: "memory"
+        worker._run_bounded = lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, stdout, "")
+        worker._record_task_costs_from_text = lambda *args, **kwargs: 0
+
+        def fake_move(task_id, from_state, to_state, reason="", mutator=None):
+            body = {"task_id": task_id}
+            if mutator:
+                mutator(body)
+            moves.append({"from": from_state, "to": to_state, "reason": reason, "task": body})
+
+        worker.o.move_task = fake_move
+        with tempfile.TemporaryDirectory() as tmp:
+            worker.run_claude_planner(task, {"council": {}}, 30, pathlib.Path(tmp) / "planner.log")
+    finally:
+        for key, value in old.items():
+            if key in {"read_memory_context", "_run_bounded", "_record_task_costs_from_text"}:
+                setattr(worker, key, value)
+            else:
+                setattr(worker.o, key, value)
+    blocked = next((move for move in moves if move["to"] == "blocked"), {})
+    blocker = (blocked.get("task") or {}).get("blocker") or {}
+    return {
+        "blocked": blocked.get("to") == "blocked",
+        "blocker_code": blocker.get("code"),
+        "retryable": blocker.get("retryable"),
+        "enqueued_count": len(enqueued),
+        "origin_slice_count": (((blocked.get("task") or {}).get("planner_refine_scope_drift") or {}).get("origin_slice_count")),
+        "refined_slice_count": (((blocked.get("task") or {}).get("planner_refine_scope_drift") or {}).get("refined_slice_count")),
+    }
 
 
 def _run_slice_alias_custom_id_not_hijacked(repo_root, scenario):
@@ -8103,6 +8221,10 @@ def main(argv):
         actual = _run_env_bypass_budget_triggers_self_repair(repo_root, scenario)
     elif kind == "planner_refine_missing_origin_context":
         actual = _run_planner_refine_missing_origin_context(repo_root, scenario)
+    elif kind == "planner_context_block_inline":
+        actual = _run_planner_context_block_inline(repo_root, scenario)
+    elif kind == "planner_refine_scope_drift_blocks":
+        actual = _run_planner_refine_scope_drift_blocks(repo_root, scenario)
     elif kind == "slice_alias_custom_id_not_hijacked":
         actual = _run_slice_alias_custom_id_not_hijacked(repo_root, scenario)
     elif kind == "slice_context_block_handles_null_plan":
