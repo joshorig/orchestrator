@@ -1,6 +1,10 @@
 {
   "loop_blocker_code": "review_feedback_loop",
   "loop_rounds": 2,
-  "cap_blocker_code": "review_feedback_exhausted",
-  "cap_rounds": 5
+  "exhausted_enqueues_planner_refine": true,
+  "exhausted_target_abandoned": true,
+  "removed_children": [
+    "task-b",
+    "task-sibling"
+  ]
 }

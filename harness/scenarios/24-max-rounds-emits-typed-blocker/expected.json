@@ -1,8 +1,8 @@
 {
-  "state": "failed",
-  "blocker_code": "review_feedback_exhausted",
-  "retryable": false,
+  "state": "abandoned",
+  "planner_mode": "planner-refine",
+  "planner_origin_task_id": "task-scenario-24",
   "review_feedback_rounds": 9,
-  "failure": "review rounds exhausted (8)",
+  "abandoned_reason": "superseded by planner refine",
   "alert_count": 1
 }

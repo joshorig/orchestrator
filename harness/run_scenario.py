@@ -571,18 +571,20 @@ def _run_review_feedback_exhaustion(repo_root, scenario):
                 scenario["review_findings"],
                 lambda t: t.update({"reviewed_by": scenario["reviewer_task_id"]}),
             )
-            failed = orchestrator.read_json(orchestrator.task_path(task["task_id"], "failed"), {})
+            abandoned = orchestrator.read_json(orchestrator.task_path(task["task_id"], "abandoned"), {})
+            planners = list(orchestrator.iter_tasks(states=("queued",), engine="claude"))
         finally:
             orchestrator.QUEUE_ROOT = old_orch["QUEUE_ROOT"]
             orchestrator.REPORT_DIR = old_orch["REPORT_DIR"]
             orchestrator._write_pr_alert = old_orch["_write_pr_alert"]
             worker.o = old_worker["o"]
+        planner = planners[0] if planners else {}
         return {
-            "state": failed.get("state"),
-            "blocker_code": ((failed.get("blocker") or {}).get("code")),
-            "retryable": ((failed.get("blocker") or {}).get("retryable")),
-            "review_feedback_rounds": failed.get("review_feedback_rounds"),
-            "failure": failed.get("failure"),
+            "state": abandoned.get("state"),
+            "planner_mode": ((planner.get("engine_args") or {}).get("mode")),
+            "planner_origin_task_id": (((planner.get("engine_args") or {}).get("planner_refine") or {}).get("origin_task_id")),
+            "review_feedback_rounds": abandoned.get("review_feedback_rounds"),
+            "abandoned_reason": abandoned.get("abandoned_reason"),
             "alert_count": len(alerts),
         }
 
@@ -4599,17 +4601,66 @@ def _run_review_feedback_loop_detection(repo_root, scenario):
     _orchestrator, worker = _load_repo_modules(repo_root)
     calls = []
     class FakeO:
+        STATES = ("queued", "claimed", "running", "blocked", "awaiting-review", "awaiting-qa", "done", "failed", "abandoned")
         def new_task(self, **kwargs):
-            return {"task_id": "task-feedback", **kwargs}
+            kind = (kwargs.get("engine_args") or {}).get("mode") or kwargs.get("braid_template")
+            task_id = "task-planner-refine" if kind == "planner-refine" else "task-feedback"
+            return {"task_id": task_id, **kwargs}
         def enqueue_task(self, task):
-            calls.append(("enqueue", task["engine_args"]["round"]))
+            calls.append(("enqueue", task.get("task_id"), (task.get("engine_args") or {}).get("mode"), task.get("summary")))
         def move_task(self, task_id, from_state, to_state, reason="", mutator=None):
-            body = {"review_feedback_rounds": 0, "review_feedback_signatures": []}
+            body = {
+                "task_id": task_id,
+                "review_feedback_rounds": 0,
+                "review_feedback_signatures": [],
+            }
             if mutator:
                 mutator(body)
-            calls.append(("move", to_state, body.get("review_feedback_rounds"), list(body.get("review_feedback_signatures") or [])))
+            calls.append(("move", task_id, from_state, to_state, reason, body.get("review_feedback_rounds"), list(body.get("review_feedback_signatures") or []), body.get("planner_refine_request")))
         def _write_pr_alert(self, *args):
             calls.append(("alert", args[3]))
+        def update_task_in_place(self, path, mutator):
+            body = {
+                "task_id": "task-b",
+                "review_feedback_rounds": 4,
+                "review_feedback_signatures": [],
+                "policy_review_findings": ["high-confidence secret pattern in diff: high-entropy token"],
+            }
+            mutator(body)
+            calls.append(("update", body.get("review_feedback_rounds"), list(body.get("review_feedback_signatures") or [])))
+        def task_path(self, task_id, state):
+            return f"{state}/{task_id}.json"
+        def now_iso(self):
+            return "2026-04-25T06:00:00"
+        def set_task_blocker(self, task, code, **kwargs):
+            task["blocker"] = {"code": code, **kwargs}
+        def read_feature(self, feature_id):
+            return {"feature_id": feature_id, "summary": "Snapshot/restore API"}
+        def find_task(self, task_id):
+            if task_id == "task-plan":
+                return ("done", {"task_id": "task-plan", "engine_args": {"roadmap_entry": {"id": "R-002", "title": "Snapshot/restore", "body": "body"}}})
+            return None
+        def iter_tasks(self, states=None, project=None):
+            rows = [
+                {
+                    "task_id": "feedback-old",
+                    "state": "done",
+                    "source": "review-feedback:reviewer-old",
+                    "engine_args": {"target_task_id": "task-b", "round": 3, "review_findings": "prior feedback: buffer pool release still missing"},
+                },
+                {
+                    "task_id": "task-sibling",
+                    "state": "queued",
+                    "project": "demo",
+                    "feature_id": "f2",
+                    "parent_task_id": "task-plan",
+                },
+            ]
+            if states == ("queued",) and project == "demo":
+                return [rows[1]]
+            return rows
+        def remove_feature_children(self, feature_id, child_ids):
+            calls.append(("remove_children", feature_id, list(child_ids)))
     old_o = worker.o
     old_fail = worker.fail_task
     worker.o = FakeO()
@@ -4634,19 +4685,33 @@ def _run_review_feedback_loop_detection(repo_root, scenario):
         worker._handle_review_request_change(
             "reviewer-2",
             "demo",
-            {"task_id": "task-b", "project": "demo", "feature_id": "f2", "base_branch": "main", "worktree": "/tmp/wt", "review_feedback_rounds": 4, "review_feedback_signatures": []},
+            {
+                "task_id": "task-b",
+                "project": "demo",
+                "feature_id": "f2",
+                "parent_task_id": "task-plan",
+                "base_branch": "main",
+                "worktree": "/tmp/wt",
+                "review_feedback_rounds": 4,
+                "review_feedback_signatures": [],
+                "policy_review_findings": ["high-confidence secret pattern in diff: high-entropy token"],
+                "engine_args": {"slice": {"id": "slice-1", "execution_path": "slice-1 -> slice-2"}},
+            },
             {"issue": "need tests"},
             lambda t: t.update({"reviewed_by": "reviewer-2"}),
         )
-        cap_fail = next(item for item in calls if item[0] == "fail")
+        planner_task = next(item for item in calls if item[0] == "enqueue" and item[2] == "planner-refine")
+        abandoned = next(item for item in calls if item[0] == "move" and item[1] == "task-b" and item[3] == "abandoned")
+        removed = next(item for item in calls if item[0] == "remove_children")
     finally:
         worker.o = old_o
         worker.fail_task = old_fail
     return {
         "loop_blocker_code": loop_fail[1],
         "loop_rounds": loop_fail[3],
-        "cap_blocker_code": cap_fail[1],
-        "cap_rounds": cap_fail[3],
+        "exhausted_enqueues_planner_refine": planner_task[2] == "planner-refine",
+        "exhausted_target_abandoned": abandoned[3] == "abandoned",
+        "removed_children": removed[2],
     }
 
 
