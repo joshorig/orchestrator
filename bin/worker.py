@@ -4274,16 +4274,39 @@ def _normalize_braid_status(value):
 
 
 def _extract_braid_result_payload(raw):
+    payloads = []
     try:
-        payload = _extract_json_fragment(raw, "object")
+        payloads.append(_extract_json_fragment(raw, "object"))
     except Exception:
-        return None
-    if not isinstance(payload, dict):
-        return None
-    status = _normalize_braid_status(payload.get("braid_status") or payload.get("status"))
-    if not status:
-        return None
-    return payload
+        payloads.extend(_extract_json_object_candidates(raw))
+    for payload in reversed(payloads):
+        if not isinstance(payload, dict):
+            continue
+        status = _normalize_braid_status(payload.get("braid_status") or payload.get("status"))
+        if status:
+            return payload
+    return None
+
+
+def _extract_json_object_candidates(raw):
+    """Return JSON objects embedded in mixed text, preserving text order.
+
+    This is intentionally used only for BRAID result extraction. Planner and
+    council contracts remain strict JSON to avoid accepting ambiguous plans.
+    """
+    text = str(raw or "")
+    decoder = json.JSONDecoder()
+    out = []
+    for idx, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            parsed, _end = decoder.raw_decode(text[idx:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            out.append(parsed)
+    return out
 
 
 def _braid_result_payload_to_trailer(payload):

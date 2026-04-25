@@ -4067,6 +4067,16 @@ def atomic_claim(slot_engine):
             task["claimed_at"] = now_iso()
             write_json_atomic(dst, task)
         append_transition(task["task_id"], "queued", "claimed", slot_engine)
+        if slot_engine == "codex" and task.get("feature_id"):
+            older = _older_inflight_feature_task(task.get("feature_id"), task, _task_sort_key)
+            if older:
+                move_task(
+                    task["task_id"],
+                    "claimed",
+                    "queued",
+                    reason=f"claim race: feature {task.get('feature_id')} already held by {older.get('task_id')}",
+                )
+                continue
         return task
     return None
 
@@ -4203,9 +4213,79 @@ def reap():
                 )
                 reaped += 1
     tick_braid_auto_regen(load_config())
+    reaped += _reap_blocked_review_feedback_targets()
     nudged = _nudge_idle_queued_workers()
     if nudged:
         append_event("reaper", "idle_workers_nudged", details=nudged)
+    return reaped
+
+
+def _reap_blocked_review_feedback_targets():
+    """Recover review-feedback tasks that blocked on a target that later stabilized.
+
+    >>> import pathlib, tempfile
+    >>> with tempfile.TemporaryDirectory() as tmp:
+    ...     root = pathlib.Path(tmp)
+    ...     old_root = _reap_blocked_review_feedback_targets.__globals__["QUEUE_ROOT"]
+    ...     old_now = _reap_blocked_review_feedback_targets.__globals__["now_iso"]
+    ...     _reap_blocked_review_feedback_targets.__globals__["QUEUE_ROOT"] = root / "queue"
+    ...     _reap_blocked_review_feedback_targets.__globals__["now_iso"] = lambda: "2026-04-25T10:00:00"
+    ...     for state in STATES:
+    ...         _ = queue_dir(state)
+    ...     feedback = new_task(role="implementer", engine="codex", project="demo", summary="feedback", source="test", feature_id="feature-1", braid_template="review-address-feedback")
+    ...     feedback["task_id"] = "feedback-1"
+    ...     feedback["state"] = "blocked"
+    ...     feedback["engine_args"] = {"target_task_id": "target-1"}
+    ...     _ = set_task_blocker(feedback, "review_feedback_target_inflight", summary="target in flight", detail="target state=running", source="test", retryable=True)
+    ...     write_json_atomic(task_path("feedback-1", "blocked"), feedback)
+    ...     target = new_task(role="implementer", engine="codex", project="demo", summary="target", source="test", feature_id="feature-1")
+    ...     target["task_id"] = "target-1"
+    ...     target["state"] = "abandoned"
+    ...     write_json_atomic(task_path("target-1", "abandoned"), target)
+    ...     out = _reap_blocked_review_feedback_targets()
+    ...     abandoned = read_json(task_path("feedback-1", "abandoned"))
+    ...     _reap_blocked_review_feedback_targets.__globals__["QUEUE_ROOT"] = old_root
+    ...     _reap_blocked_review_feedback_targets.__globals__["now_iso"] = old_now
+    >>> (out, abandoned["abandoned_reason"])
+    (1, 'review-feedback target target-1 is abandoned')
+    """
+    reaped = 0
+    stable_retry_states = ("queued", "awaiting-review", "awaiting-qa")
+    terminal_states = ("done", "failed", "abandoned")
+    for task in list(iter_tasks(states=("blocked",))):
+        blocker = task_blocker(task)
+        if blocker.get("code") != "review_feedback_target_inflight":
+            continue
+        target_id = ((task.get("engine_args") or {}).get("target_task_id") or "").strip()
+        if not target_id:
+            continue
+        target = find_task(target_id, states=stable_retry_states + ("claimed", "running") + terminal_states)
+        if target and target[0] in ("claimed", "running"):
+            continue
+        if target and target[0] in stable_retry_states:
+            reset_task_for_retry(
+                task["task_id"],
+                "blocked",
+                reason=f"reaper: review-feedback target {target_id} stabilized in {target[0]}",
+                source="reaper",
+            )
+            reaped += 1
+            continue
+        target_state = target[0] if target else "missing"
+        reason = f"review-feedback target {target_id} is {target_state}"
+        move_task(
+            task["task_id"],
+            "blocked",
+            "abandoned",
+            reason=f"reaper: {reason}",
+            mutator=lambda t, reason=reason: t.update({"finished_at": now_iso(), "abandoned_reason": reason}),
+        )
+        if task.get("feature_id"):
+            try:
+                remove_feature_children(task["feature_id"], [task["task_id"]])
+            except FileNotFoundError:
+                pass
+        reaped += 1
     return reaped
 
 
@@ -6266,6 +6346,34 @@ def update_task_in_place(task_file, mutator):
 
 def _task_exists_in_queue(task_id, states=("queued", "claimed", "running")):
     return find_task(task_id, states=states) is not None
+
+
+def _older_inflight_feature_task(feature_id, current_task, sort_key_fn=None):
+    """Return an older claimed/running sibling for the same feature, if present.
+
+    Used after claim to close the race where two codex workers both observe an
+    empty busy-feature set before either writes its claim.
+
+    >>> _older_inflight_feature_task("f1", {"task_id": "task-b", "created_at": "2026-04-25T10:00:01"}, sort_key_fn=lambda t: (t.get("created_at"), t.get("task_id"))) is None
+    True
+    """
+    if not feature_id:
+        return None
+    sort_key_fn = sort_key_fn or (lambda t: (str(t.get("created_at") or ""), str(t.get("task_id") or "")))
+    current_id = current_task.get("task_id")
+    current_key = sort_key_fn(current_task)
+    older = []
+    for task in iter_tasks(states=("claimed", "running")):
+        if task.get("feature_id") != feature_id:
+            continue
+        if task.get("task_id") == current_id:
+            continue
+        if sort_key_fn(task) < current_key:
+            older.append(task)
+    if not older:
+        return None
+    older.sort(key=sort_key_fn)
+    return older[0]
 
 
 def _feature_has_in_flight_branch_repair(feature_id, *, exclude_task_ids=()):

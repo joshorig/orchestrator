@@ -1,5 +1,7 @@
 {
   "review_verdict": "approve",
+  "mixed_review_verdict": "request_change",
+  "mixed_review_trailer": "BRAID_OK: REQUEST_CHANGE — final reviewer handoff",
   "review_trailer": "BRAID_OK: APPROVE — minimal historian append only",
   "refine_trailer": "BRAID_REFINE: CheckBaseline: add baseline_red edge to End",
   "topology_trailer": "BRAID_TOPOLOGY_ERROR: patch_anchor_drift repeated apply_patch verification failures (2)"

@@ -66,7 +66,7 @@ def _scenario_cluster(name, scenario_kind):
                          "council_malformed", "council_deleted_task_ref", "false_blocker_attach", "qa_preflight",
                          "project_main_dirty_cap", "regression_clear", "missing_child", "canary_fallback", "qa_contract_scoped",
                          "qa_contract_full_tick", "self_repair_issue_backfill", "attempt_cap", "fix2_reopen_after_manual_abandon",
-                         "r16_override"}:
+                         "r16_override", "review_feedback_reaper_stale_target", "atomic_claim_feature_race_requeues_newer"}:
         return "self-repair"
     return "other"
 
@@ -4180,6 +4180,14 @@ def _run_braid_result_json_envelope(repo_root, scenario):
     review_raw = """
 {"status":"ok","verdict":"approve","summary":"minimal historian append only"}
 """
+    mixed_review_raw = """
+**Council deliberation**
+
+Earlier tool envelope:
+{"type":"result","result":"not the handoff"}
+
+{"status":"ok","verdict":"request_change","summary":"final reviewer handoff"}
+"""
     refine_raw = """
 {"status":"refine","refine_kind":"template","node_id":"CheckBaseline","condition":"add baseline_red edge to End"}
 """
@@ -4188,6 +4196,8 @@ def _run_braid_result_json_envelope(repo_root, scenario):
 """
     return {
         "review_verdict": worker._extract_review_verdict(review_raw),
+        "mixed_review_verdict": worker._extract_review_verdict(mixed_review_raw),
+        "mixed_review_trailer": worker._extract_braid_result_trailer(mixed_review_raw),
         "review_trailer": worker._extract_braid_result_trailer(review_raw),
         "refine_trailer": worker._extract_braid_result_trailer(refine_raw),
         "topology_trailer": worker._extract_braid_result_trailer(topo_raw),
@@ -4813,6 +4823,123 @@ def _run_review_feedback_blocks_on_inflight_target(repo_root, scenario):
         "blocked_code": blocker.get("code"),
         "retryable": bool(blocker.get("retryable")),
         "workflow_retry_called": ok and retried.get("task_id") == "feedback-1",
+    }
+
+
+def _run_review_feedback_reaper_stale_target(repo_root, scenario):
+    orchestrator, _worker = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        queue_root = root / "queue"
+        for state in orchestrator.STATES:
+            (queue_root / state).mkdir(parents=True, exist_ok=True)
+        old = {
+            "QUEUE_ROOT": orchestrator.QUEUE_ROOT,
+            "now_iso": orchestrator.now_iso,
+            "STATE_ENGINE_MODE": os.environ.get("STATE_ENGINE_MODE"),
+        }
+        os.environ["STATE_ENGINE_MODE"] = "off"
+        orchestrator.QUEUE_ROOT = queue_root
+        orchestrator.now_iso = lambda: "2026-04-25T10:40:00"
+        try:
+            feedback = orchestrator.new_task(
+                role="implementer",
+                engine="codex",
+                project="lvc-standard",
+                summary="Address reviewer findings",
+                source="scenario",
+                feature_id="feature-stale",
+                braid_template="review-address-feedback",
+            )
+            feedback["task_id"] = "feedback-stale"
+            feedback["state"] = "blocked"
+            feedback["engine_args"] = {"target_task_id": "target-old"}
+            orchestrator.set_task_blocker(
+                feedback,
+                "review_feedback_target_inflight",
+                summary="target in-flight",
+                detail="target state=running",
+                source="scenario",
+                retryable=True,
+            )
+            orchestrator.write_json_atomic(orchestrator.task_path("feedback-stale", "blocked"), feedback)
+            target = orchestrator.new_task(
+                role="implementer",
+                engine="codex",
+                project="lvc-standard",
+                summary="Old target",
+                source="scenario",
+                feature_id="feature-stale",
+            )
+            target["task_id"] = "target-old"
+            target["state"] = scenario.get("target_state", "abandoned")
+            orchestrator.write_json_atomic(orchestrator.task_path("target-old", target["state"]), target)
+            reaped = orchestrator.reap()
+            found = orchestrator.find_task("feedback-stale")
+        finally:
+            orchestrator.QUEUE_ROOT = old["QUEUE_ROOT"]
+            orchestrator.now_iso = old["now_iso"]
+            if old["STATE_ENGINE_MODE"] is None:
+                os.environ.pop("STATE_ENGINE_MODE", None)
+            else:
+                os.environ["STATE_ENGINE_MODE"] = old["STATE_ENGINE_MODE"]
+    state, task = found
+    return {
+        "reaped": reaped,
+        "feedback_state": state,
+        "abandoned_reason": task.get("abandoned_reason"),
+    }
+
+
+def _run_atomic_claim_feature_race_requeues_newer(repo_root, scenario):
+    orchestrator, _worker = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        queue_root = root / "queue"
+        for state in orchestrator.STATES:
+            (queue_root / state).mkdir(parents=True, exist_ok=True)
+        old = {
+            "QUEUE_ROOT": orchestrator.QUEUE_ROOT,
+            "now_iso": orchestrator.now_iso,
+            "project_environment_ok": orchestrator.project_environment_ok,
+            "in_flight_feature_ids": orchestrator.in_flight_feature_ids,
+            "load_braid_index": orchestrator.load_braid_index,
+            "STATE_ENGINE_MODE": os.environ.get("STATE_ENGINE_MODE"),
+        }
+        os.environ["STATE_ENGINE_MODE"] = "off"
+        orchestrator.QUEUE_ROOT = queue_root
+        orchestrator.now_iso = lambda: "2026-04-25T10:41:00"
+        orchestrator.project_environment_ok = lambda *args, **kwargs: True
+        orchestrator.in_flight_feature_ids = lambda: set()
+        orchestrator.load_braid_index = lambda: {}
+        try:
+            older = orchestrator.new_task(role="implementer", engine="codex", project="demo", summary="older", source="scenario", feature_id="feature-race")
+            older["task_id"] = "task-older"
+            older["state"] = "running"
+            older["created_at"] = "2026-04-25T10:00:00"
+            older["created_at_epoch"] = 1
+            orchestrator.write_json_atomic(orchestrator.task_path("task-older", "running"), older)
+            newer = orchestrator.new_task(role="implementer", engine="codex", project="demo", summary="newer", source="scenario", feature_id="feature-race")
+            newer["task_id"] = "task-newer"
+            newer["state"] = "queued"
+            newer["created_at"] = "2026-04-25T10:00:01"
+            newer["created_at_epoch"] = 2
+            orchestrator.write_json_atomic(orchestrator.task_path("task-newer", "queued"), newer)
+            claimed = orchestrator.atomic_claim("codex")
+            found = orchestrator.find_task("task-newer")
+        finally:
+            orchestrator.QUEUE_ROOT = old["QUEUE_ROOT"]
+            orchestrator.now_iso = old["now_iso"]
+            orchestrator.project_environment_ok = old["project_environment_ok"]
+            orchestrator.in_flight_feature_ids = old["in_flight_feature_ids"]
+            orchestrator.load_braid_index = old["load_braid_index"]
+            if old["STATE_ENGINE_MODE"] is None:
+                os.environ.pop("STATE_ENGINE_MODE", None)
+            else:
+                os.environ["STATE_ENGINE_MODE"] = old["STATE_ENGINE_MODE"]
+    return {
+        "claimed_task": (claimed or {}).get("task_id"),
+        "newer_state": found[0] if found else None,
     }
 
 
@@ -7373,6 +7500,10 @@ def main(argv):
         actual = _run_feature_finalize_orphan_no_children(repo_root, scenario)
     elif kind == "atomic_claim_skips_terminal_feature_children":
         actual = _run_atomic_claim_skips_terminal_feature_children(repo_root, scenario)
+    elif kind == "review_feedback_reaper_stale_target":
+        actual = _run_review_feedback_reaper_stale_target(repo_root, scenario)
+    elif kind == "atomic_claim_feature_race_requeues_newer":
+        actual = _run_atomic_claim_feature_race_requeues_newer(repo_root, scenario)
     elif kind == "health_payload_prefers_live_state":
         actual = _run_health_payload_prefers_live_state(repo_root, scenario)
     elif kind == "ull_lock_guard_findings":

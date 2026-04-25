@@ -1,0 +1,5 @@
+{
+  "kind": "review_feedback_reaper_stale_target",
+  "scenario_version": 1,
+  "target_state": "abandoned"
+}
