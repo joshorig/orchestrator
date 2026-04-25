@@ -2406,6 +2406,25 @@ def _test_ratio_policy(task=None, *, cfg=None):
     return merged
 
 
+def _validation_evidence_policy(task=None, *, cfg=None):
+    cfg = cfg or o.load_config()
+    policy = dict((((cfg.get("review_policy") or {}).get("validation_evidence_required")) or {}))
+    override = {}
+    template = (task or {}).get("braid_template")
+    if template:
+        override = dict((policy.get("template_overrides") or {}).get(template) or {})
+    merged = {
+        "enabled": bool(policy.get("enabled", True)),
+        "accept_doctest": bool(policy.get("accept_doctest", True)),
+        "risk_based": bool(policy.get("risk_based", True)),
+    }
+    if override:
+        for key in ("enabled", "accept_doctest", "risk_based"):
+            if key in override:
+                merged[key] = bool(override.get(key))
+    return merged
+
+
 def _doctest_backed_files(worktree, files):
     out = []
     if not worktree:
@@ -2427,10 +2446,10 @@ def _doctest_backed_files(worktree, files):
 
 
 def _test_ratio_findings(changed_files_text, *, task=None, worktree=None, cfg=None):
-    """Review gate for code/test delta balance, with template-level overrides.
+    """Advisory review signal for code/test delta balance.
 
     >>> _test_ratio_findings("bin/a.py\\nbin/b.py\\n")
-    ['test-to-code delta ratio too low: code_files=2 test_files=0']
+    ['advisory: test-to-code delta ratio low: code_files=2 test_files=0']
     >>> cfg = {"review_policy": {"test_to_code_ratio": {"min_ratio": 0.5, "accept_doctest": False, "template_overrides": {"orchestrator-self-repair": {"min_ratio": 0.0, "accept_doctest": True}}}}}
     >>> _test_ratio_findings("bin/a.py\\nbin/b.py\\n", task={"braid_template": "orchestrator-self-repair"}, cfg=cfg)
     []
@@ -2470,7 +2489,81 @@ def _test_ratio_findings(changed_files_text, *, task=None, worktree=None, cfg=No
         ratio = len(test_files) / max(len(code_files), 1)
         if ratio >= policy["min_ratio"]:
             return []
-    return [f"test-to-code delta ratio too low: code_files={len(code_files)} test_files={len(test_files)}"]
+    return [f"advisory: test-to-code delta ratio low: code_files={len(code_files)} test_files={len(test_files)}"]
+
+
+def _validation_evidence_findings(changed_files_text, *, task=None, worktree=None, cfg=None):
+    """Hard gate for missing validation evidence on risky changes.
+
+    One grouped scenario/test/benchmark can cover many code files; this gate
+    deliberately avoids per-code-file ratios.
+
+    >>> _validation_evidence_findings("bin/orchestrator.py\\nbin/worker.py\\nharness/scenarios/200-demo/scenario.yaml\\n")
+    []
+    >>> _validation_evidence_findings("bin/orchestrator.py\\nbin/worker.py\\n")
+    ['validation evidence missing for high-risk change: code_files=2 evidence_files=0']
+    >>> _validation_evidence_findings("docs/readme.ts\\n")
+    []
+    """
+    files = _changed_file_list(changed_files_text)
+    policy = _validation_evidence_policy(task, cfg=cfg)
+    if not policy["enabled"]:
+        return []
+    code_files = [
+        f for f in files
+        if f.endswith((".py", ".java", ".ts", ".tsx", ".js", ".jsx"))
+        and "/test" not in f.lower()
+        and "/tests" not in f.lower()
+        and not pathlib.Path(f).name.startswith("test_")
+    ]
+    if not code_files:
+        return []
+    evidence_files = [
+        f for f in files
+        if "/test" in f.lower()
+        or "/tests" in f.lower()
+        or f.startswith("harness/scenarios/")
+        or pathlib.Path(f).name.startswith("test_")
+        or f.endswith((".spec.ts", ".spec.tsx", ".spec.js", ".spec.jsx", ".test.ts", ".test.tsx", ".test.js", ".test.jsx"))
+        or "benchmark" in f.lower()
+        or "jmh" in f.lower()
+    ]
+    if policy["accept_doctest"]:
+        evidence_files = list(dict.fromkeys(evidence_files + _doctest_backed_files(worktree, code_files)))
+    if evidence_files:
+        return []
+    if policy["risk_based"] and not any(_validation_evidence_required_for_file(f) for f in code_files):
+        return []
+    return [f"validation evidence missing for high-risk change: code_files={len(code_files)} evidence_files=0"]
+
+
+def _validation_evidence_required_for_file(path):
+    text = str(path).lower()
+    risk_tokens = (
+        "bin/orchestrator.py",
+        "bin/worker.py",
+        "bin/state_engine.py",
+        "bin/telegram_bot.py",
+        "dashboard",
+        "state/",
+        "migration",
+        "queue",
+        "workflow",
+        "claim",
+        "review",
+        "qa",
+        "security",
+        "secret",
+        "lock",
+        "concurrent",
+        "hot",
+        "performance",
+    )
+    return any(token in text for token in risk_tokens)
+
+
+def _hard_review_gate_findings(policy_findings, secret_findings, supply_chain_findings, compile_findings, validation_findings):
+    return list(policy_findings) + list(secret_findings) + list(supply_chain_findings) + list(compile_findings) + list(validation_findings)
 
 
 def _specialized_review_prompt(
@@ -5127,6 +5220,7 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
     supply_chain_findings = _supply_chain_findings(target_wt, target_base)
     compile_findings = _compile_gate_findings(project, target_wt, changed_files)
     ratio_findings = _test_ratio_findings(changed_files, task=target, worktree=target_wt, cfg=cfg)
+    validation_findings = _validation_evidence_findings(changed_files, task=target, worktree=target_wt, cfg=cfg)
     target_slice_ctx = _render_slice_context_block(target)
     feature = o.read_feature(target.get("feature_id")) if target.get("feature_id") else None
     roadmap_ctx = ""
@@ -5168,9 +5262,9 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
         f"{roadmap_ctx}"
         + (
             "[PRE-CHECK POLICY FINDINGS]\n"
-            + "\n".join(f"- {item}" for item in (policy_findings + secret_findings + supply_chain_findings + compile_findings + ratio_findings))
+            + "\n".join(f"- {item}" for item in (policy_findings + secret_findings + supply_chain_findings + compile_findings + validation_findings + ratio_findings))
             + "\n\n"
-            if (policy_findings or secret_findings or supply_chain_findings or compile_findings or ratio_findings) else ""
+            if (policy_findings or secret_findings or supply_chain_findings or compile_findings or validation_findings or ratio_findings) else ""
         )
         + (f"[IMPLEMENTATION CHALLENGE NOTES]\n{challenge_notes}\n\n" if challenge_notes else "")
         + target_slice_ctx
@@ -5199,9 +5293,9 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
         f"{roadmap_ctx}"
         + (
             "[PRE-CHECK POLICY FINDINGS]\n"
-            + "\n".join(f"- {item}" for item in (policy_findings + secret_findings + supply_chain_findings + compile_findings + ratio_findings))
+            + "\n".join(f"- {item}" for item in (policy_findings + secret_findings + supply_chain_findings + compile_findings + validation_findings + ratio_findings))
             + "\n\n"
-            if (policy_findings or secret_findings or supply_chain_findings or compile_findings or ratio_findings) else ""
+            if (policy_findings or secret_findings or supply_chain_findings or compile_findings or validation_findings or ratio_findings) else ""
         )
         + (f"[IMPLEMENTATION CHALLENGE NOTES]\n{challenge_notes}\n\n" if challenge_notes else "")
         + target_slice_ctx
@@ -5452,7 +5546,13 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
                 "request_change" if self_repair_adjudication.get("verdict") == "request_change" else self_repair_adjudication.get("verdict")
             )
 
-        hard_gate_findings = policy_findings + secret_findings + supply_chain_findings + compile_findings + ratio_findings
+        hard_gate_findings = _hard_review_gate_findings(
+            policy_findings,
+            secret_findings,
+            supply_chain_findings,
+            compile_findings,
+            validation_findings,
+        )
         if final_verdict == "approve" and hard_gate_findings:
             final_verdict = "request_change"
             combined_findings = (
@@ -5480,7 +5580,7 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
         t["review_verdict"] = final_verdict
         t["reviewed_at"] = o.now_iso()
         t["reviewed_by"] = task_id
-        t["policy_review_findings"] = policy_findings + secret_findings + supply_chain_findings + compile_findings + ratio_findings
+        t["policy_review_findings"] = policy_findings + secret_findings + supply_chain_findings + compile_findings + validation_findings + ratio_findings
         t["review_council_panel"] = list(review_panel)
         t["review_gates"] = ["functional-review", "council-review", *gate_names] + (["self-repair-adjudication"] if is_self_repair_target else [])
         t["review_gate_panels"] = {name: list(gate_panels.get(name) or ()) for name in gate_names}

@@ -387,9 +387,18 @@ def _run_r16_override(repo_root, scenario):
             worktree=root,
             cfg=cfg,
         )
+        validation_findings = worker._validation_evidence_findings(
+            scenario["changed_files_text"],
+            task=task,
+            worktree=root,
+            cfg=cfg,
+        )
+        hard_findings = worker._hard_review_gate_findings([], [], [], [], validation_findings)
     return {
         "ratio_findings": ratio_findings,
-        "review_verdict": "approve" if not ratio_findings else "request_change",
+        "validation_findings": validation_findings,
+        "hard_findings": hard_findings,
+        "review_verdict": "approve" if not hard_findings else "request_change",
     }
 
 

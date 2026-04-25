@@ -129,6 +129,12 @@
           "accept_doctest": true
         }
       }
+    },
+    "validation_evidence_required": {
+      "enabled": true,
+      "accept_doctest": true,
+      "risk_based": true,
+      "template_overrides": {}
     }
   },
   "synthetic_canary": {

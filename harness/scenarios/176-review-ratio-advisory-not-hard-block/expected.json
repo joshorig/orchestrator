@@ -1,0 +1,8 @@
+{
+  "ratio_findings": [
+    "advisory: test-to-code delta ratio low: code_files=2 test_files=0"
+  ],
+  "validation_findings": [],
+  "hard_findings": [],
+  "review_verdict": "approve"
+}

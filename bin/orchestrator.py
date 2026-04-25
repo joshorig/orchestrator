@@ -672,6 +672,12 @@ CONFIG_DEFAULTS = {
             "accept_doctest": False,
             "template_overrides": {},
         },
+        "validation_evidence_required": {
+            "enabled": True,
+            "accept_doctest": True,
+            "risk_based": True,
+            "template_overrides": {},
+        },
     },
     "skills": {
         "trusted_root": ".claude/skills",

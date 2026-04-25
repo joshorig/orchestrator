@@ -1,12 +1,12 @@
 {
   "ratio_findings": [
-    "test-to-code delta ratio too low: code_files=2 test_files=0"
+    "advisory: test-to-code delta ratio low: code_files=2 test_files=0"
   ],
   "final_state": "abandoned",
   "blocker_code": "attempt_exhausted",
   "alert_count": 1,
   "review_verdict": "request_change",
   "policy_review_findings": [
-    "test-to-code delta ratio too low: code_files=2 test_files=0"
+    "validation evidence missing for high-risk change: code_files=2 evidence_files=0"
   ]
 }

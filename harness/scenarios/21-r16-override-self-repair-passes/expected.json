@@ -1,4 +1,6 @@
 {
   "ratio_findings": [],
+  "validation_findings": [],
+  "hard_findings": [],
   "review_verdict": "approve"
 }
