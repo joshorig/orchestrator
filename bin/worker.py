@@ -4510,7 +4510,14 @@ def enqueue_braid_planner_refine(task, project_name, trailer, *, from_state):
                 ),
             )
             superseded.append(sibling_id)
-        o.remove_feature_children(feature_id, [task["task_id"], *superseded])
+        removed_child_ids = [task["task_id"], *superseded]
+        retired_followups = _retire_superseded_followup_tasks(
+            feature_id,
+            removed_child_ids,
+            planner_task_id=planner_task["task_id"],
+            project_name=project_name,
+        )
+        o.remove_feature_children(feature_id, [*removed_child_ids, *retired_followups])
 
     def mut_abandon(t):
         t["finished_at"] = o.now_iso()
@@ -4535,6 +4542,45 @@ def enqueue_braid_planner_refine(task, project_name, trailer, *, from_state):
         reason=f"planner refine -> {planner_task['task_id']}",
         mutator=mut_abandon,
     )
+
+
+def _retire_superseded_followup_tasks(feature_id, target_task_ids, *, planner_task_id, project_name):
+    """Abandon feedback/follow-up lanes whose target is being replaced by planner-refine."""
+    target_ids = set(target_task_ids or ())
+    retired = []
+    for candidate in o.iter_tasks(states=("queued", "claimed", "running", "blocked"), project=project_name):
+        task_id = candidate.get("task_id")
+        if not task_id or task_id in target_ids:
+            continue
+        if candidate.get("feature_id") != feature_id:
+            continue
+        source = str(candidate.get("source") or "")
+        args = candidate.get("engine_args") or {}
+        target_id = args.get("target_task_id") or candidate.get("parent_task_id")
+        if target_id not in target_ids:
+            continue
+        if not (source.startswith("review-feedback:") or source.startswith("pr-feedback:") or args.get("mode") in ("pr-feedback", "feature-pr-feedback")):
+            continue
+
+        state = candidate.get("state") or ""
+        if state not in ("queued", "claimed", "running", "blocked"):
+            continue
+
+        o.move_task(
+            task_id,
+            state,
+            "abandoned",
+            reason="superseded by planner refine",
+            mutator=lambda t, planner_task_id=planner_task_id: t.update(
+                {
+                    "finished_at": o.now_iso(),
+                    "abandoned_reason": "superseded by planner refine",
+                    "planner_refine_task_id": planner_task_id,
+                }
+            ),
+        )
+        retired.append(task_id)
+    return retired
 
 
 def _review_exhaustion_context(target, review_findings, *, rounds, reason="review_feedback_exhausted", loop_signature=None):

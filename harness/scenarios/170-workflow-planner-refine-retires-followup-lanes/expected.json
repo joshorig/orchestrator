@@ -1,0 +1,8 @@
+{
+  "story": "planner_refine_retires_followup_lanes",
+  "target_state": "abandoned",
+  "sibling_state": "abandoned",
+  "followup_state": "abandoned",
+  "child_task_ids": [],
+  "planner_refine_enqueued": true
+}

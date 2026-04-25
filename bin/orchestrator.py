@@ -625,6 +625,16 @@ RETRY_CLEAR_FIELDS = (
     "false_blocker_claim",
     "refine_request",
 )
+NONTERMINAL_REENTRY_CLEAR_FIELDS = (
+    "finished_at",
+    "abandoned_reason",
+    "failure",
+    "topology_error",
+    "topology_error_message",
+    "false_blocker_claim",
+    "qa_failure",
+    "review_verdict",
+)
 CONFIG_DEFAULTS = {
     "drift_threshold": 5,
     "topology_error_regen_threshold": 0.10,
@@ -3627,6 +3637,9 @@ def move_task(task_id, from_state, to_state, reason="", mutator=None):
     _, task = found
     if mutator is not None:
         mutator(task)
+    if to_state in ("queued", "claimed", "running"):
+        for field in NONTERMINAL_REENTRY_CLEAR_FIELDS:
+            task[field] = None
     task["state"] = to_state
     if to_state not in ("blocked", "failed", "abandoned"):
         clear_task_blocker(task)

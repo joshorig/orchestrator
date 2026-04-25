@@ -1,0 +1,6 @@
+{
+  "kind": "workflow_e2e_story",
+  "scenario_version": 1,
+  "story": "planner_refine_retires_followup_lanes",
+  "wall_time_budget": 10.0
+}

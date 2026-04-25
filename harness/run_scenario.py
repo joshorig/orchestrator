@@ -5804,6 +5804,99 @@ def _run_workflow_e2e_story(repo_root, scenario):
                 move("task-1", "queued", "running", "retry claimed")
                 move("task-1", "running", "done", "valid refine")
                 set_feature_status("done")
+
+            elif story == "nonterminal_reentry_clears_terminal_fields":
+                task = add_task(
+                    "task-1",
+                    "failed",
+                    summary="failed then re-entered",
+                    blocker=orchestrator.make_blocker(
+                        "model_output_invalid",
+                        summary="model output invalid",
+                        detail="bad trailer",
+                        source="worker",
+                        retryable=True,
+                    ),
+                )
+                task.update({
+                    "finished_at": "2026-04-25T08:00:00",
+                    "abandoned_reason": "old terminal reason",
+                    "failure": "old failure",
+                    "topology_error": "old topology",
+                    "false_blocker_claim": "old false blocker",
+                    "qa_failure": "old qa failure",
+                    "review_verdict": "request_change",
+                })
+                orchestrator.write_json_atomic(orchestrator.task_path("task-1", "failed"), task)
+                orchestrator.append_feature_child("feature-e2e", "task-1")
+                move("task-1", "failed", "running", "direct re-entry")
+                running = orchestrator.find_task("task-1")[1]
+                return {
+                    "story": story,
+                    "state": running.get("state"),
+                    "cleared": {
+                        key: running.get(key) is None
+                        for key in (
+                            "finished_at",
+                            "abandoned_reason",
+                            "failure",
+                            "topology_error",
+                            "false_blocker_claim",
+                            "qa_failure",
+                            "review_verdict",
+                        )
+                    },
+                    "blocker": running.get("blocker"),
+                }
+
+            elif story == "planner_refine_retires_followup_lanes":
+                target = add_task(
+                    "task-old-1",
+                    "awaiting-review",
+                    summary="old target",
+                    parent_task_id="task-plan",
+                    engine_args={"slice": {"id": "slice-1", "execution_path": "slice-1 -> slice-2"}},
+                )
+                target["review_feedback_rounds"] = 4
+                orchestrator.write_json_atomic(orchestrator.task_path("task-old-1", "awaiting-review"), target)
+                add_task("task-old-2", "queued", summary="old dependent", depends_on=["task-old-1"], parent_task_id="task-plan")
+                add_task(
+                    "task-followup",
+                    "blocked",
+                    summary="stale feedback lane",
+                    source="review-feedback:reviewer-old",
+                    parent_task_id="task-old-1",
+                    engine_args={"target_task_id": "task-old-1"},
+                    blocker=orchestrator.make_blocker(
+                        "review_feedback_target_inflight",
+                        summary="review-feedback target still in-flight",
+                        detail="target state=claimed",
+                        source="worker",
+                        retryable=True,
+                    ),
+                )
+                orchestrator.append_feature_child("feature-e2e", "task-old-1")
+                orchestrator.append_feature_child("feature-e2e", "task-old-2")
+                orchestrator.append_feature_child("feature-e2e", "task-followup")
+                worker._handle_review_request_change(
+                    "reviewer-1",
+                    "lvc-standard",
+                    target,
+                    "still wrong",
+                    lambda t: t.update({"reviewed_by": "reviewer-1"}),
+                )
+                feature_after = read_feature()
+                return {
+                    "story": story,
+                    "target_state": orchestrator.find_task("task-old-1")[0],
+                    "sibling_state": orchestrator.find_task("task-old-2")[0],
+                    "followup_state": orchestrator.find_task("task-followup")[0],
+                    "child_task_ids": feature_after.get("child_task_ids"),
+                    "planner_refine_enqueued": any(
+                        ((t.get("engine_args") or {}).get("mode") == "planner-refine")
+                        for t in orchestrator.iter_tasks(states=("queued",), engine="claude")
+                    ),
+                }
             else:
                 raise AssertionError(f"unknown workflow e2e story: {story}")
 
