@@ -1139,6 +1139,18 @@ class StateEngine:
                 conn.rollback()
                 return None
             task = _json_loads_or_default(row["metadata_json"], {}, field_name="tasks.metadata_json")
+            for field in (
+                "finished_at",
+                "abandoned_reason",
+                "failure",
+                "topology_error",
+                "topology_error_message",
+                "false_blocker_claim",
+                "qa_failure",
+                "review_verdict",
+            ):
+                task[field] = None
+            task["blocker"] = None
             task["state"] = "claimed"
             task["claimed_at"] = claimed_at
             task["claimed_slot"] = slot_engine
@@ -1149,6 +1161,13 @@ class StateEngine:
                        state_updated_at = ?,
                        claimed_at = ?,
                        claimed_slot = ?,
+                       finished_at = NULL,
+                       finished_at_epoch = NULL,
+                       blocker_code = NULL,
+                       blocker_summary = NULL,
+                       blocker_detail = NULL,
+                       blocker_retryable = NULL,
+                       blocker_updated_at = NULL,
                        metadata_json = ?
                  WHERE task_id = ?
                    AND state = 'queued'

@@ -1,0 +1,6 @@
+{
+  "story": "review_feedback_self_repair_abandon_cleans_child",
+  "feedback_state": "abandoned",
+  "child_task_ids": [],
+  "self_repair_reopened": 1
+}

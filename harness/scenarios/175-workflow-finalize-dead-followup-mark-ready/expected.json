@@ -1,0 +1,7 @@
+{
+  "story": "finalize_dead_followup_mark_ready",
+  "before_policy": "finalize_follow_up_dead_ready",
+  "followup_state": "abandoned",
+  "merge_ready": true,
+  "idempotent": true
+}

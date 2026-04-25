@@ -4488,7 +4488,7 @@ def enqueue_braid_planner_refine(task, project_name, trailer, *, from_state):
     feature_id = task.get("feature_id")
     parent_task_id = task.get("parent_task_id")
     if feature_id and parent_task_id:
-        for sibling in o.iter_tasks(states=("queued",), project=project_name):
+        for sibling in o.iter_tasks(states=("queued", "claimed", "running", "awaiting-review", "awaiting-qa", "blocked", "failed"), project=project_name):
             if sibling.get("feature_id") != feature_id:
                 continue
             if sibling.get("parent_task_id") != parent_task_id:
@@ -4496,9 +4496,12 @@ def enqueue_braid_planner_refine(task, project_name, trailer, *, from_state):
             if sibling.get("task_id") == task["task_id"]:
                 continue
             sibling_id = sibling.get("task_id")
+            sibling_state = sibling.get("state")
+            if sibling_state not in ("queued", "claimed", "running", "awaiting-review", "awaiting-qa", "blocked", "failed"):
+                continue
             o.move_task(
                 sibling_id,
-                "queued",
+                sibling_state,
                 "abandoned",
                 reason="superseded by planner refine",
                 mutator=lambda t, planner_task_id=planner_task["task_id"]: t.update(
@@ -4542,6 +4545,13 @@ def enqueue_braid_planner_refine(task, project_name, trailer, *, from_state):
         reason=f"planner refine -> {planner_task['task_id']}",
         mutator=mut_abandon,
     )
+
+
+def _detach_feature_child(task):
+    feature_id = (task or {}).get("feature_id")
+    task_id = (task or {}).get("task_id")
+    if feature_id and task_id:
+        o.remove_feature_children(feature_id, [task_id])
 
 
 def _retire_superseded_followup_tasks(feature_id, target_task_ids, *, planner_task_id, project_name):
@@ -5777,6 +5787,7 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
             reason=f"review-feedback target abandoned: {target_id}",
             mutator=lambda t: t.update({"finished_at": o.now_iso(), "abandoned_reason": f"abandoned target {target_id}"}),
         )
+        _detach_feature_child(task)
         return
     if target_status == "missing":
         feature = o.read_feature(task.get("feature_id")) if task.get("feature_id") else None
@@ -5791,6 +5802,7 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
                 reason=f"review-feedback superseded for {target_id}",
                 mutator=lambda t: t.update({"finished_at": o.now_iso(), "abandoned_reason": f"superseded target {target_id}"}),
             )
+            _detach_feature_child(task)
             return
         if _self_repair_enabled(task):
             _self_repair_reopen_current_issue(
@@ -5813,6 +5825,7 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
                 reason=f"review-feedback target missing: {target_id}",
                 mutator=lambda t: t.update({"finished_at": o.now_iso()}),
             )
+            _detach_feature_child(task)
             o.tick_self_repair_queue()
             return
         fail_task(task_id, "claimed", f"review-feedback: target {target_id} not found in queue",
@@ -5833,6 +5846,7 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
                 reason=f"review-feedback stale worktree for {target_id}",
                 mutator=lambda t: t.update({"finished_at": o.now_iso(), "abandoned_reason": f"stale worktree for {target_id}"}),
             )
+            _detach_feature_child(task)
             return
         if _self_repair_enabled(task):
             _self_repair_reopen_current_issue(
@@ -5855,6 +5869,7 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
                 reason=f"review-feedback target worktree missing: {wt_str}",
                 mutator=lambda t: t.update({"finished_at": o.now_iso()}),
             )
+            _detach_feature_child(task)
             o.tick_self_repair_queue()
             return
         fail_task(task_id, "claimed", f"review-feedback: target worktree missing: {wt_str}",
@@ -7200,12 +7215,23 @@ def run_qa_slot(task, cfg):
                     },
                     summary_suffix="qa-worktree-missing",
                 )
+                def mut_target_abandoned_missing(t):
+                    t["finished_at"] = o.now_iso()
+                    t["qa_failure"] = "worktree missing"
+                    o.set_task_blocker(
+                        t,
+                        "qa_target_missing",
+                        summary="QA target worktree missing",
+                        detail=f"target worktree missing: {target_wt}",
+                        source="worker",
+                        retryable=True,
+                    )
                 o.move_task(
                     target_id,
                     "awaiting-qa",
                     "abandoned",
                     reason="qa target worktree missing",
-                    mutator=lambda t: t.update({"finished_at": o.now_iso(), "qa_failure": "worktree missing"}),
+                    mutator=mut_target_abandoned_missing,
                 )
                 def mut_self(t):
                     t["finished_at"] = o.now_iso()
@@ -7377,9 +7403,21 @@ def run_qa_slot(task, cfg):
                             deliberation={**verifier, "stage": "blocker_verifier", "task_id": task_id},
                             summary_suffix="qa-topology",
                         )
+                        def mut_target_abandoned_topology(t):
+                            t["finished_at"] = o.now_iso()
+                            t["qa_gate_output"] = qa_gate_raw
+                            t["self_repair_verifier"] = verifier
+                            o.set_task_blocker(
+                                t,
+                                "template_graph_error",
+                                summary="semantic QA gate topology error",
+                                detail=qa_gate_raw or "semantic QA gate topology error",
+                                source="worker",
+                                retryable=True,
+                            )
                         o.move_task(target_id, "awaiting-qa", "abandoned",
                                     reason=verifier.get("reason") or "semantic qa topology error",
-                                    mutator=lambda t: t.update({"finished_at": o.now_iso(), "qa_gate_output": qa_gate_raw, "self_repair_verifier": verifier}))
+                                    mutator=mut_target_abandoned_topology)
                         def mut_driver_gate_topology(t):
                             t["finished_at"] = o.now_iso()
                         o.move_task(task_id, "running", "done",

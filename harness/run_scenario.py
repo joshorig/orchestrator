@@ -5897,6 +5897,222 @@ def _run_workflow_e2e_story(repo_root, scenario):
                         for t in orchestrator.iter_tasks(states=("queued",), engine="claude")
                     ),
                 }
+            elif story == "planner_refine_retires_active_old_topology":
+                target = add_task(
+                    "task-old-1",
+                    "awaiting-review",
+                    summary="old target",
+                    parent_task_id="task-plan",
+                    engine_args={"slice": {"id": "slice-1", "execution_path": "slice-1 -> slice-2 -> slice-3"}},
+                )
+                target["review_feedback_rounds"] = 4
+                orchestrator.write_json_atomic(orchestrator.task_path("task-old-1", "awaiting-review"), target)
+                add_task("task-old-2", "awaiting-qa", summary="old qa sibling", parent_task_id="task-plan")
+                add_task(
+                    "task-old-3",
+                    "blocked",
+                    summary="old blocked sibling",
+                    parent_task_id="task-plan",
+                    blocker=orchestrator.make_blocker("qa_smoke_failed", summary="old qa red", detail="old topology", source="scenario", retryable=True),
+                )
+                orchestrator.append_feature_child("feature-e2e", "task-old-1")
+                orchestrator.append_feature_child("feature-e2e", "task-old-2")
+                orchestrator.append_feature_child("feature-e2e", "task-old-3")
+                worker._handle_review_request_change(
+                    "reviewer-1",
+                    "lvc-standard",
+                    target,
+                    "still wrong",
+                    lambda t: t.update({"reviewed_by": "reviewer-1"}),
+                )
+                feature_after = read_feature()
+                return {
+                    "story": story,
+                    "target_state": orchestrator.find_task("task-old-1")[0],
+                    "qa_sibling_state": orchestrator.find_task("task-old-2")[0],
+                    "blocked_sibling_state": orchestrator.find_task("task-old-3")[0],
+                    "child_task_ids": feature_after.get("child_task_ids"),
+                    "planner_refine_enqueued": any(
+                        ((t.get("engine_args") or {}).get("mode") == "planner-refine")
+                        for t in orchestrator.iter_tasks(states=("queued",), engine="claude")
+                    ),
+                }
+            elif story == "review_feedback_self_repair_abandon_cleans_child":
+                task = add_task(
+                    "task-feedback",
+                    "claimed",
+                    summary="review feedback missing target",
+                    source="review-feedback:task-missing",
+                    parent_task_id="task-missing",
+                    braid_template="review-address-feedback",
+                    engine_args={"target_task_id": "task-missing", "self_repair": {"enabled": True}},
+                )
+                orchestrator.append_feature_child("feature-e2e", "task-feedback")
+                old_reopen = worker._self_repair_reopen_current_issue
+                old_tick = orchestrator.tick_self_repair_queue
+                reopened = []
+                worker._self_repair_reopen_current_issue = lambda task_arg, **kwargs: reopened.append(kwargs)
+                orchestrator.tick_self_repair_queue = lambda: {"scheduled": 1}
+                try:
+                    worker.run_review_feedback_task(task, orchestrator.load_config(), 5, runtime_dir / "task-feedback.log")
+                finally:
+                    worker._self_repair_reopen_current_issue = old_reopen
+                    orchestrator.tick_self_repair_queue = old_tick
+                feature_after = read_feature()
+                return {
+                    "story": story,
+                    "feedback_state": orchestrator.find_task("task-feedback")[0],
+                    "child_task_ids": feature_after.get("child_task_ids"),
+                    "self_repair_reopened": len(reopened),
+                }
+            elif story == "qa_self_repair_abandon_sets_blocker":
+                project_dir = root / "lvc"
+                qa_dir = project_dir / "qa"
+                qa_dir.mkdir(parents=True, exist_ok=True)
+                smoke_path = qa_dir / "smoke.sh"
+                smoke_path.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+                smoke_path.chmod(0o755)
+                target = add_task(
+                    "task-target",
+                    "awaiting-qa",
+                    summary="qa target missing worktree",
+                    engine_args={"self_repair": {"enabled": True}},
+                )
+                target["worktree"] = str(root / "missing-worktree")
+                orchestrator.write_json_atomic(orchestrator.task_path("task-target", "awaiting-qa"), target)
+                orchestrator.append_feature_child("feature-e2e", "task-target")
+                driver = add_task("task-qa", "claimed", role="qa", engine="qa", summary="qa driver", braid_template=None)
+                cfg = {
+                    "projects": [{"name": "lvc-standard", "path": str(project_dir), "qa": {"smoke": "qa/smoke.sh"}}],
+                    "slots": {"qa": {"timeout_sec": 5}},
+                }
+                old_reopen = worker._self_repair_reopen_current_issue
+                old_tick = orchestrator.tick_self_repair_queue
+                reopened = []
+                worker._self_repair_reopen_current_issue = lambda task_arg, **kwargs: reopened.append(kwargs)
+                orchestrator.tick_self_repair_queue = lambda: {"scheduled": 1}
+                try:
+                    worker.run_qa_slot(driver, cfg)
+                finally:
+                    worker._self_repair_reopen_current_issue = old_reopen
+                    orchestrator.tick_self_repair_queue = old_tick
+                state, updated = orchestrator.find_task("task-target")
+                blocker = orchestrator.task_blocker(updated)
+                return {
+                    "story": story,
+                    "target_state": state,
+                    "blocker_code": (blocker or {}).get("code"),
+                    "blocker_retryable": (blocker or {}).get("retryable"),
+                    "driver_state": orchestrator.find_task("task-qa")[0],
+                    "self_repair_reopened": len(reopened),
+                }
+            elif story == "atomic_claim_clears_terminal_fields":
+                task = add_task(
+                    "task-stale",
+                    "queued",
+                    summary="stale retry queued",
+                    blocker=orchestrator.make_blocker("model_output_invalid", summary="old", detail="old", source="scenario", retryable=True),
+                )
+                task.update({
+                    "finished_at": "2026-04-25T08:00:00",
+                    "abandoned_reason": "old terminal reason",
+                    "failure": "old failure",
+                    "topology_error": "old topology",
+                    "false_blocker_claim": "old false blocker",
+                    "qa_failure": "old qa failure",
+                    "review_verdict": "request_change",
+                })
+                orchestrator.write_json_atomic(orchestrator.task_path("task-stale", "queued"), task)
+                claimed = orchestrator.atomic_claim("codex")
+                state_engine = _load_module("state_engine", repo_root / "bin" / "state_engine.py")
+                engine = state_engine.StateEngine(
+                    state_engine.StateEngineConfig(
+                        root=root / "state-engine",
+                        db_path=root / "state-engine" / "runtime" / "orchestrator.db",
+                        migrations_dir=repo_root / "state" / "migrations",
+                        mode="primary",
+                    )
+                )
+                engine.initialize()
+                db_task = dict(task)
+                db_task["task_id"] = "task-stale-db"
+                db_task["state"] = "queued"
+                engine.upsert_task(db_task, state="queued")
+                claimed_db = engine.claim_task("task-stale-db", slot_engine="codex", claimed_at="2026-04-25T08:30:00")
+                return {
+                    "story": story,
+                    "claimed_task_id": (claimed or {}).get("task_id"),
+                    "state": (claimed or {}).get("state"),
+                    "cleared": {
+                        key: (claimed or {}).get(key) is None
+                        for key in (
+                            "finished_at",
+                            "abandoned_reason",
+                            "failure",
+                            "topology_error",
+                            "false_blocker_claim",
+                            "qa_failure",
+                            "review_verdict",
+                        )
+                    },
+                    "blocker": (claimed or {}).get("blocker"),
+                    "state_engine_claimed_task_id": (claimed_db or {}).get("task_id"),
+                    "state_engine_state": (claimed_db or {}).get("state"),
+                    "state_engine_cleared": {
+                        key: (claimed_db or {}).get(key) is None
+                        for key in (
+                            "finished_at",
+                            "abandoned_reason",
+                            "failure",
+                            "topology_error",
+                            "false_blocker_claim",
+                            "qa_failure",
+                            "review_verdict",
+                        )
+                    },
+                    "state_engine_blocker": (claimed_db or {}).get("blocker"),
+                }
+            elif story == "finalize_dead_followup_mark_ready":
+                orchestrator.update_feature(
+                    "feature-e2e",
+                    lambda f: f.update({
+                        "status": "finalizing",
+                        "final_pr_number": 42,
+                        "final_pr_sweep": {"feedback_task_id": "task-followup"},
+                    }),
+                )
+                add_task(
+                    "task-followup",
+                    "blocked",
+                    summary="dead final PR feedback",
+                    source="pr-feedback:feature-e2e",
+                    parent_task_id="feature-e2e",
+                    engine_args={"mode": "feature-pr-feedback", "target_task_id": "feature-e2e"},
+                    blocker=orchestrator.make_blocker("qa_smoke_failed", summary="dead follow-up", detail="old follow-up failed", source="scenario", retryable=True),
+                )
+                old_pr_snapshot = orchestrator._workflow_pr_snapshot
+                orchestrator._workflow_pr_snapshot = lambda project, feature: {
+                    "state": "OPEN",
+                    "mergeable": "MERGEABLE",
+                    "mergeStateStatus": "CLEAN",
+                    "reviewDecision": "",
+                    "statusCheckRollup": [],
+                }
+                try:
+                    before = issue_snapshot("before")
+                    orchestrator.tick_workflow_check()
+                    after_first = read_feature()
+                    orchestrator.tick_workflow_check()
+                    after_second = read_feature()
+                finally:
+                    orchestrator._workflow_pr_snapshot = old_pr_snapshot
+                return {
+                    "story": story,
+                    "before_policy": before.get("policy"),
+                    "followup_state": orchestrator.find_task("task-followup")[0],
+                    "merge_ready": bool((after_first.get("final_pr_sweep") or {}).get("merge_ready_at")),
+                    "idempotent": (after_first.get("final_pr_sweep") or {}).get("merge_ready_at") == (after_second.get("final_pr_sweep") or {}).get("merge_ready_at"),
+                }
             else:
                 raise AssertionError(f"unknown workflow e2e story: {story}")
 

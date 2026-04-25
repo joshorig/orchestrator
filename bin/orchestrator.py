@@ -635,6 +635,14 @@ NONTERMINAL_REENTRY_CLEAR_FIELDS = (
     "qa_failure",
     "review_verdict",
 )
+
+
+def clear_nonterminal_reentry_fields(task):
+    for field in NONTERMINAL_REENTRY_CLEAR_FIELDS:
+        task[field] = None
+    return task
+
+
 CONFIG_DEFAULTS = {
     "drift_threshold": 5,
     "topology_error_regen_threshold": 0.10,
@@ -3638,8 +3646,7 @@ def move_task(task_id, from_state, to_state, reason="", mutator=None):
     if mutator is not None:
         mutator(task)
     if to_state in ("queued", "claimed", "running"):
-        for field in NONTERMINAL_REENTRY_CLEAR_FIELDS:
-            task[field] = None
+        clear_nonterminal_reentry_fields(task)
     task["state"] = to_state
     if to_state not in ("blocked", "failed", "abandoned"):
         clear_task_blocker(task)
@@ -4048,6 +4055,8 @@ def atomic_claim(slot_engine):
                 os.rename(src, dst)
             except FileNotFoundError:
                 continue  # lost the race
+            clear_nonterminal_reentry_fields(task)
+            clear_task_blocker(task)
             task["state"] = "claimed"
             task["claimed_at"] = now_iso()
             write_json_atomic(dst, task)

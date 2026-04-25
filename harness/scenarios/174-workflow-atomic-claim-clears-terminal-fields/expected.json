@@ -1,0 +1,27 @@
+{
+  "story": "atomic_claim_clears_terminal_fields",
+  "claimed_task_id": "task-stale",
+  "state": "claimed",
+  "cleared": {
+    "finished_at": true,
+    "abandoned_reason": true,
+    "failure": true,
+    "topology_error": true,
+    "false_blocker_claim": true,
+    "qa_failure": true,
+    "review_verdict": true
+  },
+  "blocker": null,
+  "state_engine_claimed_task_id": "task-stale-db",
+  "state_engine_state": "claimed",
+  "state_engine_cleared": {
+    "finished_at": true,
+    "abandoned_reason": true,
+    "failure": true,
+    "topology_error": true,
+    "false_blocker_claim": true,
+    "qa_failure": true,
+    "review_verdict": true
+  },
+  "state_engine_blocker": null
+}

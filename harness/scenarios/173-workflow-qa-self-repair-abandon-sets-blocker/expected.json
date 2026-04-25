@@ -1,0 +1,8 @@
+{
+  "story": "qa_self_repair_abandon_sets_blocker",
+  "target_state": "abandoned",
+  "blocker_code": "qa_target_missing",
+  "blocker_retryable": true,
+  "driver_state": "done",
+  "self_repair_reopened": 1
+}

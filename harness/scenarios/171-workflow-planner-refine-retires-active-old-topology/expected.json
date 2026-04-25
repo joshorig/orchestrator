@@ -1,0 +1,8 @@
+{
+  "story": "planner_refine_retires_active_old_topology",
+  "target_state": "abandoned",
+  "qa_sibling_state": "abandoned",
+  "blocked_sibling_state": "abandoned",
+  "child_task_ids": [],
+  "planner_refine_enqueued": true
+}
