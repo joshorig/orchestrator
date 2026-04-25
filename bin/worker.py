@@ -4102,6 +4102,8 @@ def classify_slice(template, summary):
     False
     >>> classify_slice("trp-historian-update", "Append R-001 completion observation to repo-memory/RECENT_WORK.md")[0]
     True
+    >>> classify_slice("lvc-historian-update", "Append historian entry to RECENT_WORK recording R-002 completion: snapshot/restore API landed and journal-cursor reconciliation per publishChecked decision")[0]
+    True
     """
     s = (summary or "").lower()
     if not template:
@@ -4172,11 +4174,14 @@ def classify_slice(template, summary):
             return False, "no ui-component keyword"
         return True, None
     if template == "lvc-historian-update":
-        if _contains_any(s, TRP_UI_COMPONENT_POSITIVE_PATTERNS) or _contains_any(s, TRP_PIPELINE_STAGE_POSITIVE_PATTERNS):
+        if _contains_any(s, TRP_UI_COMPONENT_POSITIVE_PATTERNS):
+            return False, "ui slice misrouted to lvc historian"
+        has_historian_context = _contains_any(s, DAG_HISTORIAN_POSITIVE_PATTERNS)
+        if _contains_any(s, TRP_PIPELINE_STAGE_POSITIVE_PATTERNS) and not has_historian_context:
             return False, "non-historian trp slice misrouted to lvc historian"
         if _contains_any(s, DAG_IMPLEMENT_NODE_POSITIVE_PATTERNS) and not _contains_any(s, DAG_HISTORIAN_POSITIVE_PATTERNS):
             return False, "implementation slice misrouted to lvc historian"
-        if not _contains_any(s, DAG_HISTORIAN_POSITIVE_PATTERNS):
+        if not has_historian_context:
             return False, "no historian keyword"
         return True, None
     return False, f"unknown template {template!r}"
