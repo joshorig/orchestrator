@@ -1,0 +1,21 @@
+{
+  "story": "regression_hard_stop_auto_clears",
+  "cleared": [
+    {
+      "project": "lvc-standard",
+      "cleared_by": "green_run"
+    }
+  ],
+  "regression_state": "abandoned",
+  "snapshots": [
+    {
+      "label": "regression-blocked",
+      "kind": "frontier_task_blocked",
+      "task_id": "task-regression",
+      "task_state": "blocked",
+      "blocker_code": "project_regression_failed",
+      "action": "clear_regression_hard_stop",
+      "policy": "regression_green_clear"
+    }
+  ]
+}

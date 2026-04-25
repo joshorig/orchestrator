@@ -1,0 +1,25 @@
+{
+  "story": "missing_child_reconstructs_continues",
+  "final_status": "done",
+  "final_issue": false,
+  "has_live_work": false,
+  "frontier_state": null,
+  "snapshots": [
+    {
+      "label": "missing-child",
+      "kind": "missing_child",
+      "task_id": "task-missing",
+      "task_state": "missing",
+      "blocker_code": "missing_child",
+      "action": "recover_missing_child",
+      "policy": "missing_child_recover"
+    },
+    {
+      "label": "reconstructed",
+      "frontier": "task-missing",
+      "state": "queued",
+      "issue_action": null,
+      "issue_policy": null
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "story": "false_blocker_challenge_path",
+  "self_repair_enqueued": 1,
+  "issue_kind": "frontier_task_blocked",
+  "snapshots": [
+    {
+      "label": "false-blocker",
+      "kind": "frontier_task_blocked",
+      "task_id": "task-1",
+      "task_state": "blocked",
+      "blocker_code": "false_blocker_claim",
+      "action": "enqueue_self_repair",
+      "policy": "false_blocker_claim_self_repair"
+    }
+  ]
+}

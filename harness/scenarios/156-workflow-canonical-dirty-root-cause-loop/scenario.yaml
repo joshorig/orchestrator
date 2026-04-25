@@ -1,0 +1,7 @@
+{
+  "kind": "workflow_e2e_story",
+  "scenario_version": 1,
+  "story": "canonical_dirty_root_cause_loop",
+  "wall_time_budget": 10.0,
+  "max_attempts": 3
+}

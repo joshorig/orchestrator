@@ -1,0 +1,15 @@
+{
+  "story": "canonical_dirty_root_cause_loop",
+  "repair_calls": 3,
+  "hard_stops": [
+    {
+      "project": "lvc-standard",
+      "code": "project_main_dirty",
+      "detail": "project_main_dirty:repair_exhausted"
+    }
+  ],
+  "final_state": "blocked",
+  "attempts": {
+    "task:task-1:blocked:project_main_dirty": 3
+  }
+}

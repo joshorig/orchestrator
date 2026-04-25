@@ -1,0 +1,16 @@
+{
+  "story": "qa_target_missing_stale_lane_clears",
+  "stale_state": "abandoned",
+  "newer_state": "queued",
+  "snapshots": [
+    {
+      "label": "stale-feedback",
+      "task_id": "task-feedback-old",
+      "blocker_code": "qa_target_missing",
+      "action": "abandon_task",
+      "policy": "review_feedback_stale_abandon",
+      "diagnosis": true
+    }
+  ],
+  "final_status": "done"
+}

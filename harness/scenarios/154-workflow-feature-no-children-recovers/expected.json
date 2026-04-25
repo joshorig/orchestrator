@@ -1,0 +1,27 @@
+{
+  "story": "feature_no_children_recovers",
+  "final_status": "done",
+  "final_issue": false,
+  "has_live_work": false,
+  "frontier_state": null,
+  "snapshots": [
+    {
+      "label": "planner-empty",
+      "kind": "planner_emitted_no_children",
+      "task_id": "task-plan-empty",
+      "task_state": "done",
+      "blocker_code": "planner_emitted_no_children",
+      "action": "retry_task",
+      "policy": "planner_empty_retry"
+    },
+    {
+      "label": "planner-requeued",
+      "kind": null,
+      "task_id": null,
+      "task_state": null,
+      "blocker_code": null,
+      "action": null,
+      "policy": null
+    }
+  ]
+}

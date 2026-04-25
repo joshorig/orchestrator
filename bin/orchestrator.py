@@ -11367,8 +11367,7 @@ def _issue_with_policy(issue, task, project):
 def _workflow_check_known_task_action(task, state, project):
     blocker = task_blocker(task)
     issue = {"kind": "frontier_task_blocked", "task_state": state, "blocker": blocker}
-    action, diagnosis, _ = _workflow_policy_decision(issue, task, project)
-    return action, diagnosis
+    return _workflow_policy_decision(issue, task, project)
 
 
 def _latest_dead_finalizing_follow_up(feature_id, feedback_task_id=None):
@@ -11442,7 +11441,7 @@ def _workflow_issue_from_summary(feature, workflow, config):
                     state, task = planner.get("state"), None
                 blocker = task_blocker(task)
                 if task is not None and state in ("failed", "blocked"):
-                    action, diagnosis = _workflow_check_known_task_action(task, state, project)
+                    action, diagnosis, policy = _workflow_check_known_task_action(task, state, project)
                     return {
                         "feature_id": feature_id,
                         "project": project["name"],
@@ -11455,6 +11454,7 @@ def _workflow_issue_from_summary(feature, workflow, config):
                         "diagnosis": diagnosis,
                         "workflow": workflow,
                         "action": action,
+                        "policy": policy,
                         "task": task,
                     }
                 if task is not None and state == "done":

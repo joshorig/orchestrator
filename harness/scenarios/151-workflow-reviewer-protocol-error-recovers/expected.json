@@ -1,0 +1,27 @@
+{
+  "story": "reviewer_protocol_error_recovers",
+  "final_status": "done",
+  "final_issue": false,
+  "has_live_work": false,
+  "frontier_state": null,
+  "snapshots": [
+    {
+      "label": "review-protocol-error",
+      "kind": "frontier_task_blocked",
+      "task_id": "task-1",
+      "task_state": "awaiting-review",
+      "blocker_code": "review_gate_protocol_error",
+      "action": "enqueue_reviewer",
+      "policy": "review_gate_protocol_retry"
+    },
+    {
+      "label": "after-reviewer-sweep",
+      "kind": "frontier_task_blocked",
+      "task_id": "task-1",
+      "task_state": "awaiting-review",
+      "blocker_code": "review_gate_protocol_error",
+      "action": "enqueue_reviewer",
+      "policy": "review_gate_protocol_retry"
+    }
+  ]
+}

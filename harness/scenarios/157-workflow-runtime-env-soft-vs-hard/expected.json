@@ -1,0 +1,8 @@
+{
+  "story": "runtime_env_soft_vs_hard",
+  "issues": 1,
+  "repair_calls": 1,
+  "self_repair_calls": 1,
+  "project_task_final": "done",
+  "final_status": "done"
+}

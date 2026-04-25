@@ -1,0 +1,34 @@
+{
+  "story": "planner_invalid_output_recovers",
+  "final_status": "done",
+  "final_issue": false,
+  "has_live_work": false,
+  "frontier_state": null,
+  "snapshots": [
+    {
+      "label": "planner-blocked",
+      "kind": "planner_blocked",
+      "task_id": "task-plan-bad",
+      "task_state": "blocked",
+      "blocker_code": "planner_slice_format_error",
+      "action": "retry_task",
+      "policy": "planner_slice_format_retry"
+    },
+    {
+      "label": "planner-requeued",
+      "kind": null,
+      "task_id": null,
+      "task_state": null,
+      "blocker_code": null,
+      "action": null,
+      "policy": null
+    },
+    {
+      "label": "valid-frontier",
+      "frontier": "task-1",
+      "state": "queued",
+      "issue_action": null,
+      "issue_policy": null
+    }
+  ]
+}

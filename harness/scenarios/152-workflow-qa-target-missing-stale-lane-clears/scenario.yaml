@@ -1,0 +1,6 @@
+{
+  "kind": "workflow_e2e_story",
+  "scenario_version": 1,
+  "story": "qa_target_missing_stale_lane_clears",
+  "wall_time_budget": 10.0
+}

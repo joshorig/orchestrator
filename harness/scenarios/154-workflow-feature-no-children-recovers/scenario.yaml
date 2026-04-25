@@ -1,0 +1,6 @@
+{
+  "kind": "workflow_e2e_story",
+  "scenario_version": 1,
+  "story": "feature_no_children_recovers",
+  "wall_time_budget": 10.0
+}

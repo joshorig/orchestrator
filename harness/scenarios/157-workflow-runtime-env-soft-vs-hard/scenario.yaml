@@ -1,0 +1,6 @@
+{
+  "kind": "workflow_e2e_story",
+  "scenario_version": 1,
+  "story": "runtime_env_soft_vs_hard",
+  "wall_time_budget": 10.0
+}
