@@ -134,13 +134,13 @@ VALID_ROLES = ("planner", "implementer", "reviewer", "qa", "historian")
 _BLOCKER_REGISTRY = (
     ("template_missing", 2),
     ("template_missing_edge", 2),
-    ("template_refine_exhausted", 4),
+    ("template_refine_exhausted", 3),
     ("template_graph_error", 3),
     ("invalid_braid_refine", 2),
     ("planner_slice_format_error", 2),
-    ("false_blocker_claim", 4),
+    ("false_blocker_claim", 2),
     ("project_main_dirty", 3),
-    ("project_regression_failed", 4),
+    ("project_regression_failed", 3),
     ("runtime_policy_stale", 2),
     ("worker_crash", 2),
     ("worker_crash_lock_contention", 2),
@@ -150,42 +150,88 @@ _BLOCKER_REGISTRY = (
     ("worker_crash_unhandled", 2),
     ("worktree_create_failed", 2),
     ("planner_emitted_no_children", 2),
-    ("feature_has_no_children", 4),
+    ("feature_has_no_children", 2),
     ("missing_child", 3),
-    ("missing_child_unrecoverable", 5),
+    ("missing_child_recoverable", 3),
     ("final_pr_blocked", 3),
     ("finalize_follow_up_dead", 3),
     ("canary_missing_recent_success", 2),
     ("canary_stale", 3),
-    ("canary_unrecoverable", 5),
-    ("runtime_env_dirty", 4),
+    ("canary_recoverable", 3),
+    ("runtime_env_dirty_network", 2),
+    ("runtime_env_dirty_lock_stale", 2),
+    ("runtime_env_dirty_credential", 4),
     ("delivery_auth_expired", 4),
-    ("runtime_unknown_project", 4),
+    ("runtime_unknown_project", 3),
     ("runtime_precondition_failed", 4),
     ("review_gate_protocol_error", 2),
     ("council_timeout", 2),
-    ("review_feedback_exhausted", 4),
+    ("review_feedback_exhausted", 3),
     ("review_feedback_target_inflight", 2),
     ("review_feedback_loop", 3),
     ("handoff_assumption_undischarged", 2),
-    ("claude_budget_exhausted", 4),
-    ("slot_paused", 4),
+    ("claude_budget_exhausted_daily", 3),
+    ("claude_budget_exhausted_monthly", 4),
     ("llm_timeout", 2),
     ("llm_exit_error", 2),
     ("model_output_invalid", 2),
     ("validator_malfunction", 2),
-    ("qa_contract_error", 4),
-    ("qa_target_missing", 4),
+    ("qa_contract_malformed", 2),
+    ("qa_contract_semantic_drift", 3),
+    ("qa_target_missing", 2),
     ("qa_smoke_failed", 3),
     ("qa_scope_inadequate", 3),
     ("auto_commit_failed", 2),
     ("delivery_push_failed", 3),
-    ("attempt_exhausted", 4),
+    ("attempt_exhausted", 3),
     ("untrusted_skill_rejected", 0),
-    ("environment_bypass_budget_exceeded", 4),
+    ("environment_bypass_budget_exceeded_transient", 3),
+    ("environment_bypass_budget_exceeded_persistent", 4),
 )
+DEPRECATED_BLOCKER_ALIASES = {
+    "runtime_env_dirty": "runtime_env_dirty_credential",
+    "claude_budget_exhausted": "claude_budget_exhausted_daily",
+    "qa_contract_error": "qa_contract_malformed",
+    "environment_bypass_budget_exceeded": "environment_bypass_budget_exceeded_transient",
+    "missing_child_unrecoverable": "missing_child_recoverable",
+    "canary_unrecoverable": "canary_recoverable",
+}
 BLOCKER_CODES = tuple(code for code, _tier in _BLOCKER_REGISTRY)
 BLOCKER_TIER = dict(_BLOCKER_REGISTRY)
+
+
+def classify_runtime_env_blocker(summary="", detail=""):
+    text = f"{summary or ''} {detail or ''}".lower()
+    if any(token in text for token in ("token", "credential", "pat", "oauth", "ssh key", "api key", "claude env", "telegram bot")):
+        return "runtime_env_dirty_credential"
+    if any(token in text for token in ("fetch", "dns", "network", "connection refused", "timed out", "timeout", "temporary failure")):
+        return "runtime_env_dirty_network"
+    if "lock" in text and any(token in text for token in ("stale", "dead pid", "pid dead", "could not acquire")):
+        return "runtime_env_dirty_lock_stale"
+    return "runtime_precondition_failed"
+
+
+def classify_claude_budget_blocker(detail=""):
+    text = (detail or "").lower()
+    if any(token in text for token in ("month", "monthly", "billing period")):
+        return "claude_budget_exhausted_monthly"
+    return "claude_budget_exhausted_daily"
+
+
+def classify_environment_bypass_blocker(detail=""):
+    text = (detail or "").lower()
+    if any(token in text for token in ("persistent", "after cooldown", "cooldown exhausted", "host", "disk full", "hardware")):
+        return "environment_bypass_budget_exceeded_persistent"
+    return "environment_bypass_budget_exceeded_transient"
+
+
+def classify_qa_contract_blocker(summary="", detail=""):
+    text = f"{summary or ''} {detail or ''}".lower()
+    if any(token in text for token in ("semantic", "drift", "renamed", "runtime violation", "disagreed")):
+        return "qa_contract_semantic_drift"
+    return "qa_contract_malformed"
+
+
 WORKFLOW_REPAIR_POLICY = (
     {
         "name": "template_missing_self_repair",
@@ -464,9 +510,16 @@ WORKFLOW_REPAIR_POLICY = (
     {
         "name": "qa_contract_repair",
         "kind": "frontier_task_blocked",
-        "blocker_code": "qa_contract_error",
+        "blocker_code": "qa_contract_malformed",
         "action": "enqueue_qa_contract_repair",
         "diagnosis": "QA contract or script configuration is missing; queue a dedicated repair task without blocking unrelated work",
+    },
+    {
+        "name": "qa_contract_semantic_drift_replan",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "qa_contract_semantic_drift",
+        "action": "enqueue_qa_contract_repair",
+        "diagnosis": "QA contract disagreed with implementation; replan QA against current code",
     },
     {
         "name": "qa_target_missing_retry",
@@ -494,9 +547,23 @@ WORKFLOW_REPAIR_POLICY = (
     {
         "name": "runtime_env_dirty_repair",
         "kind": "environment_degraded",
-        "blocker_code": "runtime_env_dirty",
+        "blocker_code": "runtime_env_dirty_network",
         "action": "repair_environment",
         "diagnosis": "runtime environment is degraded; attempt bounded autonomous repair first",
+    },
+    {
+        "name": "runtime_env_lock_auto_cleanup",
+        "kind": "environment_degraded",
+        "blocker_code": "runtime_env_dirty_lock_stale",
+        "action": "repair_environment",
+        "diagnosis": "stale lock detected; verify holder is dead before cleanup",
+    },
+    {
+        "name": "runtime_env_credential_alert",
+        "kind": "environment_degraded",
+        "blocker_code": "runtime_env_dirty_credential",
+        "action": "push_alert",
+        "diagnosis": "credential-backed runtime environment is degraded; credential rotation is required",
     },
     {
         "name": "delivery_auth_repair",
@@ -527,16 +594,9 @@ WORKFLOW_REPAIR_POLICY = (
         "diagnosis": "review feedback rounds were exhausted and the task now requires human triage",
     },
     {
-        "name": "slot_paused_wait",
-        "kind": "frontier_task_blocked",
-        "blocker_code": "slot_paused",
-        "action": "push_alert",
-        "diagnosis": "slot is paused and requires explicit operator resume",
-    },
-    {
         "name": "claude_budget_resume_retry",
         "kind": "frontier_task_blocked",
-        "blocker_code": "claude_budget_exhausted",
+        "blocker_code": "claude_budget_exhausted_daily",
         "action": "retry_task",
         "diagnosis": "Claude budget slot has been resumed; retry the task with archived budget context",
         "when": "claude_slot_unpaused",
@@ -544,9 +604,16 @@ WORKFLOW_REPAIR_POLICY = (
     {
         "name": "claude_budget_wait",
         "kind": "frontier_task_blocked",
-        "blocker_code": "claude_budget_exhausted",
+        "blocker_code": "claude_budget_exhausted_daily",
         "action": "push_alert",
         "diagnosis": "Claude slot budget is exhausted and has been auto-paused; page an operator to resume the slot",
+    },
+    {
+        "name": "claude_budget_monthly_wait",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "claude_budget_exhausted_monthly",
+        "action": "push_alert",
+        "diagnosis": "Claude monthly budget exhausted; budget increase requires operator approval",
     },
     {
         "name": "unknown_project_report",
@@ -564,9 +631,15 @@ WORKFLOW_REPAIR_POLICY = (
     },
     {
         "name": "environment_bypass_budget_alert",
-        "blocker_code": "environment_bypass_budget_exceeded",
+        "blocker_code": "environment_bypass_budget_exceeded_transient",
         "action": "enqueue_self_repair_and_alert",
         "diagnosis": "environment bypass budget was exceeded; open self-repair and alert the operator",
+    },
+    {
+        "name": "environment_bypass_budget_persistent_alert",
+        "blocker_code": "environment_bypass_budget_exceeded_persistent",
+        "action": "push_alert",
+        "diagnosis": "persistent environment bypass budget exceeded after cooldown; host/network investigation required",
     },
     {
         "name": "missing_child_recover",
@@ -2379,7 +2452,7 @@ def _project_main_preflight_issue(project):
     repo_path = pathlib.Path(project["path"])
     if not repo_path.exists():
         return {
-            "code": "runtime_env_dirty",
+            "code": "runtime_precondition_failed",
             "scope": "project",
             "project": project["name"],
             "severity": "error",
@@ -2389,7 +2462,7 @@ def _project_main_preflight_issue(project):
     ok, detail = _git_ok(repo_path, "rev-parse", "--is-inside-work-tree")
     if not ok:
         return {
-            "code": "runtime_env_dirty",
+            "code": "runtime_precondition_failed",
             "scope": "project",
             "project": project["name"],
             "severity": "error",
@@ -2401,7 +2474,7 @@ def _project_main_preflight_issue(project):
         cached_ok, _ = _git_ok(repo_path, "rev-parse", "--verify", "refs/remotes/origin/main")
         if not cached_ok:
             return {
-                "code": "runtime_env_dirty",
+                "code": "runtime_env_dirty_network",
                 "scope": "project",
                 "project": project["name"],
                 "severity": "error",
@@ -2495,7 +2568,7 @@ def repair_environment():
                 "changes": ["launchctl setenv GH_TOKEN"] if launchctl_ok else [],
                 "issue": issue,
             }
-        elif code == "runtime_env_dirty" and summary == "telegram bot token unavailable":
+        elif code == "runtime_env_dirty_credential" and summary == "telegram bot token unavailable":
             token_loaded = bool(load_telegram_bot_token())
             result = {
                 "fixed": token_loaded,
@@ -2503,7 +2576,7 @@ def repair_environment():
                 "detail": "ok" if token_loaded else "telegram token still unavailable",
                 "issue": issue,
             }
-        elif code == "runtime_env_dirty" and summary == "worktrees root missing":
+        elif code == "runtime_precondition_failed" and summary == "worktrees root missing":
             worktrees_root = DEV_ROOT / "worktrees"
             worktrees_root.mkdir(parents=True, exist_ok=True)
             result = {
@@ -2513,7 +2586,7 @@ def repair_environment():
                 "changes": [str(worktrees_root)],
                 "issue": issue,
             }
-        elif code == "runtime_env_dirty" and summary == "required launchd job not loaded":
+        elif code == "runtime_precondition_failed" and summary == "required launchd job not loaded":
             label = (issue.get("detail") or "").strip()
             plist = pathlib.Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
             if plist.exists():
@@ -2538,7 +2611,7 @@ def repair_environment():
                     "detail": str(plist),
                     "issue": issue,
                 }
-        elif code == "runtime_env_dirty" and summary == "fetch origin main failed" and project is not None:
+        elif code == "runtime_env_dirty_network" and summary == "fetch origin main failed" and project is not None:
             repair = _repair_project_fetch_state(project)
             result = {**repair, "issue": issue}
 
@@ -2563,13 +2636,13 @@ def environment_health(*, refresh=False):
     issues = []
 
     required_bins = {
-        "git": ("runtime_env_dirty", lambda: shutil.which("git")),
-        "bash": ("runtime_env_dirty", lambda: shutil.which("bash")),
-        "python3": ("runtime_env_dirty", lambda: shutil.which("python3")),
-        "launchctl": ("runtime_env_dirty", lambda: shutil.which("launchctl")),
+        "git": ("runtime_precondition_failed", lambda: shutil.which("git")),
+        "bash": ("runtime_precondition_failed", lambda: shutil.which("bash")),
+        "python3": ("runtime_precondition_failed", lambda: shutil.which("python3")),
+        "launchctl": ("runtime_precondition_failed", lambda: shutil.which("launchctl")),
         "gh": ("delivery_auth_expired", lambda: next((p for p in GH_CANDIDATE_PATHS if p and pathlib.Path(p).exists()), None)),
-        "codex": ("runtime_env_dirty", lambda: next((p for p in CODEX_CANDIDATE_PATHS if p and pathlib.Path(p).exists()), None)),
-        "claude": ("runtime_env_dirty", lambda: next((p for p in CLAUDE_CANDIDATE_PATHS if p and pathlib.Path(p).exists()), None)),
+        "codex": ("runtime_precondition_failed", lambda: next((p for p in CODEX_CANDIDATE_PATHS if p and pathlib.Path(p).exists()), None)),
+        "claude": ("runtime_precondition_failed", lambda: next((p for p in CLAUDE_CANDIDATE_PATHS if p and pathlib.Path(p).exists()), None)),
     }
     for binary, (code, resolver) in required_bins.items():
         if not resolver():
@@ -2598,7 +2671,7 @@ def environment_health(*, refresh=False):
     if not load_telegram_bot_token():
         issues.append(
             {
-                "code": "runtime_env_dirty",
+                "code": "runtime_env_dirty_credential",
                 "scope": "global",
                 "project": None,
                 "severity": "error",
@@ -2609,7 +2682,7 @@ def environment_health(*, refresh=False):
     if not load_claude_env_blob() and not (STATE_ROOT / "config" / "claude.env").exists():
         issues.append(
             {
-                "code": "runtime_env_dirty",
+                "code": "runtime_env_dirty_credential",
                 "scope": "global",
                 "project": None,
                 "severity": "warning",
@@ -2620,7 +2693,7 @@ def environment_health(*, refresh=False):
     if not telegram_allowed_chat_ids():
         issues.append(
             {
-                "code": "runtime_env_dirty",
+                "code": "runtime_precondition_failed",
                 "scope": "global",
                 "project": None,
                 "severity": "warning",
@@ -2634,7 +2707,7 @@ def environment_health(*, refresh=False):
     if labels is None:
         issues.append(
             {
-                "code": "runtime_env_dirty",
+                "code": "runtime_precondition_failed",
                 "scope": "global",
                 "project": None,
                 "severity": "warning",
@@ -2648,7 +2721,7 @@ def environment_health(*, refresh=False):
             if label not in labels:
                 issues.append(
                     {
-                        "code": "runtime_env_dirty",
+                        "code": "runtime_precondition_failed",
                         "scope": "global",
                         "project": None,
                         "severity": "warning",
@@ -2661,7 +2734,7 @@ def environment_health(*, refresh=False):
     if not worktrees_root.exists():
         issues.append(
             {
-                "code": "runtime_env_dirty",
+                "code": "runtime_precondition_failed",
                 "scope": "global",
                 "project": None,
                 "severity": "warning",
@@ -2680,7 +2753,7 @@ def environment_health(*, refresh=False):
             if script_rel and not (pathlib.Path(project["path"]) / script_rel).exists():
                 issues.append(
                     {
-                        "code": "runtime_env_dirty",
+                        "code": "runtime_precondition_failed",
                         "scope": "project",
                         "project": project["name"],
                         "severity": "error",
@@ -2864,6 +2937,7 @@ def append_transition(task_id, from_state, to_state, reason=""):
 
 
 def make_blocker(code, *, summary=None, detail=None, source=None, confidence="high", retryable=None, metadata=None):
+    code = DEPRECATED_BLOCKER_ALIASES.get(code, code)
     if code not in BLOCKER_CODES:
         raise ValueError(f"unknown blocker code: {code}")
     return {
@@ -2924,6 +2998,8 @@ def task_blocker(task):
     """
     blocker = task.get("blocker")
     if isinstance(blocker, dict) and blocker.get("code"):
+        blocker = dict(blocker)
+        blocker["code"] = DEPRECATED_BLOCKER_ALIASES.get(blocker.get("code"), blocker.get("code"))
         detail = str(blocker.get("detail") or "")
         if blocker.get("code") == "false_blocker_claim" and _is_validator_malfunction(detail):
             return make_blocker(
@@ -2969,7 +3045,7 @@ def task_blocker(task):
     if false_claim:
         return make_blocker("false_blocker_claim", summary="false blocker claim", detail=detail, source="legacy", retryable=False)
     if "budget" in detail_lower and any(token in detail_lower for token in ("exhaust", "limit", "max_budget", "max budget")):
-        return make_blocker("claude_budget_exhausted", summary="Claude budget exhausted", detail=detail, source="legacy", retryable=False)
+        return make_blocker(classify_claude_budget_blocker(detail), summary="Claude budget exhausted", detail=detail, source="legacy", retryable=False)
     if "repo-memory secret-scan hit" in detail_lower or "detect-secrets findings" in detail_lower:
         return make_blocker("runtime_policy_stale", summary="worker runtime policy stale", detail=detail, source="legacy", retryable=True)
     if "shared lock" in detail_lower and "acquire" in detail_lower:
@@ -2995,7 +3071,7 @@ def task_blocker(task):
     if any(needle in detail_lower for needle in ("missing target_task_id", "repo-memory incomplete", "missing refine_request", "missing braid_template", "codex task has no braid_template")):
         return make_blocker("runtime_precondition_failed", summary="runtime precondition failed", detail=detail, source="legacy", retryable=False)
     if "no qa." in detail_lower or "script missing:" in detail_lower:
-        return make_blocker("qa_contract_error", summary="QA contract missing", detail=detail, source="legacy", retryable=False)
+        return make_blocker(classify_qa_contract_blocker("QA contract missing", detail), summary="QA contract missing", detail=detail, source="legacy", retryable=False)
     if "worktree missing" in detail_lower or "target worktree missing" in detail_lower:
         return make_blocker("qa_target_missing", summary="QA target missing", detail=detail, source="legacy", retryable=False)
     if "smoke red" in detail_lower or "smoke timeout" in detail_lower or "smoke re-run timeout" in detail_lower:
@@ -4684,7 +4760,7 @@ def _write_workflow_alert(issue, reason):
     ]
     if blocker.get("detail"):
         lines.extend(["## Blocker Detail", "", blocker.get("detail"), ""])
-    if blocker.get("code") in ("slot_paused", "claude_budget_exhausted"):
+    if blocker.get("code") in ("claude_budget_exhausted_daily", "claude_budget_exhausted_monthly"):
         lines.extend([
             "## Operator Action",
             "",
@@ -6701,7 +6777,7 @@ def _feature_finalize_blocking_issue(project_name):
             return issue
         if scope and scope != project_name:
             continue
-        if code in ("project_main_dirty", "runtime_env_dirty"):
+        if code in ("project_main_dirty", "runtime_env_dirty_network", "runtime_env_dirty_lock_stale", "runtime_env_dirty_credential", "runtime_precondition_failed"):
             return issue
     return None
 
@@ -11423,7 +11499,7 @@ def _recover_missing_child_task(task_id):
 
 def _abandon_feature_missing_child(feature_id, task_id):
     blocker = make_blocker(
-        "missing_child_unrecoverable",
+        "missing_child_recoverable",
         summary="feature child task could not be reconstructed",
         detail=f"child task {task_id} is missing from queue state and transition log",
         source="workflow-check",
@@ -11436,7 +11512,7 @@ def _abandon_feature_missing_child(feature_id, task_id):
     update_feature(feature_id, mut)
     append_event(
         "workflow-check",
-        "missing_child_unrecoverable",
+        "missing_child_recoverable",
         feature_id=feature_id,
         details={"task_id": task_id},
     )
@@ -12146,7 +12222,7 @@ def _enqueue_canary_fallback(issue, cfg):
             {
                 **issue,
                 "blocker": make_blocker(
-                    "canary_unrecoverable",
+                    "canary_recoverable",
                     summary="primary and fallback canary are both stale",
                     detail=f"primary={primary} fallback={fallback}",
                     source="workflow-check",
@@ -12155,7 +12231,7 @@ def _enqueue_canary_fallback(issue, cfg):
             },
             f"synthetic canary fallback also stale: primary={primary} fallback={fallback}",
         )
-        return {"enqueued": 0, "reason": "fallback_stale", "blocker_code": "canary_unrecoverable", "alert": bool(alert_path)}
+        return {"enqueued": 0, "reason": "fallback_stale", "blocker_code": "canary_recoverable", "alert": bool(alert_path)}
     return tick_canary_workflows(force=True, project_override=fallback, fallback_from=primary)
 
 
@@ -12173,7 +12249,7 @@ def _environment_health_issues():
             "task_id": None,
             "task_state": "idle",
             "blocker": make_blocker(
-                issue.get("code") or "runtime_env_dirty",
+                issue.get("code") or "runtime_precondition_failed",
                 summary=issue.get("summary"),
                 detail=issue.get("detail"),
                 source="environment-health",

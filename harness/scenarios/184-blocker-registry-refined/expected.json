@@ -1,0 +1,16 @@
+{
+  "tier4_codes": [
+    "claude_budget_exhausted_monthly",
+    "delivery_auth_expired",
+    "environment_bypass_budget_exceeded_persistent",
+    "runtime_env_dirty_credential",
+    "runtime_precondition_failed"
+  ],
+  "tier5_empty": true,
+  "slot_paused_not_blocker": true,
+  "runtime_env_network_classified": true,
+  "runtime_env_credential_classified": true,
+  "daily_budget_classified": true,
+  "monthly_budget_classified": true,
+  "qa_contract_classified": true
+}

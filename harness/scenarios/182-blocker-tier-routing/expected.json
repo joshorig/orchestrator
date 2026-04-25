@@ -3,5 +3,6 @@
   "tier_3_stops_codex": true,
   "tier_4_opens_self_repair": true,
   "tier_4_alerts_telegram": true,
-  "tier_5_cascades_to_children": true
+  "tier_5_empty": true,
+  "deprecated_missing_child_alias_tier_3": true
 }

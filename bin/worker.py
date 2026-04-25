@@ -3708,7 +3708,7 @@ def _run_self_repair_council(
     if proc.returncode != 0:
         if _claude_budget_exhausted(proc.stderr or raw or ""):
             _pause_claude_slot_if_needed((proc.stderr or raw or f"claude exit {proc.returncode}"))
-            return {"error": "claude budget exhausted", "blocker_code": "claude_budget_exhausted"}
+            return {"error": "claude budget exhausted", "blocker_code": o.classify_claude_budget_blocker(proc.stderr or raw or "")}
         return {"error": (proc.stderr or raw or f"claude exit {proc.returncode}").strip()[:400]}
     try:
         data = _normalize_council_payload(_parse_council_json(raw), panel=panel, stage=stage)
@@ -6984,7 +6984,7 @@ def run_pr_feedback_task(task, cfg):
                 t["finished_at"] = o.now_iso()
                 t["failure"] = "no qa.smoke configured"
             fail_task(task_id, "running", "no qa.smoke",
-                      blocker_code="qa_contract_error", summary="QA smoke contract missing",
+                      blocker_code="qa_contract_malformed", summary="QA smoke contract missing",
                       retryable=False, mutator=mut_fail)
             return
 
@@ -7200,10 +7200,10 @@ def run_codex_slot(task, cfg):
                 )
             except MainDirtyOrAhead as exc:
                 exc_text = str(exc)
-                blocker_code = "runtime_env_dirty" if "fetch origin main failed" in exc_text.lower() else "project_main_dirty"
+                blocker_code = "runtime_env_dirty_network" if "fetch origin main failed" in exc_text.lower() else "project_main_dirty"
                 blocker_summary = (
                     "feature branch refresh failed"
-                    if blocker_code == "runtime_env_dirty"
+                    if blocker_code == "runtime_env_dirty_network"
                     else "project main checkout dirty or ahead"
                 )
                 def mut_block_main(t):
@@ -7726,7 +7726,7 @@ def run_qa_slot(task, cfg):
     preflight = _qa_contract_preflight(project, contract_kind, script_rel)
     if not preflight.get("ok"):
         fail_task(task_id, "claimed", preflight["error"],
-                  blocker_code="qa_contract_error", summary=preflight.get("summary") or "QA contract missing", detail=preflight.get("detail"), retryable=False)
+                  blocker_code=o.classify_qa_contract_blocker(preflight.get("summary") or "QA contract missing", preflight.get("detail") or preflight.get("error") or ""), summary=preflight.get("summary") or "QA contract missing", detail=preflight.get("detail"), retryable=False)
         return
 
     # Resolve target + script path + cwd based on contract.
@@ -8047,7 +8047,7 @@ def run_qa_slot(task, cfg):
                                 pass
                     else:
                         blocker_code = (
-                            "runtime_env_dirty"
+                            "runtime_precondition_failed"
                             if any(token in deploy_reason for token in ("canonical", "restart", "workflow-check"))
                             else "delivery_push_failed"
                         )

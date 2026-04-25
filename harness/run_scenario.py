@@ -59,7 +59,7 @@ def _scenario_cluster(name, scenario_kind):
         "clean_state_wipe_and_restart",
     }:
         return "state-engine"
-    if scenario_kind in {"telegram_surface", "task_cost_capture", "supply_chain_gate", "security_secret_gate", "untrusted_skill_refusal", "launchd_runtime_env_contract", "template_contract_yaml_validates", "blocker_tier_routing", "c2_assumption_discharge_blocks"}:
+    if scenario_kind in {"telegram_surface", "task_cost_capture", "supply_chain_gate", "security_secret_gate", "untrusted_skill_refusal", "launchd_runtime_env_contract", "template_contract_yaml_validates", "blocker_tier_routing", "c2_assumption_discharge_blocks", "blocker_registry_refined"}:
         return "wave-c"
     if scenario_kind in {"review_feedback_exhaustion", "issue_replan_cap", "self_repair_resolution", "self_repair_observation",
                          "observation_orphan", "observation_idempotent", "clock_skew_backward", "council_timeout",
@@ -7369,14 +7369,15 @@ def _run_blocker_tier_routing(repo_root, scenario):
     tier3_action, _tier3_diag, tier3_policy = decision("review_feedback_loop")
     tier4_action, _tier4_diag, tier4_policy = decision("attempt_exhausted")
     env_action, _env_diag, env_policy = decision("environment_bypass_budget_exceeded")
-    tier5_action, _tier5_diag, tier5_policy = decision("missing_child_unrecoverable")
+    missing_child_action, _missing_child_diag, missing_child_policy = decision("missing_child_unrecoverable")
 
     return {
         "all_codes_have_tier": all(code in orchestrator.BLOCKER_TIER for code in orchestrator.BLOCKER_CODES),
         "tier_3_stops_codex": tier3_action is None and tier3_policy == "tier_3_autonomy_reduction",
         "tier_4_opens_self_repair": tier4_action == "enqueue_self_repair_and_alert",
         "tier_4_alerts_telegram": env_action == "enqueue_self_repair_and_alert" and env_policy == "environment_bypass_budget_alert",
-        "tier_5_cascades_to_children": tier5_action == "abandon_task" and tier5_policy == "tier_5_terminate",
+        "tier_5_empty": 5 not in set(orchestrator.BLOCKER_TIER.values()),
+        "deprecated_missing_child_alias_tier_3": missing_child_action is None and missing_child_policy == "tier_3_autonomy_reduction",
     }
 
 
@@ -7453,6 +7454,21 @@ def _run_c2_assumption_discharge_blocks(repo_root, scenario):
         "consumer_blocker_code": ((moved["task"].get("blocker") or {}).get("code")),
         "producer_replanned": planner.get("source") == "handoff-replan-for:task-producer:task-consumer",
         "consumer_replanned": planner.get("source") == "handoff-replan-for:task-consumer:task-producer",
+    }
+
+
+def _run_blocker_registry_refined(repo_root, scenario):
+    orchestrator, _worker = _load_repo_modules(repo_root)
+    tier4 = sorted(code for code, tier in orchestrator.BLOCKER_TIER.items() if tier == 4)
+    return {
+        "tier4_codes": tier4,
+        "tier5_empty": 5 not in set(orchestrator.BLOCKER_TIER.values()),
+        "slot_paused_not_blocker": "slot_paused" not in orchestrator.BLOCKER_TIER,
+        "runtime_env_network_classified": orchestrator.classify_runtime_env_blocker("fetch origin main failed", "DNS temporary failure") == "runtime_env_dirty_network",
+        "runtime_env_credential_classified": orchestrator.classify_runtime_env_blocker("telegram bot token unavailable", "missing token") == "runtime_env_dirty_credential",
+        "daily_budget_classified": orchestrator.classify_claude_budget_blocker("daily budget limit exhausted") == "claude_budget_exhausted_daily",
+        "monthly_budget_classified": orchestrator.classify_claude_budget_blocker("monthly billing period budget exhausted") == "claude_budget_exhausted_monthly",
+        "qa_contract_classified": orchestrator.classify_qa_contract_blocker("QA contract fails schema", "yaml parse error") == "qa_contract_malformed",
     }
 
 
@@ -7703,6 +7719,8 @@ def main(argv):
         actual = _run_blocker_tier_routing(repo_root, scenario)
     elif kind == "c2_assumption_discharge_blocks":
         actual = _run_c2_assumption_discharge_blocks(repo_root, scenario)
+    elif kind == "blocker_registry_refined":
+        actual = _run_blocker_registry_refined(repo_root, scenario)
     elif kind == "self_repair_review_state_live":
         actual = _run_self_repair_review_state_live(repo_root, scenario)
     elif kind == "orchestrator_template_candidate_only":
