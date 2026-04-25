@@ -4537,11 +4537,14 @@ def enqueue_braid_planner_refine(task, project_name, trailer, *, from_state):
     )
 
 
-def _review_exhaustion_context(target, review_findings, *, rounds):
+def _review_exhaustion_context(target, review_findings, *, rounds, reason="review_feedback_exhausted", loop_signature=None):
     sections = [
+        f"review_feedback_reason: {reason}",
         f"review_feedback_rounds: {rounds}",
         "[FINAL REVIEW FINDINGS]\n" + str(review_findings or "").strip(),
     ]
+    if loop_signature:
+        sections.append(f"review_feedback_loop_signature: {loop_signature}")
     policy_findings = [str(item) for item in (target.get("policy_review_findings") or []) if item]
     if policy_findings:
         sections.append("[POLICY AND GATE FINDINGS]\n" + "\n".join(f"- {item}" for item in policy_findings))
@@ -4563,14 +4566,35 @@ def _review_exhaustion_context(target, review_findings, *, rounds):
     return "\n\n".join(section for section in sections if section.strip())[:8000]
 
 
-def enqueue_review_exhausted_planner_refine(target, project_name, review_findings, *, rounds, from_state="awaiting-review"):
-    summary = "review feedback exhausted"
-    context = _review_exhaustion_context(target, review_findings, rounds=rounds)
-    target["review_exhaustion_context"] = context
-    question = (
-        "Reviewer feedback could not be resolved within the retry budget. "
-        "Replan this feature from the current repository state and address the attached review history."
+def enqueue_review_exhausted_planner_refine(
+    target,
+    project_name,
+    review_findings,
+    *,
+    rounds,
+    from_state="awaiting-review",
+    reason="review_feedback_exhausted",
+    loop_signature=None,
+):
+    summary = "review feedback loop" if reason == "review_feedback_loop" else "review feedback exhausted"
+    context = _review_exhaustion_context(
+        target,
+        review_findings,
+        rounds=rounds,
+        reason=reason,
+        loop_signature=loop_signature,
     )
+    target["review_exhaustion_context"] = context
+    if reason == "review_feedback_loop":
+        question = (
+            "Reviewer feedback repeated unchanged, indicating the implementer/reviewer loop is deadlocked. "
+            "Replan this feature from the current repository state and address the attached review history."
+        )
+    else:
+        question = (
+            "Reviewer feedback could not be resolved within the retry budget. "
+            "Replan this feature from the current repository state and address the attached review history."
+        )
     trailer = f"BRAID_PLANNER_REFINE: {summary} :: {question}"
     enqueue_braid_planner_refine(target, project_name, trailer, from_state=from_state)
 
@@ -5445,7 +5469,7 @@ def _handle_review_request_change(reviewer_task_id, project_name, target, review
     """Route reviewer request_change into feedback retry or terminal failure.
 
     >>> _review_request_change_doctest()
-    ((('enqueue', 'planner-refine'), ('move', 'abandoned'), ('alert', 'review rounds exhausted (4); planner refine requested')), (('enqueue', 2, 'review-address-feedback'), ('move', 'queued', 'review feedback round 2', 2)))
+    ((('enqueue', 'planner-refine'), ('move', 'abandoned'), ('alert', 'review rounds exhausted (4); planner refine requested')), (('enqueue', 'planner-refine'), ('move', 'abandoned'), ('alert', 'review feedback loop after 2 rounds; planner refine requested')), (('enqueue', 2, 'review-address-feedback'), ('move', 'queued', 'review feedback round 2', 2)))
     """
     rounds = int(target.get("review_feedback_rounds", 0)) + 1
     MAX_ROUNDS = 4
@@ -5456,25 +5480,28 @@ def _handle_review_request_change(reviewer_task_id, project_name, target, review
     ).hexdigest()[:16]
     prior_sigs = list(target.get("review_feedback_signatures") or [])
     if prior_sigs and prior_sigs[-1] == sig:
-        def mut_fail_target(t):
+        def mut_loop(t):
             mut_target(t)
             t["review_feedback_rounds"] = rounds
             t["review_feedback_signatures"] = (prior_sigs + [sig])[-4:]
-        fail_task(
-            target_id,
-            "awaiting-review",
-            f"review feedback loop: identical verdict round {rounds}",
-            blocker_code="review_feedback_loop",
-            summary="review feedback loop detected",
-            detail=review_findings,
-            retryable=False,
-            mutator=mut_fail_target,
+            t["review_feedback_loop_detected_at"] = o.now_iso()
+            t["review_feedback_loop_signature"] = sig
+        o.update_task_in_place(o.task_path(target_id, "awaiting-review"), mut_loop)
+        target_for_refine = dict(target)
+        mut_loop(target_for_refine)
+        enqueue_review_exhausted_planner_refine(
+            target_for_refine,
+            project_name,
+            review_findings,
+            rounds=rounds,
+            reason="review_feedback_loop",
+            loop_signature=sig,
         )
         o._write_pr_alert(
             project_name,
             target_id,
             target.get("pr_number") or "review-feedback",
-            f"review feedback loop after {rounds} rounds",
+            f"review feedback loop after {rounds} rounds; planner refine requested",
             target.get("pr_url"),
         )
         return
@@ -5587,9 +5614,17 @@ def _review_request_change_doctest():
             next(item for item in calls if item[0] == "alert"),
         )
         calls.clear()
+        sig = hashlib.sha256(json.dumps("same finding", sort_keys=True, default=str).encode()).hexdigest()[:16]
+        _handle_review_request_change("reviewer-loop", "demo", {"task_id": "task-loop", "project": "demo", "feature_id": "f1", "base_branch": "main", "worktree": "/tmp/wt", "review_feedback_rounds": 1, "review_feedback_signatures": [sig]}, "same finding", lambda t: t.update({"reviewed_by": "reviewer-loop"}))
+        loop = (
+            tuple(next(item for item in calls if item[0] == "enqueue" and item[1] == "planner-refine")[:2]),
+            tuple(next(item for item in calls if item[0] == "move" and item[1] == "abandoned")[:2]),
+            next(item for item in calls if item[0] == "alert"),
+        )
+        calls.clear()
         _handle_review_request_change("reviewer-2", "demo", {"task_id": "task-b", "project": "demo", "feature_id": "f2", "base_branch": "main", "worktree": "/tmp/wt", "review_feedback_rounds": 1}, "need docs", lambda t: t.update({"reviewed_by": "reviewer-2"}))
         retried = (calls[0], calls[1])
-        return (exhausted, retried)
+        return (exhausted, loop, retried)
     finally:
         _review_request_change_doctest.__globals__["o"] = old_o
         _review_request_change_doctest.__globals__["fail_task"] = old_fail_task

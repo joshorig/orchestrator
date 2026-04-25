@@ -1,5 +1,7 @@
 {
-  "loop_blocker_code": "review_feedback_loop",
+  "loop_enqueues_planner_refine": true,
+  "loop_target_abandoned": true,
+  "loop_alert": "review feedback loop after 2 rounds; planner refine requested",
   "loop_rounds": 2,
   "exhausted_enqueues_planner_refine": true,
   "exhausted_target_abandoned": true,

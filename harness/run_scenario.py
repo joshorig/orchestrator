@@ -4665,14 +4665,7 @@ def _run_review_feedback_loop_detection(repo_root, scenario):
         def remove_feature_children(self, feature_id, child_ids):
             calls.append(("remove_children", feature_id, list(child_ids)))
     old_o = worker.o
-    old_fail = worker.fail_task
     worker.o = FakeO()
-    def fake_fail(task_id, from_state, reason, **kwargs):
-        body = {"review_feedback_rounds": 0, "review_feedback_signatures": []}
-        if kwargs.get("mutator"):
-            kwargs["mutator"](body)
-        calls.append(("fail", kwargs.get("blocker_code"), kwargs.get("retryable"), body.get("review_feedback_rounds"), list(body.get("review_feedback_signatures") or [])))
-    worker.fail_task = fake_fail
     try:
         findings = {"issue": "need docs"}
         sig = hashlib.sha256(json.dumps(findings, sort_keys=True, default=str).encode()).hexdigest()[:16]
@@ -4683,7 +4676,10 @@ def _run_review_feedback_loop_detection(repo_root, scenario):
             findings,
             lambda t: t.update({"reviewed_by": "reviewer-1"}),
         )
-        loop_fail = next(item for item in calls if item[0] == "fail")
+        loop_planner = next(item for item in calls if item[0] == "enqueue" and item[2] == "planner-refine")
+        loop_abandoned = next(item for item in calls if item[0] == "move" and item[1] == "task-a" and item[3] == "abandoned")
+        loop_alert = next(item for item in calls if item[0] == "alert")
+        loop_update = next(item for item in calls if item[0] == "update")
         calls.clear()
         worker._handle_review_request_change(
             "reviewer-2",
@@ -4708,10 +4704,11 @@ def _run_review_feedback_loop_detection(repo_root, scenario):
         removed = next(item for item in calls if item[0] == "remove_children")
     finally:
         worker.o = old_o
-        worker.fail_task = old_fail
     return {
-        "loop_blocker_code": loop_fail[1],
-        "loop_rounds": loop_fail[3],
+        "loop_enqueues_planner_refine": loop_planner[2] == "planner-refine",
+        "loop_target_abandoned": loop_abandoned[3] == "abandoned",
+        "loop_alert": loop_alert[1],
+        "loop_rounds": loop_update[1],
         "exhausted_enqueues_planner_refine": planner_task[2] == "planner-refine",
         "exhausted_target_abandoned": abandoned[3] == "abandoned",
         "removed_children": removed[2],
