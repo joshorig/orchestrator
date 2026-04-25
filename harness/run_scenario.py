@@ -5025,6 +5025,7 @@ def _run_workflow_e2e_story(repo_root, scenario):
             "METRICS_LOG": orchestrator.METRICS_LOG,
             "REPORT_DIR": orchestrator.REPORT_DIR,
             "PROJECT_HARD_STOPS_PATH": orchestrator.PROJECT_HARD_STOPS_PATH,
+            "SLOT_PAUSE_DIR": orchestrator.SLOT_PAUSE_DIR,
             "BRAID_TEMPLATES": orchestrator.BRAID_TEMPLATES,
             "load_config": orchestrator.load_config,
             "emit_runtime_metrics_snapshot": orchestrator.emit_runtime_metrics_snapshot,
@@ -5051,6 +5052,7 @@ def _run_workflow_e2e_story(repo_root, scenario):
         orchestrator.METRICS_LOG = runtime_dir / "metrics.jsonl"
         orchestrator.REPORT_DIR = reports_dir
         orchestrator.PROJECT_HARD_STOPS_PATH = runtime_dir / "project-hard-stops.json"
+        orchestrator.SLOT_PAUSE_DIR = runtime_dir / "slot-paused"
         orchestrator.BRAID_TEMPLATES = templates_dir
         orchestrator.load_config = lambda: {
             "workflow_check_max_attempts": int(scenario.get("max_attempts", 3)),
@@ -5610,6 +5612,198 @@ def _run_workflow_e2e_story(repo_root, scenario):
                     "issue_kind": enqueued[0].get("issue_kind") if enqueued else None,
                     "snapshots": snapshots,
                 }
+            elif story == "model_output_invalid_retries":
+                add_task(
+                    "task-1",
+                    "failed",
+                    summary="malformed model output",
+                    blocker=orchestrator.make_blocker(
+                        "model_output_invalid",
+                        summary="model output invalid",
+                        detail="no BRAID trailer",
+                        source="worker",
+                        retryable=False,
+                    ),
+                )
+                orchestrator.append_feature_child("feature-e2e", "task-1")
+                snapshots.append(issue_snapshot("model-output-invalid"))
+                orchestrator.tick_workflow_check()
+                snapshots.append(snapshot("after-retry"))
+                move("task-1", "queued", "running", "retry claimed with archived output error")
+                move("task-1", "running", "done", "valid output")
+                set_feature_status("done")
+
+            elif story == "qa_target_missing_self_repairs":
+                add_task(
+                    "task-feedback",
+                    "blocked",
+                    summary="missing target feedback lane",
+                    source="review-feedback:task-missing",
+                    parent_task_id="task-missing",
+                    engine_args={"target_task_id": "task-missing"},
+                    blocker=orchestrator.make_blocker(
+                        "qa_target_missing",
+                        summary="review-feedback target missing",
+                        detail="review-feedback: target task-missing missing from queue",
+                        source="worker",
+                        retryable=False,
+                    ),
+                )
+                orchestrator.append_feature_child("feature-e2e", "task-feedback")
+                enqueued = []
+                old_enqueue = orchestrator.enqueue_self_repair
+                orchestrator.enqueue_self_repair = lambda **kwargs: enqueued.append(kwargs) or {"enqueued": 1, "feature_id": "feature-sr", "task_id": "task-sr"}
+                try:
+                    snapshots.append(issue_snapshot("qa-target-missing"))
+                    orchestrator.tick_workflow_check()
+                finally:
+                    orchestrator.enqueue_self_repair = old_enqueue
+                return {
+                    "story": story,
+                    "self_repair_enqueued": len(enqueued),
+                    "policy": snapshots[0].get("policy"),
+                    "action": snapshots[0].get("action"),
+                    "issue_kind": enqueued[0].get("issue_kind") if enqueued else None,
+                }
+
+            elif story == "template_missing_self_repairs":
+                add_task(
+                    "task-1",
+                    "blocked",
+                    summary="missing template",
+                    braid_template="missing-template",
+                    blocker=orchestrator.make_blocker(
+                        "template_missing",
+                        summary="BRAID template missing",
+                        detail="missing-template",
+                        source="worker",
+                        retryable=False,
+                    ),
+                )
+                orchestrator.append_feature_child("feature-e2e", "task-1")
+                enqueued = []
+                old_enqueue = orchestrator.enqueue_self_repair
+                orchestrator.enqueue_self_repair = lambda **kwargs: enqueued.append(kwargs) or {"enqueued": 1, "feature_id": "feature-sr", "task_id": "task-sr"}
+                try:
+                    snapshots.append(issue_snapshot("template-missing"))
+                    orchestrator.tick_workflow_check()
+                finally:
+                    orchestrator.enqueue_self_repair = old_enqueue
+                return {
+                    "story": story,
+                    "self_repair_enqueued": len(enqueued),
+                    "policy": snapshots[0].get("policy"),
+                    "action": snapshots[0].get("action"),
+                    "issue_kind": enqueued[0].get("issue_kind") if enqueued else None,
+                }
+
+            elif story == "false_blocker_generic_retries":
+                add_task(
+                    "task-1",
+                    "failed",
+                    summary="generic false blocker",
+                    source="scenario",
+                    blocker=orchestrator.make_blocker(
+                        "false_blocker_claim",
+                        summary="false blocker claim",
+                        detail="solver claimed an unsupported topology deadend",
+                        source="worker",
+                        retryable=False,
+                    ),
+                )
+                orchestrator.append_feature_child("feature-e2e", "task-1")
+                snapshots.append(issue_snapshot("false-blocker-generic"))
+                orchestrator.tick_workflow_check()
+                snapshots.append(snapshot("after-retry"))
+                move("task-1", "queued", "running", "retry claimed with false blocker challenge")
+                move("task-1", "running", "done", "resolved")
+                set_feature_status("done")
+
+            elif story == "claude_budget_resumes_then_retries":
+                add_task(
+                    "task-1",
+                    "failed",
+                    role="planner",
+                    engine="claude",
+                    summary="budget exhausted planner",
+                    blocker=orchestrator.make_blocker(
+                        "claude_budget_exhausted",
+                        summary="Claude budget exhausted",
+                        detail="max_budget limit exhausted",
+                        source="worker",
+                        retryable=False,
+                    ),
+                    braid_template=None,
+                )
+                orchestrator.append_feature_child("feature-e2e", "task-1")
+                orchestrator.set_slot_paused("claude", True, reason="budget exhausted", source="scenario")
+                snapshots.append(issue_snapshot("budget-paused"))
+                orchestrator.set_slot_paused("claude", False, reason="budget refreshed", source="scenario")
+                snapshots.append(issue_snapshot("budget-resumed"))
+                orchestrator.tick_workflow_check()
+                snapshots.append(snapshot("after-retry"))
+                move("task-1", "queued", "running", "budget retry claimed")
+                move("task-1", "running", "done", "planner succeeded")
+                set_feature_status("done")
+
+            elif story == "feature_no_children_self_repairs":
+                enqueued = []
+                old_enqueue = orchestrator.enqueue_self_repair
+                orchestrator.enqueue_self_repair = lambda **kwargs: enqueued.append(kwargs) or {"enqueued": 1, "feature_id": "feature-sr", "task_id": "task-sr"}
+                try:
+                    snapshots.append(issue_snapshot("feature-no-children"))
+                    orchestrator.tick_workflow_check()
+                finally:
+                    orchestrator.enqueue_self_repair = old_enqueue
+                return {
+                    "story": story,
+                    "self_repair_enqueued": len(enqueued),
+                    "policy": snapshots[0].get("policy"),
+                    "action": snapshots[0].get("action"),
+                    "issue_kind": enqueued[0].get("issue_kind") if enqueued else None,
+                }
+
+            elif story == "worker_oom_retries":
+                add_task(
+                    "task-1",
+                    "failed",
+                    summary="worker oom",
+                    blocker=orchestrator.make_blocker(
+                        "worker_crash_oom_killed",
+                        summary="worker process was killed",
+                        detail="worker crash: oom killed by runtime",
+                        source="worker",
+                        retryable=False,
+                    ),
+                )
+                orchestrator.append_feature_child("feature-e2e", "task-1")
+                snapshots.append(issue_snapshot("oom-killed"))
+                orchestrator.tick_workflow_check()
+                snapshots.append(snapshot("after-retry"))
+                move("task-1", "queued", "running", "retry claimed")
+                move("task-1", "running", "done", "succeeded")
+                set_feature_status("done")
+
+            elif story == "invalid_braid_refine_retries":
+                add_task(
+                    "task-1",
+                    "failed",
+                    summary="invalid refine",
+                    blocker=orchestrator.make_blocker(
+                        "invalid_braid_refine",
+                        summary="invalid BRAID_REFINE contract",
+                        detail="BRAID_REFINE: missing separator",
+                        source="worker",
+                        retryable=False,
+                    ),
+                )
+                orchestrator.append_feature_child("feature-e2e", "task-1")
+                snapshots.append(issue_snapshot("invalid-refine"))
+                orchestrator.tick_workflow_check()
+                snapshots.append(snapshot("after-retry"))
+                move("task-1", "queued", "running", "retry claimed")
+                move("task-1", "running", "done", "valid refine")
+                set_feature_status("done")
             else:
                 raise AssertionError(f"unknown workflow e2e story: {story}")
 

@@ -1,0 +1,7 @@
+{
+  "story": "feature_no_children_self_repairs",
+  "self_repair_enqueued": 1,
+  "policy": "feature_no_children_self_repair",
+  "action": "enqueue_self_repair",
+  "issue_kind": "feature_has_no_children"
+}

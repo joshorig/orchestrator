@@ -178,12 +178,12 @@ BLOCKER_CODES = (
 )
 WORKFLOW_REPAIR_POLICY = (
     {
-        "name": "template_missing_wait",
+        "name": "template_missing_self_repair",
         "kind": "frontier_task_blocked",
         "blocker_code": "template_missing",
         "task_state": "blocked",
-        "action": "push_alert",
-        "diagnosis": "template regeneration has not landed; page an operator instead of silently waiting",
+        "action": "enqueue_self_repair",
+        "diagnosis": "template is missing and no regeneration has landed; open self-repair instead of silently waiting",
         "when": "template_missing_blocked",
     },
     {
@@ -253,6 +253,13 @@ WORKFLOW_REPAIR_POLICY = (
         "blocker_code": "worker_crash_subprocess_timeout",
         "action": "retry_task",
         "diagnosis": "worker subprocess timed out; retry within bounded attempt budget",
+    },
+    {
+        "name": "worker_crash_oom_retry",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "worker_crash_oom_killed",
+        "action": "retry_task",
+        "diagnosis": "worker was killed by the runtime; retry once through bounded attempt history before hard escalation",
     },
     {
         "name": "worker_crash_git_retry",
@@ -431,11 +438,11 @@ WORKFLOW_REPAIR_POLICY = (
         "when": "control_plane_feedback_bug",
     },
     {
-        "name": "false_blocker_claim_report",
+        "name": "false_blocker_claim_retry",
         "kind": "frontier_task_blocked",
         "blocker_code": "false_blocker_claim",
-        "action": "push_alert",
-        "diagnosis": "solver emitted a false blocker claim outside the known self-repair path; page an operator",
+        "action": "retry_task",
+        "diagnosis": "solver emitted a false blocker claim; retry with the archived blocker as challenge context",
     },
     {
         "name": "qa_contract_repair",
@@ -510,6 +517,14 @@ WORKFLOW_REPAIR_POLICY = (
         "diagnosis": "slot is paused and requires explicit operator resume",
     },
     {
+        "name": "claude_budget_resume_retry",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "claude_budget_exhausted",
+        "action": "retry_task",
+        "diagnosis": "Claude budget slot has been resumed; retry the task with archived budget context",
+        "when": "claude_slot_unpaused",
+    },
+    {
         "name": "claude_budget_wait",
         "kind": "frontier_task_blocked",
         "blocker_code": "claude_budget_exhausted",
@@ -545,11 +560,11 @@ WORKFLOW_REPAIR_POLICY = (
         "diagnosis": "planner completed without emitting any runnable slices",
     },
     {
-        "name": "feature_no_children_report",
+        "name": "feature_no_children_self_repair",
         "kind": "feature_has_no_children",
         "blocker_code": "feature_has_no_children",
-        "action": "push_alert",
-        "diagnosis": "feature is open but has no child tasks to make progress; page an operator",
+        "action": "enqueue_self_repair",
+        "diagnosis": "feature is open but has no child tasks to make progress; open self-repair to replan or retire the feature",
     },
     {
         "name": "feature_finalize_ready",
@@ -11135,7 +11150,7 @@ def _sync_project_main_to_origin(project):
     ...     _ = subprocess.run(["git", "-C", str(clone), "commit", "-am", "two"], check=True, capture_output=True, text=True)
     ...     _ = subprocess.run(["git", "-C", str(clone), "push"], check=True, capture_output=True, text=True)
     ...     out = _sync_project_main_to_origin({"path": str(canonical), "name": "demo"})
-    ...     out["fixed"], "origin/main" in (out["changes"] or [])[0]
+    ...     out["fixed"], "git reset --hard origin/main" in (out["changes"] or [])
     (True, True)
     """
     repo_path = pathlib.Path(project["path"])
@@ -11403,6 +11418,8 @@ def _workflow_policy_matches(policy, issue, task, project):
         ):
             return False
         return True
+    if when == "claude_slot_unpaused":
+        return not slot_paused("claude")
     if when == "qa_target_relocated":
         detail = str((issue.get("blocker") or {}).get("detail") or "")
         m = re.search(r"target ([A-Za-z0-9_-]+) ", detail)

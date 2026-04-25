@@ -1,0 +1,25 @@
+{
+  "story": "model_output_invalid_retries",
+  "final_status": "done",
+  "final_issue": false,
+  "has_live_work": false,
+  "frontier_state": null,
+  "snapshots": [
+    {
+      "label": "model-output-invalid",
+      "kind": "frontier_task_blocked",
+      "task_id": "task-1",
+      "task_state": "failed",
+      "blocker_code": "model_output_invalid",
+      "action": "retry_task",
+      "policy": "model_output_retry"
+    },
+    {
+      "label": "after-retry",
+      "frontier": "task-1",
+      "state": "queued",
+      "issue_action": null,
+      "issue_policy": null
+    }
+  ]
+}

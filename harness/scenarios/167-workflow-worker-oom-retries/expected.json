@@ -1,0 +1,25 @@
+{
+  "story": "worker_oom_retries",
+  "final_status": "done",
+  "final_issue": false,
+  "has_live_work": false,
+  "frontier_state": null,
+  "snapshots": [
+    {
+      "label": "oom-killed",
+      "kind": "frontier_task_blocked",
+      "task_id": "task-1",
+      "task_state": "failed",
+      "blocker_code": "worker_crash_oom_killed",
+      "action": "retry_task",
+      "policy": "worker_crash_oom_retry"
+    },
+    {
+      "label": "after-retry",
+      "frontier": "task-1",
+      "state": "queued",
+      "issue_action": null,
+      "issue_policy": null
+    }
+  ]
+}

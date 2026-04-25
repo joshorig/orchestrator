@@ -1,0 +1,34 @@
+{
+  "story": "claude_budget_resumes_then_retries",
+  "final_status": "done",
+  "final_issue": false,
+  "has_live_work": false,
+  "frontier_state": null,
+  "snapshots": [
+    {
+      "label": "budget-paused",
+      "kind": "frontier_task_blocked",
+      "task_id": "task-1",
+      "task_state": "failed",
+      "blocker_code": "claude_budget_exhausted",
+      "action": "push_alert",
+      "policy": "claude_budget_wait"
+    },
+    {
+      "label": "budget-resumed",
+      "kind": "frontier_task_blocked",
+      "task_id": "task-1",
+      "task_state": "failed",
+      "blocker_code": "claude_budget_exhausted",
+      "action": "retry_task",
+      "policy": "claude_budget_resume_retry"
+    },
+    {
+      "label": "after-retry",
+      "frontier": "task-1",
+      "state": "queued",
+      "issue_action": null,
+      "issue_policy": null
+    }
+  ]
+}
