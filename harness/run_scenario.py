@@ -59,7 +59,7 @@ def _scenario_cluster(name, scenario_kind):
         "clean_state_wipe_and_restart",
     }:
         return "state-engine"
-    if scenario_kind in {"telegram_surface", "task_cost_capture", "supply_chain_gate", "security_secret_gate", "untrusted_skill_refusal", "launchd_runtime_env_contract", "template_contract_yaml_validates", "blocker_tier_routing", "c2_assumption_discharge_blocks", "blocker_registry_refined", "tier4_credential_rotation_paged_not_auto", "false_blocker_replan_with_rebuttal", "claude_budget_daily_pause_resume", "regression_auto_revert_or_bisect", "runtime_env_network_backoff", "canary_auto_disable_reattempt", "runtime_unknown_project_alias"}:
+    if scenario_kind in {"telegram_surface", "task_cost_capture", "supply_chain_gate", "security_secret_gate", "untrusted_skill_refusal", "launchd_runtime_env_contract", "template_contract_yaml_validates", "blocker_tier_routing", "c2_assumption_discharge_blocks", "blocker_registry_refined", "tier4_credential_rotation_paged_not_auto", "false_blocker_replan_with_rebuttal", "claude_budget_daily_pause_resume", "regression_auto_revert_or_bisect", "runtime_env_network_backoff", "canary_auto_disable_reattempt", "runtime_unknown_project_alias", "finalize_proceeds_alert_channel_missing"}:
         return "wave-c"
     if scenario_kind in {"review_feedback_exhaustion", "issue_replan_cap", "self_repair_resolution", "self_repair_observation",
                          "observation_orphan", "observation_idempotent", "clock_skew_backward", "council_timeout",
@@ -6496,6 +6496,84 @@ def _run_feature_finalize_orphan_no_children(repo_root, scenario):
     }
 
 
+def _run_finalize_proceeds_alert_channel_missing(repo_root, scenario):
+    orchestrator, _worker = _load_repo_modules(repo_root)
+    feature = {
+        "feature_id": "feature-alert-warn",
+        "status": "open",
+        "project": "demo",
+        "summary": "Ready feature",
+        "branch": "feature/feature-alert-warn",
+        "child_task_ids": ["task-merged"],
+    }
+    child = {
+        "task_id": "task-merged",
+        "state": "done",
+        "cleaned_at": "2026-04-25T10:00:00",
+        "pr_final_state": "MERGED",
+        "summary": "merged child",
+    }
+    events = []
+    updates = []
+    issue = {
+        "severity": "error",
+        "code": "runtime_env_dirty_credential",
+        "project": "demo",
+        "summary": "telegram bot token unavailable",
+        "detail": "TELEGRAM_BOT_TOKEN missing",
+    }
+    old = {
+        name: orchestrator.feature_finalize.__globals__[name]
+        for name in (
+            "shutil",
+            "load_config",
+            "list_features",
+            "feature_workflow_summary",
+            "_load_feature_children",
+            "environment_health",
+            "_feature_branch_on_origin",
+            "_request_codex_review",
+            "update_feature",
+            "append_event",
+            "subprocess",
+            "STATE_ROOT",
+        )
+    }
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            orchestrator.feature_finalize.__globals__["STATE_ROOT"] = pathlib.Path(tmp)
+            orchestrator.feature_finalize.__globals__["shutil"] = types.SimpleNamespace(which=lambda _name: "/opt/homebrew/bin/gh")
+            orchestrator.feature_finalize.__globals__["load_config"] = lambda: {"projects": [{"name": "demo", "path": str(repo_root)}]}
+            orchestrator.feature_finalize.__globals__["list_features"] = lambda status="open": [feature] if status == "open" else []
+            orchestrator.feature_finalize.__globals__["feature_workflow_summary"] = lambda _feature: {"has_live_work": False, "child_metadata_complete": True}
+            orchestrator.feature_finalize.__globals__["_load_feature_children"] = lambda _feature: [child]
+            orchestrator.feature_finalize.__globals__["environment_health"] = lambda refresh=False: {"ok": False, "issues": [issue]}
+            orchestrator.feature_finalize.__globals__["_feature_branch_on_origin"] = lambda path, branch: True
+            orchestrator.feature_finalize.__globals__["_request_codex_review"] = lambda path, pr_number, reason="": (True, "")
+            def fake_update(feature_id, mutator):
+                mutator(feature)
+                updates.append(dict(feature))
+            orchestrator.feature_finalize.__globals__["update_feature"] = fake_update
+            orchestrator.feature_finalize.__globals__["append_event"] = lambda *args, **kwargs: events.append((args, kwargs))
+            orchestrator.feature_finalize.__globals__["subprocess"] = types.SimpleNamespace(
+                run=lambda *args, **kwargs: types.SimpleNamespace(returncode=0, stdout="https://github.com/demo/repo/pull/42\n", stderr="")
+            )
+            checked, opened, abandoned, skipped = orchestrator.feature_finalize()
+    finally:
+        for key, value in old.items():
+            orchestrator.feature_finalize.__globals__[key] = value
+    return {
+        "checked": checked,
+        "opened": opened,
+        "abandoned": abandoned,
+        "skipped": skipped,
+        "status": feature.get("status"),
+        "final_pr_number": feature.get("final_pr_number"),
+        "alert_event": any(call[0][1] == "finalize_alert_unavailable" for call in events),
+        "blocked_event": any(call[0][1] == "blocked_by_environment" for call in events),
+    }
+
+
 def _run_atomic_claim_skips_terminal_feature_children(repo_root, scenario):
     orchestrator, _worker = _load_repo_modules(repo_root)
     with tempfile.TemporaryDirectory() as tmp:
@@ -7919,6 +7997,8 @@ def main(argv):
         actual = _run_feature_finalize_untracked_live_no_children(repo_root, scenario)
     elif kind == "feature_finalize_orphan_no_children":
         actual = _run_feature_finalize_orphan_no_children(repo_root, scenario)
+    elif kind == "finalize_proceeds_alert_channel_missing":
+        actual = _run_finalize_proceeds_alert_channel_missing(repo_root, scenario)
     elif kind == "atomic_claim_skips_terminal_feature_children":
         actual = _run_atomic_claim_skips_terminal_feature_children(repo_root, scenario)
     elif kind == "review_feedback_reaper_stale_target":

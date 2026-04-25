@@ -6799,6 +6799,55 @@ def _feature_branch_on_origin(project_path, branch):
     return bool((proc.stdout or "").strip())
 
 
+ALERT_CHANNEL_CREDENTIAL_MARKERS = (
+    "telegram",
+    "telegram_",
+    "slack",
+    "slack_",
+    "discord",
+    "discord_",
+)
+HARD_CREDENTIAL_MARKERS = (
+    "github",
+    "github_pat",
+    "gh_token",
+    "ssh",
+    "ssh_key",
+    "claude",
+    "claude_api_key",
+    "openai",
+    "api_key",
+)
+
+
+def _credential_issue_text(issue):
+    return " ".join(
+        str(issue.get(key) or "")
+        for key in ("summary", "detail", "credential", "name")
+    ).lower()
+
+
+def _is_alert_channel_credential_issue(issue):
+    if (issue or {}).get("code") != "runtime_env_dirty_credential":
+        return False
+    text = _credential_issue_text(issue)
+    if any(marker in text for marker in HARD_CREDENTIAL_MARKERS):
+        return False
+    return any(marker in text for marker in ALERT_CHANNEL_CREDENTIAL_MARKERS)
+
+
+def _feature_finalize_alert_channel_issue(project_name):
+    for issue in environment_health(refresh=True).get("issues", []):
+        if issue.get("severity") != "error":
+            continue
+        scope = issue.get("project")
+        if scope and scope != project_name:
+            continue
+        if _is_alert_channel_credential_issue(issue):
+            return issue
+    return None
+
+
 def _feature_finalize_blocking_issue(project_name):
     for issue in environment_health(refresh=True).get("issues", []):
         if issue.get("severity") != "error":
@@ -6808,6 +6857,8 @@ def _feature_finalize_blocking_issue(project_name):
         if code == "delivery_auth_expired":
             return issue
         if scope and scope != project_name:
+            continue
+        if _is_alert_channel_credential_issue(issue):
             continue
         if code in ("project_main_dirty", "runtime_env_dirty_network", "runtime_env_dirty_lock_stale", "runtime_env_dirty_credential", "runtime_precondition_failed"):
             return issue
@@ -6983,6 +7034,15 @@ def feature_finalize(dry_run=False):
             print(f"feature-finalize {feature_id}: unknown project {feature.get('project')}, skip")
             skipped += 1
             continue
+
+        alert_issue = _feature_finalize_alert_channel_issue(project["name"])
+        if alert_issue is not None and not dry_run:
+            append_event(
+                "feature-finalize",
+                "finalize_alert_unavailable",
+                feature_id=feature_id,
+                details={"project": project["name"], "issue": alert_issue},
+            )
 
         env_issue = _feature_finalize_blocking_issue(project["name"])
         if env_issue is not None:

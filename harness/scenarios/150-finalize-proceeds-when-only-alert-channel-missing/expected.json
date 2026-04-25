@@ -1,0 +1,10 @@
+{
+  "checked": 1,
+  "opened": 1,
+  "abandoned": 0,
+  "skipped": 0,
+  "status": "finalizing",
+  "final_pr_number": 42,
+  "alert_event": true,
+  "blocked_event": false
+}
