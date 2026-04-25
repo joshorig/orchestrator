@@ -59,7 +59,7 @@ def _scenario_cluster(name, scenario_kind):
         "clean_state_wipe_and_restart",
     }:
         return "state-engine"
-    if scenario_kind in {"telegram_surface", "task_cost_capture", "supply_chain_gate", "security_secret_gate", "untrusted_skill_refusal", "launchd_runtime_env_contract"}:
+    if scenario_kind in {"telegram_surface", "task_cost_capture", "supply_chain_gate", "security_secret_gate", "untrusted_skill_refusal", "launchd_runtime_env_contract", "template_contract_yaml_validates"}:
         return "wave-c"
     if scenario_kind in {"review_feedback_exhaustion", "issue_replan_cap", "self_repair_resolution", "self_repair_observation",
                          "observation_orphan", "observation_idempotent", "clock_skew_backward", "council_timeout",
@@ -7309,6 +7309,40 @@ def _run_launchd_runtime_env_contract(repo_root, scenario):
         }
 
 
+def _run_template_contract_yaml_validates(repo_root, scenario):
+    _orchestrator, worker = _load_repo_modules(repo_root)
+    schema_path = repo_root / "braid" / "contract_schema.json"
+    schema = json.loads(schema_path.read_text())
+    contract = worker._load_template_contract("lvc-implement-operator")
+    invalid_rejected = False
+    try:
+        worker._validate_template_contract({"contractspec": 1}, path="fixture.contract.yaml")
+    except ValueError:
+        invalid_rejected = True
+
+    task = {
+        "engine_args": {
+            "roadmap_entry": {
+                "id": "abc-1-fixture",
+                "title": "Contract prompt fixture",
+                "body": "Plan one LVC implementation slice.",
+            }
+        }
+    }
+    system_prompt, _user_prompt, _panel = worker.planner_council_prompt(
+        task,
+        {"name": "lvc-standard", "path": str(repo_root)},
+        "memory fixture",
+        {},
+    )
+    return {
+        "contract_loaded": bool(contract),
+        "schema_declares_contractspec": "contractspec" in schema.get("required", []),
+        "invalid_rejected": invalid_rejected,
+        "prompt_contains_contract_block": "[CONTRACT]" in system_prompt and "no-secret-emitted" in system_prompt,
+    }
+
+
 def main(argv):
     if len(argv) < 2 or len(argv) > 3:
         raise SystemExit("usage: harness/run_scenario.py <scenario-dir> | summary [runs-dir]")
@@ -7550,6 +7584,8 @@ def main(argv):
         actual = _run_untrusted_skill_refusal(repo_root, scenario)
     elif kind == "launchd_runtime_env_contract":
         actual = _run_launchd_runtime_env_contract(repo_root, scenario)
+    elif kind == "template_contract_yaml_validates":
+        actual = _run_template_contract_yaml_validates(repo_root, scenario)
     elif kind == "self_repair_review_state_live":
         actual = _run_self_repair_review_state_live(repo_root, scenario)
     elif kind == "orchestrator_template_candidate_only":

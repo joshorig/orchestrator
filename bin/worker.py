@@ -3241,6 +3241,206 @@ def planner_template_roles(project_name):
     return roles
 
 
+def _contract_required_keys(obj, keys, path):
+    missing = [key for key in keys if key not in obj]
+    if missing:
+        raise ValueError(f"{path}: missing required keys: {', '.join(missing)}")
+
+
+def _contract_check_string(value, path):
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{path}: must be a non-empty string")
+
+
+def _contract_check_number(value, path, *, minimum=None, maximum=None):
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError(f"{path}: must be a number")
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{path}: must be >= {minimum}")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"{path}: must be <= {maximum}")
+
+
+def _contract_check_check_item(item, path, *, require_recovery=False, strategies=None):
+    if not isinstance(item, dict):
+        raise ValueError(f"{path}: must be an object")
+    required = ("name", "check")
+    if require_recovery:
+        required = (*required, "recovery")
+    _contract_required_keys(item, required, path)
+    _contract_check_string(item["name"], f"{path}.name")
+    if "category" in item:
+        _contract_check_string(item["category"], f"{path}.category")
+    check = item["check"]
+    if not isinstance(check, dict):
+        raise ValueError(f"{path}.check: must be an object")
+    _contract_required_keys(check, ("field", "operator"), f"{path}.check")
+    _contract_check_string(check["field"], f"{path}.check.field")
+    _contract_check_string(check["operator"], f"{path}.check.operator")
+    if require_recovery:
+        recovery = item["recovery"]
+        _contract_check_string(recovery, f"{path}.recovery")
+        if strategies is not None and recovery not in strategies:
+            raise ValueError(f"{path}.recovery: unknown strategy {recovery!r}")
+
+
+def _contract_check_hard_soft(section, path, *, strategies):
+    if not isinstance(section, dict):
+        raise ValueError(f"{path}: must be an object")
+    _contract_required_keys(section, ("hard", "soft"), path)
+    for key, require_recovery in (("hard", False), ("soft", True)):
+        value = section[key]
+        if not isinstance(value, list):
+            raise ValueError(f"{path}.{key}: must be an array")
+        for idx, item in enumerate(value):
+            _contract_check_check_item(
+                item,
+                f"{path}.{key}[{idx}]",
+                require_recovery=require_recovery,
+                strategies=strategies,
+            )
+
+
+def _validate_template_contract(contract, *, path="<contract>", template_name=None):
+    if not isinstance(contract, dict):
+        raise ValueError(f"{path}: contract must be an object")
+    allowed_top = (
+        "contractspec", "kind", "name", "preconditions", "invariants",
+        "governance", "recovery", "satisfaction",
+    )
+    extra = sorted(set(contract) - set(allowed_top))
+    if extra:
+        raise ValueError(f"{path}: unknown top-level keys: {', '.join(extra)}")
+    _contract_required_keys(contract, allowed_top, path)
+    if not isinstance(contract["contractspec"], int) or isinstance(contract["contractspec"], bool):
+        raise ValueError(f"{path}.contractspec: must be an integer")
+    if contract["kind"] != "agent":
+        raise ValueError(f"{path}.kind: must be 'agent'")
+    _contract_check_string(contract["name"], f"{path}.name")
+    if template_name and contract["name"] != template_name:
+        raise ValueError(f"{path}.name: expected {template_name!r}, got {contract['name']!r}")
+
+    preconditions = contract["preconditions"]
+    if not isinstance(preconditions, list):
+        raise ValueError(f"{path}.preconditions: must be an array")
+    for idx, item in enumerate(preconditions):
+        _contract_check_check_item(item, f"{path}.preconditions[{idx}]")
+
+    recovery = contract["recovery"]
+    if not isinstance(recovery, dict):
+        raise ValueError(f"{path}.recovery: must be an object")
+    _contract_required_keys(recovery, ("strategies",), f"{path}.recovery")
+    strategies = recovery["strategies"]
+    if not isinstance(strategies, list):
+        raise ValueError(f"{path}.recovery.strategies: must be an array")
+    strategy_names = set()
+    for idx, strategy in enumerate(strategies):
+        item_path = f"{path}.recovery.strategies[{idx}]"
+        if not isinstance(strategy, dict):
+            raise ValueError(f"{item_path}: must be an object")
+        allowed_strategy = {"name", "tier", "action", "attempt_limit", "fallback"}
+        extra_strategy = sorted(set(strategy) - allowed_strategy)
+        if extra_strategy:
+            raise ValueError(f"{item_path}: unknown keys: {', '.join(extra_strategy)}")
+        _contract_required_keys(strategy, ("name", "tier", "action"), item_path)
+        _contract_check_string(strategy["name"], f"{item_path}.name")
+        if strategy["name"] in strategy_names:
+            raise ValueError(f"{item_path}.name: duplicate strategy {strategy['name']!r}")
+        strategy_names.add(strategy["name"])
+        if not isinstance(strategy["tier"], int) or isinstance(strategy["tier"], bool) or not 1 <= strategy["tier"] <= 5:
+            raise ValueError(f"{item_path}.tier: must be an integer from 1 to 5")
+        _contract_check_string(strategy["action"], f"{item_path}.action")
+        if "attempt_limit" in strategy and (
+            not isinstance(strategy["attempt_limit"], int)
+            or isinstance(strategy["attempt_limit"], bool)
+            or strategy["attempt_limit"] < 0
+        ):
+            raise ValueError(f"{item_path}.attempt_limit: must be a non-negative integer")
+        if "fallback" in strategy:
+            _contract_check_string(strategy["fallback"], f"{item_path}.fallback")
+    for idx, strategy in enumerate(strategies):
+        fallback = strategy.get("fallback")
+        if fallback and fallback not in strategy_names:
+            raise ValueError(
+                f"{path}.recovery.strategies[{idx}].fallback: unknown strategy {fallback!r}"
+            )
+
+    _contract_check_hard_soft(contract["invariants"], f"{path}.invariants", strategies=strategy_names)
+    _contract_check_hard_soft(contract["governance"], f"{path}.governance", strategies=strategy_names)
+
+    satisfaction = contract["satisfaction"]
+    if not isinstance(satisfaction, dict):
+        raise ValueError(f"{path}.satisfaction: must be an object")
+    _contract_required_keys(satisfaction, ("p", "delta", "k"), f"{path}.satisfaction")
+    _contract_check_number(satisfaction["p"], f"{path}.satisfaction.p", minimum=0, maximum=1)
+    _contract_check_number(satisfaction["delta"], f"{path}.satisfaction.delta", minimum=0, maximum=1)
+    if not isinstance(satisfaction["k"], int) or isinstance(satisfaction["k"], bool) or satisfaction["k"] < 0:
+        raise ValueError(f"{path}.satisfaction.k: must be a non-negative integer")
+    return contract
+
+
+def _parse_contract_yaml_or_json(text, path):
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as json_exc:
+        try:
+            import yaml  # type: ignore
+        except Exception as import_exc:
+            raise ValueError(f"{path}: invalid JSON and PyYAML unavailable for YAML parsing: {json_exc}") from import_exc
+        try:
+            return yaml.safe_load(text)
+        except Exception as yaml_exc:
+            raise ValueError(f"{path}: invalid contract YAML/JSON: {yaml_exc}") from yaml_exc
+
+
+def _load_template_contract(template_name):
+    path = o.BRAID_TEMPLATES / f"{template_name}.contract.yaml"
+    if not path.exists():
+        return None
+    contract = _parse_contract_yaml_or_json(path.read_text(), str(path))
+    return _validate_template_contract(contract, path=str(path), template_name=template_name)
+
+
+def _render_contract_block(contract):
+    if not contract:
+        return ""
+    strategies = {
+        item["name"]: item
+        for item in ((contract.get("recovery") or {}).get("strategies") or [])
+        if isinstance(item, dict) and item.get("name")
+    }
+    lines = [
+        "[CONTRACT]",
+        f"template: {contract['name']}",
+        "hard invariants: "
+        + ", ".join(item["name"] for item in contract["invariants"]["hard"]),
+        "hard governance: "
+        + ", ".join(item["name"] for item in contract["governance"]["hard"]),
+    ]
+    soft_items = list(contract["invariants"]["soft"]) + list(contract["governance"]["soft"])
+    if soft_items:
+        lines.append("soft checks with recovery:")
+        for item in soft_items[:6]:
+            strategy = strategies.get(item["recovery"]) or {}
+            tier = strategy.get("tier", "?")
+            lines.append(f"- {item['name']} -> {item['recovery']} (tier {tier})")
+    satisfaction = contract["satisfaction"]
+    lines.append(
+        f"satisfaction: p={satisfaction['p']} delta={satisfaction['delta']} k={satisfaction['k']}"
+    )
+    lines.append("[/CONTRACT]")
+    return "\n".join(lines)
+
+
+def _planner_contract_blocks(project_name):
+    blocks = []
+    for template in planner_implementer_templates(project_name):
+        contract = _load_template_contract(template)
+        if contract:
+            blocks.append(_render_contract_block(contract))
+    return "\n\n".join(block for block in blocks if block)
+
+
 def _council_member_context(member):
     agent_dir = _council_agent_dir()
     if agent_dir is None:
@@ -3281,6 +3481,7 @@ def planner_council_prompt(task, project, memory_ctx, cfg):
     panel = _config_council_panel(cfg, "planner_panel", ("aristotle", "socrates", "meadows"))
     council_ctx = "\n\n".join(_council_member_context(member) for member in panel)
     allowed_templates = ", ".join(f'"{name}"' for name in planner_template_roles(project["name"]).keys())
+    contract_block = _planner_contract_blocks(project["name"])
     system_prompt = (
         "You are the planner council for the devmini orchestrator.\n"
         "Run a compact internal council before emitting implementation slices.\n"
@@ -3303,7 +3504,8 @@ def planner_council_prompt(task, project, memory_ctx, cfg):
             '"slices":[{"id":"slice-1","summary":"...","braid_template":"lvc-implement-operator"}]}'
         )
         + "\n"
-        "[COUNCIL PERSONAS]\n"
+        + (contract_block + "\n\n" if contract_block else "")
+        + "[COUNCIL PERSONAS]\n"
         f"{council_ctx}\n"
         "[END COUNCIL PERSONAS]"
     )
@@ -3730,6 +3932,7 @@ def _run_self_repair_final_adjudication(task, target, target_wt, target_base, ch
 def planner_system_prompt(project_name, roadmap_entry_body=""):
     historian_template = planner_historian_template(project_name)
     implementer_templates = planner_implementer_templates(project_name)
+    contract_block = _planner_contract_blocks(project_name)
     if project_name == "lvc-standard":
         implementer_desc = (
             '  - "lvc-implement-operator": ONLY for adding/modifying a Java operator in '
@@ -3768,7 +3971,8 @@ def planner_system_prompt(project_name, roadmap_entry_body=""):
         f"{roadmap_block}"
         "Only the following braid_template values are valid for codex slices in this project:\n"
         f"{implementer_desc}{historian_desc}"
-        "Do NOT emit reviewer or QA slices — those are scheduled by separate tickers. "
+        + (contract_block + "\n\n" if contract_block else "")
+        + "Do NOT emit reviewer or QA slices — those are scheduled by separate tickers. "
         "Do NOT invent other template names. Do NOT use null. "
         "If a candidate piece of work fits NEITHER the allowed templates above "
         "(e.g. CI workflow changes, release automation, cross-project refactors), "

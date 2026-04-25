@@ -1,0 +1,43 @@
+{
+  "contractspec": 1,
+  "kind": "agent",
+  "name": "lvc-implement-operator",
+  "preconditions": [
+    {"name": "env-check-ok", "check": {"field": "state.environment_check.verdict", "operator": "eq", "value": "ok"}},
+    {"name": "base-branch-fetched", "check": {"field": "state.base_branch.fetch_status", "operator": "eq", "value": "success"}},
+    {"name": "braid-template-hash-present", "check": {"field": "task.braid_template_hash", "operator": "present"}}
+  ],
+  "invariants": {
+    "hard": [
+      {"name": "no-secret-emitted", "category": "security", "check": {"field": "action.contains_secret_token", "operator": "eq", "value": false}},
+      {"name": "agent-scan-passed", "category": "security", "check": {"field": "state.agent_scan.verdict", "operator": "eq", "value": "pass"}},
+      {"name": "trusted-skill-only", "category": "supply-chain", "check": {"field": "action.skill_sha", "operator": "in_set", "value": "trusted_skills_allowlist"}}
+    ],
+    "soft": [
+      {"name": "braid-trailer-well-formed", "check": {"field": "action.trailer.kind", "operator": "in_set", "value": ["BRAID_OK", "BRAID_REFINE", "BRAID_TOPOLOGY_ERROR"]}, "recovery": "prompt-mod-trailer-fix"},
+      {"name": "review-findings-not-repeated", "check": {"field": "state.review_feedback_signature_repeats", "operator": "lt", "value": 2}, "recovery": "autonomy-reduction-fail-loop"}
+    ]
+  },
+  "governance": {
+    "hard": [
+      {"name": "token-cost-hard-cap", "category": "cost", "check": {"field": "action.cumulative_cost_usd", "operator": "lte", "value": 50}},
+      {"name": "prohibited-tool-call", "category": "action-boundary", "check": {"field": "action.tool_name", "operator": "not_in_set", "value": ["rm_rf", "network_egress_disallowed"]}}
+    ],
+    "soft": [
+      {"name": "token-cost-soft-cap", "check": {"field": "action.cumulative_cost_usd", "operator": "lte", "value": 30}, "recovery": "prompt-mod-cost-warn"},
+      {"name": "planner-time-soft-cap", "check": {"field": "action.planner_elapsed_s", "operator": "lte", "value": 600}, "recovery": "active-correction-replan-shorter"}
+    ]
+  },
+  "recovery": {
+    "strategies": [
+      {"name": "prompt-mod-trailer-fix", "tier": 1, "action": "append_corrective_prompt", "attempt_limit": 1, "fallback": "active-correction-replan-shorter"},
+      {"name": "prompt-mod-cost-warn", "tier": 1, "action": "append_cost_warn", "attempt_limit": 1, "fallback": "human-escalate-cost"},
+      {"name": "active-correction-replan-shorter", "tier": 2, "action": "replan_with_prior_errors", "attempt_limit": 3, "fallback": "autonomy-reduction-fail-loop"},
+      {"name": "autonomy-reduction-fail-loop", "tier": 3, "action": "stop_codex_runs", "attempt_limit": 1, "fallback": "human-escalate-loop"},
+      {"name": "human-escalate-cost", "tier": 4, "action": "telegram_alert_open_self_repair", "attempt_limit": 1, "fallback": "terminate-session"},
+      {"name": "human-escalate-loop", "tier": 4, "action": "telegram_alert_open_self_repair", "attempt_limit": 1, "fallback": "terminate-session"},
+      {"name": "terminate-session", "tier": 5, "action": "abandon_task"}
+    ]
+  },
+  "satisfaction": {"p": 0.95, "delta": 0.10, "k": 4}
+}

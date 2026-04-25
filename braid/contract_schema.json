@@ -1,0 +1,84 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Agent Behavioral ContractSpec",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contractspec", "kind", "name", "preconditions", "invariants", "governance", "recovery", "satisfaction"],
+  "properties": {
+    "contractspec": {"type": "integer", "minimum": 1},
+    "kind": {"type": "string", "enum": ["agent"]},
+    "name": {"type": "string", "minLength": 1},
+    "preconditions": {"type": "array", "items": {"$ref": "#/definitions/check_item"}},
+    "invariants": {"$ref": "#/definitions/hard_soft"},
+    "governance": {"$ref": "#/definitions/hard_soft"},
+    "recovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["strategies"],
+      "properties": {
+        "strategies": {"type": "array", "items": {"$ref": "#/definitions/strategy"}}
+      }
+    },
+    "satisfaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["p", "delta", "k"],
+      "properties": {
+        "p": {"type": "number", "minimum": 0, "maximum": 1},
+        "delta": {"type": "number", "minimum": 0, "maximum": 1},
+        "k": {"type": "integer", "minimum": 0}
+      }
+    }
+  },
+  "definitions": {
+    "hard_soft": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hard", "soft"],
+      "properties": {
+        "hard": {"type": "array", "items": {"$ref": "#/definitions/check_item"}},
+        "soft": {"type": "array", "items": {"$ref": "#/definitions/soft_check_item"}}
+      }
+    },
+    "check_item": {
+      "type": "object",
+      "required": ["name", "check"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "category": {"type": "string"},
+        "check": {"$ref": "#/definitions/check"}
+      }
+    },
+    "soft_check_item": {
+      "type": "object",
+      "required": ["name", "check", "recovery"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "category": {"type": "string"},
+        "check": {"$ref": "#/definitions/check"},
+        "recovery": {"type": "string", "minLength": 1}
+      }
+    },
+    "check": {
+      "type": "object",
+      "required": ["field", "operator"],
+      "properties": {
+        "field": {"type": "string", "minLength": 1},
+        "operator": {"type": "string", "minLength": 1},
+        "value": {}
+      }
+    },
+    "strategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "tier", "action"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "tier": {"type": "integer", "minimum": 1, "maximum": 5},
+        "action": {"type": "string", "minLength": 1},
+        "attempt_limit": {"type": "integer", "minimum": 0},
+        "fallback": {"type": "string"}
+      }
+    }
+  }
+}
