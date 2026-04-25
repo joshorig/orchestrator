@@ -1,0 +1,7 @@
+{
+  "all_codes_have_tier": true,
+  "tier_3_stops_codex": true,
+  "tier_4_opens_self_repair": true,
+  "tier_4_alerts_telegram": true,
+  "tier_5_cascades_to_children": true
+}

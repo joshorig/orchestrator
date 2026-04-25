@@ -59,7 +59,7 @@ def _scenario_cluster(name, scenario_kind):
         "clean_state_wipe_and_restart",
     }:
         return "state-engine"
-    if scenario_kind in {"telegram_surface", "task_cost_capture", "supply_chain_gate", "security_secret_gate", "untrusted_skill_refusal", "launchd_runtime_env_contract", "template_contract_yaml_validates"}:
+    if scenario_kind in {"telegram_surface", "task_cost_capture", "supply_chain_gate", "security_secret_gate", "untrusted_skill_refusal", "launchd_runtime_env_contract", "template_contract_yaml_validates", "blocker_tier_routing"}:
         return "wave-c"
     if scenario_kind in {"review_feedback_exhaustion", "issue_replan_cap", "self_repair_resolution", "self_repair_observation",
                          "observation_orphan", "observation_idempotent", "clock_skew_backward", "council_timeout",
@@ -7343,6 +7343,43 @@ def _run_template_contract_yaml_validates(repo_root, scenario):
     }
 
 
+def _run_blocker_tier_routing(repo_root, scenario):
+    orchestrator, _worker = _load_repo_modules(repo_root)
+
+    def decision(code, *, state="blocked"):
+        issue = {
+            "kind": "frontier_task_blocked",
+            "task_state": state,
+            "blocker": orchestrator.make_blocker(
+                code,
+                summary=code,
+                detail=code,
+                source="scenario",
+                retryable=True,
+            ),
+            "diagnosis": code,
+        }
+        task = {"task_id": f"task-{code}", "project": "devmini-orchestrator", "blocker": issue["blocker"]}
+        return orchestrator._workflow_policy_decision(
+            issue,
+            task,
+            {"name": "devmini-orchestrator", "path": str(repo_root)},
+        )
+
+    tier3_action, _tier3_diag, tier3_policy = decision("review_feedback_loop")
+    tier4_action, _tier4_diag, tier4_policy = decision("attempt_exhausted")
+    env_action, _env_diag, env_policy = decision("environment_bypass_budget_exceeded")
+    tier5_action, _tier5_diag, tier5_policy = decision("missing_child_unrecoverable")
+
+    return {
+        "all_codes_have_tier": all(code in orchestrator.BLOCKER_TIER for code in orchestrator.BLOCKER_CODES),
+        "tier_3_stops_codex": tier3_action is None and tier3_policy == "tier_3_autonomy_reduction",
+        "tier_4_opens_self_repair": tier4_action == "enqueue_self_repair_and_alert",
+        "tier_4_alerts_telegram": env_action == "enqueue_self_repair_and_alert" and env_policy == "environment_bypass_budget_alert",
+        "tier_5_cascades_to_children": tier5_action == "abandon_task" and tier5_policy == "tier_5_terminate",
+    }
+
+
 def main(argv):
     if len(argv) < 2 or len(argv) > 3:
         raise SystemExit("usage: harness/run_scenario.py <scenario-dir> | summary [runs-dir]")
@@ -7586,6 +7623,8 @@ def main(argv):
         actual = _run_launchd_runtime_env_contract(repo_root, scenario)
     elif kind == "template_contract_yaml_validates":
         actual = _run_template_contract_yaml_validates(repo_root, scenario)
+    elif kind == "blocker_tier_routing":
+        actual = _run_blocker_tier_routing(repo_root, scenario)
     elif kind == "self_repair_review_state_live":
         actual = _run_self_repair_review_state_live(repo_root, scenario)
     elif kind == "orchestrator_template_candidate_only":

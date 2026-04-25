@@ -124,58 +124,67 @@ STATES = (
 
 VALID_ENGINES = ("claude", "codex", "qa")
 VALID_ROLES = ("planner", "implementer", "reviewer", "qa", "historian")
-BLOCKER_CODES = (
-    "template_missing",
-    "template_missing_edge",
-    "template_refine_exhausted",
-    "template_graph_error",
-    "invalid_braid_refine",
-    "planner_slice_format_error",
-    "false_blocker_claim",
-    "project_main_dirty",
-    "project_regression_failed",
-    "runtime_policy_stale",
-    "worker_crash",
-    "worker_crash_lock_contention",
-    "worker_crash_subprocess_timeout",
-    "worker_crash_oom_killed",
-    "worker_crash_git_failure",
-    "worker_crash_unhandled",
-    "worktree_create_failed",
-    "planner_emitted_no_children",
-    "feature_has_no_children",
-    "missing_child",
-    "missing_child_unrecoverable",
-    "final_pr_blocked",
-    "finalize_follow_up_dead",
-    "canary_missing_recent_success",
-    "canary_stale",
-    "canary_unrecoverable",
-    "runtime_env_dirty",
-    "delivery_auth_expired",
-    "runtime_unknown_project",
-    "runtime_precondition_failed",
-    "review_gate_protocol_error",
-    "council_timeout",
-    "review_feedback_exhausted",
-    "review_feedback_target_inflight",
-    "review_feedback_loop",
-    "claude_budget_exhausted",
-    "slot_paused",
-    "llm_timeout",
-    "llm_exit_error",
-    "model_output_invalid",
-    "validator_malfunction",
-    "qa_contract_error",
-    "qa_target_missing",
-    "qa_smoke_failed",
-    "qa_scope_inadequate",
-    "auto_commit_failed",
-    "delivery_push_failed",
-    "attempt_exhausted",
-    "untrusted_skill_rejected",
-    "environment_bypass_budget_exceeded",
+# Tier semantics from ABC paper §5.4:
+#   0 = hard, no recovery (zero-tolerance, escalate immediately)
+#   1 = lightweight prompt modification
+#   2 = active correction / re-prompting
+#   3 = autonomy reduction
+#   4 = human escalation
+#   5 = session termination
+_BLOCKER_REGISTRY = (
+    ("template_missing", 2),
+    ("template_missing_edge", 2),
+    ("template_refine_exhausted", 4),
+    ("template_graph_error", 3),
+    ("invalid_braid_refine", 2),
+    ("planner_slice_format_error", 2),
+    ("false_blocker_claim", 4),
+    ("project_main_dirty", 3),
+    ("project_regression_failed", 4),
+    ("runtime_policy_stale", 2),
+    ("worker_crash", 2),
+    ("worker_crash_lock_contention", 2),
+    ("worker_crash_subprocess_timeout", 2),
+    ("worker_crash_oom_killed", 3),
+    ("worker_crash_git_failure", 2),
+    ("worker_crash_unhandled", 2),
+    ("worktree_create_failed", 2),
+    ("planner_emitted_no_children", 2),
+    ("feature_has_no_children", 4),
+    ("missing_child", 3),
+    ("missing_child_unrecoverable", 5),
+    ("final_pr_blocked", 3),
+    ("finalize_follow_up_dead", 3),
+    ("canary_missing_recent_success", 2),
+    ("canary_stale", 3),
+    ("canary_unrecoverable", 5),
+    ("runtime_env_dirty", 4),
+    ("delivery_auth_expired", 4),
+    ("runtime_unknown_project", 4),
+    ("runtime_precondition_failed", 4),
+    ("review_gate_protocol_error", 2),
+    ("council_timeout", 2),
+    ("review_feedback_exhausted", 4),
+    ("review_feedback_target_inflight", 2),
+    ("review_feedback_loop", 3),
+    ("claude_budget_exhausted", 4),
+    ("slot_paused", 4),
+    ("llm_timeout", 2),
+    ("llm_exit_error", 2),
+    ("model_output_invalid", 2),
+    ("validator_malfunction", 2),
+    ("qa_contract_error", 4),
+    ("qa_target_missing", 4),
+    ("qa_smoke_failed", 3),
+    ("qa_scope_inadequate", 3),
+    ("auto_commit_failed", 2),
+    ("delivery_push_failed", 3),
+    ("attempt_exhausted", 4),
+    ("untrusted_skill_rejected", 0),
+    ("environment_bypass_budget_exceeded", 4),
 )
+BLOCKER_CODES = tuple(code for code, _tier in _BLOCKER_REGISTRY)
+BLOCKER_TIER = dict(_BLOCKER_REGISTRY)
 WORKFLOW_REPAIR_POLICY = (
     {
         "name": "template_missing_self_repair",
@@ -542,8 +551,14 @@ WORKFLOW_REPAIR_POLICY = (
         "name": "attempt_exhausted_alert",
         "kind": "frontier_task_blocked",
         "blocker_code": "attempt_exhausted",
-        "action": "push_alert",
-        "diagnosis": "task exceeded the cumulative retry limit and requires operator review before any further execution",
+        "action": "enqueue_self_repair_and_alert",
+        "diagnosis": "task exceeded the cumulative retry limit; open self-repair and page the operator before any further execution",
+    },
+    {
+        "name": "environment_bypass_budget_alert",
+        "blocker_code": "environment_bypass_budget_exceeded",
+        "action": "enqueue_self_repair_and_alert",
+        "diagnosis": "environment bypass budget was exceeded; open self-repair and alert the operator",
     },
     {
         "name": "missing_child_recover",
@@ -11593,6 +11608,16 @@ def _workflow_policy_decision(issue, task, project):
         if _workflow_policy_matches(policy, issue, task, project):
             diagnosis = policy.get("diagnosis") or detail or summary or issue.get("diagnosis") or "workflow issue detected"
             return policy.get("action"), diagnosis, policy.get("name")
+    tier = BLOCKER_TIER.get(blocker.get("code"), 0)
+    diagnosis = detail or summary or issue.get("diagnosis") or "workflow issue detected"
+    if tier == 0:
+        return "push_alert", f"hard no-recovery blocker: {diagnosis}", "tier_0_hard_escalate"
+    if tier == 3:
+        return None, f"tier-3 autonomy reduction: {diagnosis}", "tier_3_autonomy_reduction"
+    if tier == 4:
+        return "enqueue_self_repair_and_alert", f"tier-4 human escalation: {diagnosis}", "tier_4_self_repair_alert"
+    if tier == 5:
+        return "abandon_task", f"tier-5 session termination: {diagnosis}", "tier_5_terminate"
     if issue.get("task_state") in ("failed", "blocked"):
         return None, detail or summary or "task is blocked without a known automatic fix", None
     return None, issue.get("diagnosis") or "workflow issue detected", None
@@ -12203,6 +12228,23 @@ def tick_workflow_check():
                     f"environment repair attempted={repair.get('attempted', 0)} "
                     f"remaining={repair.get('remaining_error_count', 0)}"
                 )
+        elif env_issue.get("action") == "enqueue_self_repair_and_alert":
+            out = cached_action(
+                f"self_repair:{env_issue['issue_key']}",
+                lambda: enqueue_self_repair(
+                    summary=_workflow_issue_self_repair_summary(env_issue),
+                    evidence=_workflow_issue_self_repair_evidence(env_issue),
+                    issue_kind=env_issue.get("kind") or "environment_degraded",
+                    source="workflow-check",
+                    issue_key=env_issue.get("issue_key"),
+                ),
+            )
+            alert_path = _write_workflow_alert(env_issue, env_issue["diagnosis"])
+            outcome = (
+                f"self-repair result: {json.dumps(out, sort_keys=True)}; "
+                f"operator alert written: {alert_path}" if alert_path else
+                f"self-repair result: {json.dumps(out, sort_keys=True)}; operator alert already recently sent"
+            )
         env_issue["outcome"] = outcome
         issues.append(env_issue)
 
@@ -12369,6 +12411,23 @@ def tick_workflow_check():
                     ),
                 )
                 outcome = f"self-repair result: {json.dumps(out, sort_keys=True)}"
+            elif action == "enqueue_self_repair_and_alert":
+                out = cached_action(
+                    f"self_repair:{issue['issue_key']}",
+                    lambda: enqueue_self_repair(
+                        summary=_workflow_issue_self_repair_summary(issue),
+                        evidence=_workflow_issue_self_repair_evidence(issue),
+                        issue_kind=issue.get("kind") or "runtime_bug",
+                        source="workflow-check",
+                        issue_key=issue.get("issue_key"),
+                    ),
+                )
+                alert_path = _write_workflow_alert(issue, issue["diagnosis"])
+                outcome = (
+                    f"self-repair result: {json.dumps(out, sort_keys=True)}; "
+                    f"operator alert written: {alert_path}" if alert_path else
+                    f"self-repair result: {json.dumps(out, sort_keys=True)}; operator alert already recently sent"
+                )
             elif action == "push_alert":
                 alert_path = _write_workflow_alert(issue, issue["diagnosis"])
                 outcome = f"operator alert written: {alert_path}" if alert_path else "operator alert already recently sent"
