@@ -1,6 +1,7 @@
 # Secrets — never commit
 config/telegram.json
 config/gh-token
+config/*.token
 config/*.env
 config/orchestrator.local.json
 config/context-sources.json
