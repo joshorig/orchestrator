@@ -1,0 +1,7 @@
+{
+  "kind": "workflow_standalone_green_regression_clears",
+  "scenario_version": 1,
+  "project": "lvc-standard",
+  "task_id": "task-standalone-green-regression",
+  "wall_time_budget": 10
+}

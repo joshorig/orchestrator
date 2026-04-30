@@ -1,0 +1,8 @@
+{
+  "reported": true,
+  "action": "retry_task",
+  "outcome": "task requeued",
+  "state": "queued",
+  "attempt": 2,
+  "last_retry_reason_contains_watchdog": true
+}

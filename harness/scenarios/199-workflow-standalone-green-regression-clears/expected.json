@@ -1,0 +1,8 @@
+{
+  "reported": true,
+  "action": "clear_regression_hard_stop",
+  "policy": "regression_green_log_clear",
+  "state": "abandoned",
+  "cleared_by": "green_log",
+  "cleared_event": "green_log"
+}

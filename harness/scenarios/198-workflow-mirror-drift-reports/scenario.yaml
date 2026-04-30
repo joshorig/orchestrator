@@ -1,0 +1,8 @@
+{
+  "kind": "workflow_mirror_drift_reports",
+  "scenario_version": 1,
+  "project": "lvc-standard",
+  "feature_id": "feature-mirror-drift-report",
+  "task_id": "task-mirror-drift-report",
+  "wall_time_budget": 10
+}

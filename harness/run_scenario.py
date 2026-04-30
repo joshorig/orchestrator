@@ -7329,6 +7329,280 @@ def _run_state_engine_task_mirror_drift_repair(repo_root, scenario):
     }
 
 
+def _run_workflow_stale_running_retries(repo_root, scenario):
+    orchestrator, _worker = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        for state in orchestrator.STATES:
+            (root / "queue" / state).mkdir(parents=True, exist_ok=True)
+        old = {
+            "FEATURES_DIR": orchestrator.FEATURES_DIR,
+            "QUEUE_ROOT": orchestrator.QUEUE_ROOT,
+            "REPORT_DIR": orchestrator.REPORT_DIR,
+            "RUNTIME_DIR": orchestrator.RUNTIME_DIR,
+            "TRANSITIONS_LOG": orchestrator.TRANSITIONS_LOG,
+            "EVENTS_LOG": orchestrator.EVENTS_LOG,
+            "METRICS_LOG": orchestrator.METRICS_LOG,
+            "CLAIMS_DIR": orchestrator.CLAIMS_DIR,
+            "LOGS_DIR": orchestrator.LOGS_DIR,
+            "load_config": orchestrator.load_config,
+            "environment_health": orchestrator.environment_health,
+            "emit_runtime_metrics_snapshot": orchestrator.emit_runtime_metrics_snapshot,
+            "write_agent_status": orchestrator.write_agent_status,
+            "reap": orchestrator.reap,
+            "_write_workflow_check_report": orchestrator._write_workflow_check_report,
+            "tick_self_repair_resolution": orchestrator.tick_self_repair_resolution,
+            "tick_self_repair_queue": orchestrator.tick_self_repair_queue,
+            "_nudge_engine_workers": orchestrator._nudge_engine_workers,
+        }
+        captured = []
+        try:
+            orchestrator.FEATURES_DIR = root / "features"
+            orchestrator.QUEUE_ROOT = root / "queue"
+            orchestrator.REPORT_DIR = root / "reports"
+            orchestrator.RUNTIME_DIR = root / "runtime"
+            orchestrator.TRANSITIONS_LOG = root / "runtime" / "transitions.log"
+            orchestrator.EVENTS_LOG = root / "runtime" / "events.jsonl"
+            orchestrator.METRICS_LOG = root / "runtime" / "metrics.jsonl"
+            orchestrator.CLAIMS_DIR = root / "claims"
+            orchestrator.LOGS_DIR = root / "logs"
+            orchestrator.FEATURES_DIR.mkdir(parents=True, exist_ok=True)
+            orchestrator.RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+            orchestrator.CLAIMS_DIR.mkdir(parents=True, exist_ok=True)
+            orchestrator.LOGS_DIR.mkdir(parents=True, exist_ok=True)
+            orchestrator.load_config = lambda: {
+                "workflow_check_max_attempts": 3,
+                "workflow_check_stale_running_hours": 1,
+                "projects": [
+                    {"name": scenario["project"], "path": str(root / "repo")},
+                    {"name": "devmini-orchestrator", "path": str(root / "orchestrator")},
+                ],
+                "synthetic_canary": {"enabled": False},
+            }
+            orchestrator.environment_health = lambda refresh=False: {"ok": True, "issues": []}
+            orchestrator.emit_runtime_metrics_snapshot = lambda **kwargs: None
+            orchestrator.write_agent_status = lambda *args, **kwargs: None
+            orchestrator.reap = lambda: 0
+            orchestrator._write_workflow_check_report = lambda issues, reaped=0: captured.extend(issues)
+            orchestrator.tick_self_repair_resolution = lambda: {"resolved": 0, "stalled": 0}
+            orchestrator.tick_self_repair_queue = lambda: {"scheduled": 0}
+            orchestrator._nudge_engine_workers = lambda engine: []
+
+            task = orchestrator.new_task(
+                role="implementer",
+                engine="codex",
+                project=scenario["project"],
+                summary="stale running task",
+                source="scenario",
+                feature_id=scenario["feature_id"],
+            )
+            task["task_id"] = scenario["task_id"]
+            task["state"] = "running"
+            task["attempt"] = 1
+            task["started_at"] = "2000-01-01T00:00:00"
+            orchestrator.write_json_atomic(orchestrator.task_path(task["task_id"], "running"), task)
+            orchestrator.write_json_atomic(
+                orchestrator.FEATURES_DIR / f"{scenario['feature_id']}.json",
+                {
+                    "feature_id": scenario["feature_id"],
+                    "project": scenario["project"],
+                    "status": "open",
+                    "summary": "stale running feature",
+                    "child_task_ids": [scenario["task_id"]],
+                },
+            )
+            orchestrator.TRANSITIONS_LOG.write_text(
+                f"2000-01-01T00:00:00\t{scenario['task_id']}\tclaimed\t->\trunning\tstarted\n",
+                encoding="utf-8",
+            )
+            orchestrator.tick_workflow_check()
+            found = orchestrator.find_task(scenario["task_id"])
+            queued = found[1] if found else {}
+        finally:
+            for key, value in old.items():
+                setattr(orchestrator, key, value)
+    issue = next((row for row in captured if row.get("blocker", {}).get("code") == "stale_running_task"), {})
+    return {
+        "reported": bool(issue),
+        "action": issue.get("action"),
+        "outcome": issue.get("outcome"),
+        "state": found[0] if found else None,
+        "attempt": queued.get("attempt"),
+        "last_retry_reason_contains_watchdog": "watchdog" in (queued.get("last_retry_reason") or ""),
+    }
+
+
+def _run_workflow_mirror_drift_reports(repo_root, scenario):
+    orchestrator, _worker = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        db_path = root / "runtime" / "orchestrator.db"
+        old_engine = _install_tmp_state_engine(orchestrator, root, db_path)
+        old = {
+            "REPORT_DIR": orchestrator.REPORT_DIR,
+            "load_config": orchestrator.load_config,
+            "environment_health": orchestrator.environment_health,
+            "emit_runtime_metrics_snapshot": orchestrator.emit_runtime_metrics_snapshot,
+            "write_agent_status": orchestrator.write_agent_status,
+            "reap": orchestrator.reap,
+            "_write_workflow_check_report": orchestrator._write_workflow_check_report,
+            "tick_self_repair_resolution": orchestrator.tick_self_repair_resolution,
+            "tick_self_repair_queue": orchestrator.tick_self_repair_queue,
+        }
+        captured = []
+        try:
+            orchestrator.REPORT_DIR = root / "reports"
+            orchestrator.load_config = lambda: {
+                "workflow_check_max_attempts": 3,
+                "projects": [
+                    {"name": scenario["project"], "path": str(root / "repo")},
+                    {"name": "devmini-orchestrator", "path": str(root / "orchestrator")},
+                ],
+                "synthetic_canary": {"enabled": False},
+            }
+            orchestrator.environment_health = lambda refresh=False: {"ok": True, "issues": []}
+            orchestrator.emit_runtime_metrics_snapshot = lambda **kwargs: None
+            orchestrator.write_agent_status = lambda *args, **kwargs: None
+            orchestrator.reap = lambda: 0
+            orchestrator._write_workflow_check_report = lambda issues, reaped=0: captured.extend(issues)
+            orchestrator.tick_self_repair_resolution = lambda: {"resolved": 0, "stalled": 0}
+            orchestrator.tick_self_repair_queue = lambda: {"scheduled": 0}
+
+            engine = orchestrator.get_state_engine()
+            engine.initialize()
+            task = orchestrator.new_task(
+                role="implementer",
+                engine="codex",
+                project=scenario["project"],
+                summary="mirror drift task",
+                source="scenario",
+                feature_id=scenario["feature_id"],
+            )
+            task["task_id"] = scenario["task_id"]
+            task["state"] = "running"
+            task["attempt"] = 1
+            engine.upsert_task(task, state="running")
+            queued = dict(task)
+            queued["state"] = "queued"
+            queued["attempt"] = 2
+            queued["last_retry_reason"] = "ULL lock guard violated"
+            orchestrator._write_json_mirror(orchestrator.task_path(queued["task_id"], "queued"), queued)
+
+            result = orchestrator.tick_workflow_check()
+            db_row = engine.find_task(scenario["task_id"], states=orchestrator.STATES)
+        finally:
+            for key, value in old.items():
+                setattr(orchestrator, key, value)
+            _restore_tmp_state_engine(orchestrator, old_engine)
+    issue = next((row for row in captured if row.get("kind") == "state_engine_mirror_drift"), {})
+    return {
+        "reported": bool(issue),
+        "blocker_code": (issue.get("blocker") or {}).get("code"),
+        "outcome_contains_repaired": "repaired" in (issue.get("outcome") or ""),
+        "tick_mirror_drifts": (result.get("mirror_repair") or {}).get("drifts"),
+        "tick_mirror_repaired": (result.get("mirror_repair") or {}).get("repaired"),
+        "db_state": db_row[0] if db_row else None,
+        "db_attempt": (db_row[1] or {}).get("attempt") if db_row else None,
+    }
+
+
+def _run_workflow_standalone_green_regression_clears(repo_root, scenario):
+    orchestrator, _worker = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        for state in orchestrator.STATES:
+            (root / "queue" / state).mkdir(parents=True, exist_ok=True)
+        old = {
+            "QUEUE_ROOT": orchestrator.QUEUE_ROOT,
+            "REPORT_DIR": orchestrator.REPORT_DIR,
+            "RUNTIME_DIR": orchestrator.RUNTIME_DIR,
+            "FEATURES_DIR": orchestrator.FEATURES_DIR,
+            "EVENTS_LOG": orchestrator.EVENTS_LOG,
+            "TRANSITIONS_LOG": orchestrator.TRANSITIONS_LOG,
+            "METRICS_LOG": orchestrator.METRICS_LOG,
+            "LOGS_DIR": orchestrator.LOGS_DIR,
+            "PROJECT_HARD_STOPS_PATH": orchestrator.PROJECT_HARD_STOPS_PATH,
+            "load_config": orchestrator.load_config,
+            "environment_health": orchestrator.environment_health,
+            "emit_runtime_metrics_snapshot": orchestrator.emit_runtime_metrics_snapshot,
+            "write_agent_status": orchestrator.write_agent_status,
+            "reap": orchestrator.reap,
+            "_write_workflow_check_report": orchestrator._write_workflow_check_report,
+            "tick_self_repair_resolution": orchestrator.tick_self_repair_resolution,
+            "tick_self_repair_queue": orchestrator.tick_self_repair_queue,
+        }
+        captured = []
+        try:
+            orchestrator.QUEUE_ROOT = root / "queue"
+            orchestrator.REPORT_DIR = root / "reports"
+            orchestrator.RUNTIME_DIR = root / "runtime"
+            orchestrator.FEATURES_DIR = root / "features"
+            orchestrator.EVENTS_LOG = root / "runtime" / "events.jsonl"
+            orchestrator.TRANSITIONS_LOG = root / "runtime" / "transitions.log"
+            orchestrator.METRICS_LOG = root / "runtime" / "metrics.jsonl"
+            orchestrator.LOGS_DIR = root / "logs"
+            orchestrator.PROJECT_HARD_STOPS_PATH = root / "runtime" / "project-hard-stops.json"
+            orchestrator.RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+            orchestrator.FEATURES_DIR.mkdir(parents=True, exist_ok=True)
+            orchestrator.LOGS_DIR.mkdir(parents=True, exist_ok=True)
+            orchestrator.load_config = lambda: {
+                "workflow_check_max_attempts": 3,
+                "projects": [
+                    {"name": scenario["project"], "path": str(root / "repo")},
+                    {"name": "devmini-orchestrator", "path": str(root / "orchestrator")},
+                ],
+                "synthetic_canary": {"enabled": False},
+            }
+            orchestrator.environment_health = lambda refresh=False: {"ok": True, "issues": []}
+            orchestrator.emit_runtime_metrics_snapshot = lambda **kwargs: None
+            orchestrator.write_agent_status = lambda *args, **kwargs: None
+            orchestrator.reap = lambda: 0
+            orchestrator._write_workflow_check_report = lambda issues, reaped=0: captured.extend(issues)
+            orchestrator.tick_self_repair_resolution = lambda: {"resolved": 0, "stalled": 0}
+            orchestrator.tick_self_repair_queue = lambda: {"scheduled": 0}
+
+            task = orchestrator.new_task(
+                role="qa",
+                engine="codex",
+                project=scenario["project"],
+                summary="standalone regression task",
+                source="scenario",
+            )
+            task["task_id"] = scenario["task_id"]
+            task["state"] = "blocked"
+            task["finished_at"] = "2026-04-25T12:00:00"
+            task["topology_error"] = "regression-failure"
+            task["blocker"] = orchestrator.make_blocker(
+                "project_regression_failed",
+                summary="project regression failed",
+                detail="compile gate failed",
+                source="scenario",
+                retryable=False,
+            )
+            orchestrator.write_json_atomic(orchestrator.task_path(task["task_id"], "blocked"), task)
+            (orchestrator.LOGS_DIR / f"{task['task_id']}.log").write_text("BUILD SUCCESSFUL\n", encoding="utf-8")
+
+            orchestrator.tick_workflow_check()
+            found = orchestrator.find_task(scenario["task_id"])
+            events = orchestrator.read_events(role="workflow-check")
+        finally:
+            for key, value in old.items():
+                setattr(orchestrator, key, value)
+    issue = next((row for row in captured if row.get("issue_key") == f"regression-green-log:{scenario['task_id']}"), {})
+    cleared_task = found[1] if found else {}
+    return {
+        "reported": bool(issue),
+        "action": issue.get("action"),
+        "policy": issue.get("policy"),
+        "state": found[0] if found else None,
+        "cleared_by": cleared_task.get("regression_cleared_by"),
+        "cleared_event": next(
+            (row.get("details", {}).get("cleared_by") for row in events if row.get("event") == "project_regression_cleared"),
+            None,
+        ),
+    }
+
+
 def _run_runner_summary(repo_root, scenario_dir, scenario):
     with tempfile.TemporaryDirectory() as tmp:
         runs_root = pathlib.Path(tmp)
@@ -8446,6 +8720,12 @@ def main(argv):
         actual = _run_state_engine_retry_reset_consistency(repo_root, scenario)
     elif kind == "state_engine_task_mirror_drift_repair":
         actual = _run_state_engine_task_mirror_drift_repair(repo_root, scenario)
+    elif kind == "workflow_stale_running_retries":
+        actual = _run_workflow_stale_running_retries(repo_root, scenario)
+    elif kind == "workflow_mirror_drift_reports":
+        actual = _run_workflow_mirror_drift_reports(repo_root, scenario)
+    elif kind == "workflow_standalone_green_regression_clears":
+        actual = _run_workflow_standalone_green_regression_clears(repo_root, scenario)
     else:
         raise SystemExit(f"unknown scenario kind: {kind}")
 

@@ -1,0 +1,9 @@
+{
+  "reported": true,
+  "blocker_code": "task_state_mirror_drift",
+  "outcome_contains_repaired": true,
+  "tick_mirror_drifts": 1,
+  "tick_mirror_repaired": 1,
+  "db_state": "queued",
+  "db_attempt": 2
+}

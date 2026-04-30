@@ -143,6 +143,8 @@ _BLOCKER_REGISTRY = (
     ("project_main_dirty", 3),
     ("project_regression_failed", 3),
     ("runtime_policy_stale", 2),
+    ("task_state_mirror_drift", 2),
+    ("stale_running_task", 2),
     ("worker_crash", 2),
     ("worker_crash_lock_contention", 2),
     ("worker_crash_subprocess_timeout", 2),
@@ -289,6 +291,20 @@ WORKFLOW_REPAIR_POLICY = (
         "blocker_code": "runtime_policy_stale",
         "action": "restart_workers_then_retry",
         "diagnosis": "workflow runtime changed; reload workers then retry",
+    },
+    {
+        "name": "stale_running_task_retry",
+        "kind": "frontier_task_blocked",
+        "blocker_code": "stale_running_task",
+        "action": "retry_task",
+        "diagnosis": "task has been in-flight beyond the watchdog limit without a live worker claim; requeue it",
+    },
+    {
+        "name": "state_engine_mirror_drift_self_repair",
+        "kind": "state_engine_mirror_drift",
+        "blocker_code": "task_state_mirror_drift",
+        "action": "enqueue_self_repair",
+        "diagnosis": "state-engine task mirror drift could not be fully repaired; open orchestrator self-repair",
     },
     {
         "name": "worker_crash_retry",
@@ -1904,6 +1920,16 @@ def _record_task_bypass(task_id, gate, reason, *, cfg=None):
         reason=reason,
     )
     return True
+
+
+def _task_has_live_claim(task_id):
+    pidfile = CLAIMS_DIR / f"{task_id}.pid"
+    try:
+        lines = pidfile.read_text().splitlines()
+        pid = int(lines[0])
+    except (OSError, ValueError, IndexError):
+        return False
+    return pid_alive(pid)
 
 
 def env_bypass_rate_1h(project_name):
@@ -11927,6 +11953,22 @@ def _project_green_regression_after(project_name, failed_at):
     return False
 
 
+def _task_log_contains(task_id, needle):
+    if not task_id:
+        return False
+    path = LOGS_DIR / f"{task_id}.log"
+    if not path.exists():
+        return False
+    try:
+        return needle in path.read_text(errors="replace")
+    except OSError:
+        return False
+
+
+def _regression_task_has_green_log(task):
+    return bool(task and _task_log_contains(task.get("task_id"), "BUILD SUCCESSFUL"))
+
+
 def _project_human_push_after(project, failed_at):
     repo_path = pathlib.Path(project["path"])
     if not repo_path.exists():
@@ -11959,6 +12001,93 @@ def _clear_regression_hard_stop(task, state, project, *, cleared_by):
         details={"project": project["name"], "cleared_by": cleared_by},
     )
     return True
+
+
+def _workflow_check_stale_running_issues(cfg, workflows=None):
+    limit_hours = float(cfg.get("workflow_check_stale_running_hours", 6) or 6)
+    limit_seconds = int(limit_hours * 3600)
+    workflows = workflows if workflows is not None else open_feature_workflow_summaries()
+    features = {feature.get("feature_id"): feature for feature in list_features()}
+    issues = []
+    seen = set()
+    for workflow in workflows:
+        feature = features.get(workflow.get("feature_id"))
+        if not feature:
+            continue
+        project = get_project(cfg, feature["project"])
+        frontier = workflow.get("frontier") or {}
+        state = frontier.get("state")
+        task_id = frontier.get("task_id")
+        if state not in ("claimed", "running") or not task_id or task_id in seen:
+            continue
+        age_seconds = int(frontier.get("age_seconds") or 0)
+        if age_seconds < limit_seconds or _task_has_live_claim(task_id):
+            continue
+        found = find_task(task_id, states=(state,))
+        if not found:
+            continue
+        _state, task = found
+        issue = {
+            "feature_id": feature.get("feature_id"),
+            "project": project["name"],
+            "summary": feature.get("summary") or feature.get("feature_id"),
+            "issue_key": f"stale-running:{task_id}:{state}",
+            "kind": "frontier_task_blocked",
+            "task_id": task_id,
+            "task_state": state,
+            "blocker": make_blocker(
+                "stale_running_task",
+                summary="task is stale in-flight",
+                detail=(
+                    f"task {task_id} has been {state} for {_format_age(age_seconds)} "
+                    f"without a live worker claim"
+                ),
+                source="workflow-check",
+                retryable=True,
+            ),
+            "workflow": workflow,
+            "task": task,
+        }
+        issue["action"], issue["diagnosis"], issue["policy"] = _workflow_policy_decision(issue, task, project)
+        issues.append(issue)
+        seen.add(task_id)
+    return issues
+
+
+def _workflow_check_green_regression_log_issues(cfg):
+    issues = []
+    for task in iter_tasks(states=("blocked", "failed"), role="qa"):
+        if task.get("topology_error") != "regression-failure":
+            continue
+        if not _regression_task_has_green_log(task):
+            continue
+        try:
+            project = get_project(cfg, task.get("project"))
+        except KeyError:
+            continue
+        issue = {
+            "feature_id": task.get("feature_id") or f"regression:{task.get('project')}",
+            "project": project["name"],
+            "summary": task.get("summary") or "regression hard-stop",
+            "issue_key": f"regression-green-log:{task['task_id']}",
+            "kind": "frontier_task_blocked",
+            "task_id": task["task_id"],
+            "task_state": task.get("state") or "blocked",
+            "blocker": make_blocker(
+                "project_regression_failed",
+                summary="regression hard-stop has green log",
+                detail=f"blocked regression task {task['task_id']} contains BUILD SUCCESSFUL",
+                source="workflow-check",
+                retryable=True,
+            ),
+            "workflow": {},
+            "task": task,
+            "action": "clear_regression_hard_stop",
+            "diagnosis": "regression task log is green; clear stale hard-stop",
+            "policy": "regression_green_log_clear",
+        }
+        issues.append(issue)
+    return issues
 
 
 def _workflow_policy_matches(policy, issue, task, project):
@@ -12696,6 +12825,49 @@ def tick_workflow_check():
             action_cache[name] = fn()
         return action_cache[name]
 
+    if mirror_repair.get("drifts"):
+        issue = {
+            "feature_id": "state-engine:task-mirror",
+            "project": "devmini-orchestrator",
+            "summary": "state-engine task mirror drift detected",
+            "issue_key": "state-engine:task-mirror-drift",
+            "kind": "state_engine_mirror_drift",
+            "task_id": None,
+            "task_state": "runtime",
+            "blocker": make_blocker(
+                "task_state_mirror_drift",
+                summary="task DB/JSON mirror drift detected",
+                detail=f"drifts={mirror_repair.get('drifts', 0)} repaired={mirror_repair.get('repaired', 0)}",
+                source="workflow-check",
+                retryable=True,
+            ),
+            "workflow": {},
+            "task": None,
+            "action": None,
+            "policy": None,
+        }
+        if int(mirror_repair.get("repaired", 0) or 0) >= int(mirror_repair.get("drifts", 0) or 0):
+            issue["diagnosis"] = "state-engine task mirror drift was repaired automatically"
+            issue["outcome"] = f"mirror repair result: {json.dumps(mirror_repair, sort_keys=True)}"
+        else:
+            issue["action"], issue["diagnosis"], issue["policy"] = _workflow_policy_decision(
+                issue,
+                None,
+                get_project(cfg, "devmini-orchestrator"),
+            )
+            out = cached_action(
+                "self_repair:state_engine_task_mirror_drift",
+                lambda: enqueue_self_repair(
+                    summary=_workflow_issue_self_repair_summary(issue),
+                    evidence=_workflow_issue_self_repair_evidence(issue),
+                    issue_kind=issue.get("kind") or "runtime_bug",
+                    source="workflow-check",
+                    issue_key=issue.get("issue_key"),
+                ),
+            )
+            issue["outcome"] = f"self-repair result: {json.dumps(out, sort_keys=True)}"
+        issues.append(issue)
+
     for env_issue in _environment_health_issues():
         outcome = "diagnosed only"
         if env_issue.get("action") in ("repair_environment", "exponential_backoff_then_retry", "verify_pid_dead_then_remove_lock_then_retry"):
@@ -12778,6 +12950,48 @@ def tick_workflow_check():
             outcome = "automatic attempts exhausted"
         canary_issue["outcome"] = outcome
         issues.append(canary_issue)
+
+    stale_workflows = open_feature_workflow_summaries()
+    for issue in _workflow_check_stale_running_issues(cfg, stale_workflows) + _workflow_check_green_regression_log_issues(cfg):
+        attempts = 0
+        if str(issue.get("feature_id") or "").startswith("feature-"):
+            feature = read_feature(issue["feature_id"])
+            if feature:
+                attempts = _workflow_check_attempts(feature, issue["issue_key"])
+        issue["attempts"] = attempts
+        issue["max_attempts"] = max_attempts
+        outcome = "diagnosed only"
+        if issue.get("action") and attempts < max_attempts:
+            if issue["action"] == "retry_task":
+                ok = _workflow_check_retry_task(
+                    issue["task"],
+                    issue["task_state"],
+                    reason=f"workflow-check: {issue['diagnosis'][:120]}",
+                )
+                outcome = "task requeued" if ok else "retry failed"
+            elif issue["action"] == "clear_regression_hard_stop":
+                project = get_project(cfg, issue["project"])
+                ok = _clear_regression_hard_stop(issue["task"], issue["task_state"], project, cleared_by="green_log")
+                outcome = "regression hard-stop cleared via green_log" if ok else "regression hard-stop clear failed"
+            elif issue["action"] == "enqueue_self_repair":
+                out = cached_action(
+                    f"self_repair:{issue['issue_key']}",
+                    lambda: enqueue_self_repair(
+                        summary=_workflow_issue_self_repair_summary(issue),
+                        evidence=_workflow_issue_self_repair_evidence(issue),
+                        issue_kind=issue.get("kind") or "runtime_bug",
+                        source="workflow-check",
+                        issue_key=issue.get("issue_key"),
+                    ),
+                )
+                outcome = f"self-repair result: {json.dumps(out, sort_keys=True)}"
+            if str(issue.get("feature_id") or "").startswith("feature-"):
+                _workflow_check_record_attempt(issue["feature_id"], issue["issue_key"], issue["action"], outcome)
+                issue["attempts"] = attempts + 1
+        elif issue.get("action"):
+            outcome = "automatic attempts exhausted"
+        issue["outcome"] = outcome
+        issues.append(issue)
 
     for feature in list_features():
         if feature.get("status") not in ("open", "finalizing"):
@@ -12979,7 +13193,10 @@ def tick_workflow_check():
                 )
                 outcome = "dead follow-up retired; feature marked merge-ready" if ok else "mark-merge-ready failed"
             elif action == "clear_regression_hard_stop":
-                cleared_by = "green_run" if _project_green_regression_after(project["name"], (issue.get("task") or {}).get("finished_at")) else "human_push"
+                if _regression_task_has_green_log(issue.get("task")):
+                    cleared_by = "green_log"
+                else:
+                    cleared_by = "green_run" if _project_green_regression_after(project["name"], (issue.get("task") or {}).get("finished_at")) else "human_push"
                 ok = _clear_regression_hard_stop(issue["task"], issue["task_state"], project, cleared_by=cleared_by)
                 outcome = f"regression hard-stop cleared via {cleared_by}" if ok else "regression hard-stop clear failed"
             elif action == "auto_revert_culprit_and_reopen_feature":

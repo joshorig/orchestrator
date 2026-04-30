@@ -1,0 +1,8 @@
+{
+  "kind": "workflow_stale_running_retries",
+  "scenario_version": 1,
+  "project": "lvc-standard",
+  "feature_id": "feature-stale-running",
+  "task_id": "task-stale-running",
+  "wall_time_budget": 10
+}
