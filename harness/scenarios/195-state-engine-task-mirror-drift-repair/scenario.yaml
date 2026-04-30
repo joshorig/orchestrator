@@ -1,0 +1,5 @@
+{
+  "kind": "state_engine_task_mirror_drift_repair",
+  "scenario_version": 1,
+  "wall_time_budget": 10
+}

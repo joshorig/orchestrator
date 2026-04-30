@@ -1,0 +1,5 @@
+{
+  "kind": "state_engine_retry_reset_consistency",
+  "scenario_version": 1,
+  "wall_time_budget": 10
+}

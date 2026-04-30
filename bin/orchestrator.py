@@ -2934,6 +2934,145 @@ def _delete_task_record(task_id, state, *, cfg=None):
     _delete_json_mirror(path)
 
 
+def _task_fs_records(task_id):
+    records = []
+    for state in STATES:
+        path = task_path(task_id, state)
+        if not path.exists():
+            continue
+        try:
+            task = read_json(path, {}) or {}
+        except Exception as exc:
+            task = {"task_id": task_id, "state": state, "metadata_parse_error": str(exc)}
+        records.append({"state": state, "path": path, "task": task, "mtime": path.stat().st_mtime})
+    return records
+
+
+def _task_record_drift(task_id, *, cfg=None):
+    if _state_engine_mode(cfg=cfg) != "primary":
+        return None
+    engine = get_state_engine(cfg=cfg)
+    engine.initialize()
+    db_row = engine.find_task(task_id, states=STATES)
+    db_state, db_task = db_row if db_row else (None, None)
+    fs_records = _task_fs_records(task_id)
+    fs_states = [row["state"] for row in fs_records]
+    drift = False
+    if db_state is None and fs_records:
+        drift = True
+    elif db_state is not None and not fs_records:
+        drift = True
+    elif db_state is not None:
+        matching = [row for row in fs_records if row["state"] == db_state]
+        if len(fs_records) != 1 or not matching:
+            drift = True
+        elif (matching[0]["task"] or {}).get("attempt") != (db_task or {}).get("attempt"):
+            drift = True
+    if not drift:
+        return None
+    return {
+        "task_id": task_id,
+        "db_state": db_state,
+        "fs_states": fs_states,
+        "db_task": db_task,
+        "fs_records": fs_records,
+    }
+
+
+def _repair_task_record_drift(task_id, *, expected_state=None, preferred_task=None, cfg=None, source="state-engine"):
+    if _state_engine_mode(cfg=cfg) != "primary":
+        return {"task_id": task_id, "drift": False, "repaired": False, "mode": _state_engine_mode(cfg=cfg)}
+    drift = _task_record_drift(task_id, cfg=cfg)
+    engine = get_state_engine(cfg=cfg)
+    engine.initialize()
+    fs_records = _task_fs_records(task_id)
+    db_row = engine.find_task(task_id, states=STATES)
+    db_state, db_task = db_row if db_row else (None, None)
+    if not drift:
+        if expected_state is None:
+            return {"task_id": task_id, "drift": False, "repaired": False}
+        if db_state == expected_state and [row["state"] for row in fs_records] == [expected_state]:
+            return {"task_id": task_id, "drift": False, "repaired": True, "verified": True, "state": expected_state}
+
+
+    chosen_state = expected_state
+    chosen_task = dict(preferred_task or {})
+    if chosen_state and not chosen_task:
+        for row in fs_records:
+            if row["state"] == chosen_state:
+                chosen_task = dict(row["task"] or {})
+                break
+    if not chosen_state and len(fs_records) == 1:
+        chosen_state = fs_records[0]["state"]
+        chosen_task = dict(fs_records[0]["task"] or {})
+    if not chosen_state and db_state:
+        chosen_state = db_state
+        chosen_task = dict(db_task or {})
+    if not chosen_state and fs_records:
+        newest = max(fs_records, key=lambda row: row["mtime"])
+        chosen_state = newest["state"]
+        chosen_task = dict(newest["task"] or {})
+    if not chosen_state:
+        return {"task_id": task_id, "drift": bool(drift), "repaired": False, "reason": "missing_db_and_fs"}
+
+    chosen_task["task_id"] = chosen_task.get("task_id") or task_id
+    chosen_task["state"] = chosen_state
+    engine.upsert_task(chosen_task, state=chosen_state)
+    _write_json_mirror(task_path(task_id, chosen_state), chosen_task)
+    for state in STATES:
+        if state != chosen_state:
+            _delete_json_mirror(task_path(task_id, state))
+
+    repaired = _task_record_drift(task_id, cfg=cfg) is None
+    append_event(
+        source,
+        "task_state_mirror_repaired" if repaired else "task_state_mirror_repair_failed",
+        task_id=task_id,
+        feature_id=chosen_task.get("feature_id"),
+        details={
+            "expected_state": expected_state,
+            "chosen_state": chosen_state,
+            "previous_db_state": db_state,
+            "previous_fs_states": [row["state"] for row in fs_records],
+            "repaired": repaired,
+        },
+    )
+    append_metric(
+        "state_engine.task_state_mirror_repaired" if repaired else "state_engine.task_state_mirror_repair_failed",
+        1,
+        metric_type="counter",
+        tags={"state": chosen_state, "source": source},
+        source=source,
+    )
+    return {"task_id": task_id, "drift": bool(drift) or expected_state is not None, "repaired": repaired, "state": chosen_state}
+
+
+def repair_task_state_mirror_drifts(*, cfg=None, limit=None, source="workflow-check"):
+    if _state_engine_mode(cfg=cfg) != "primary":
+        return {"checked": 0, "drifts": 0, "repaired": 0}
+    cfg = cfg or load_config()
+    engine = get_state_engine(cfg=cfg)
+    engine.initialize()
+    task_ids = set()
+    for state in STATES:
+        for path in queue_dir(state).glob("*.json"):
+            task_ids.add(path.stem)
+    for task in engine.read_tasks(states=STATES):
+        if task.get("task_id"):
+            task_ids.add(task["task_id"])
+    checked = drifts = repaired = 0
+    for task_id in sorted(task_ids):
+        if limit is not None and checked >= int(limit):
+            break
+        checked += 1
+        if _task_record_drift(task_id, cfg=cfg):
+            drifts += 1
+            out = _repair_task_record_drift(task_id, cfg=cfg, source=source)
+            if out.get("repaired"):
+                repaired += 1
+    return {"checked": checked, "drifts": drifts, "repaired": repaired}
+
+
 def _write_feature_record(feature, *, cfg=None):
     path = feature_path(feature["feature_id"])
     if _state_engine_mode(cfg=cfg) == "primary":
@@ -3790,6 +3929,17 @@ def move_task(task_id, from_state, to_state, reason="", mutator=None):
         clear_task_blocker(task)
     _write_task_record(task, to_state)
     _delete_task_record(task_id, from_state)
+    if _state_engine_mode() == "primary":
+        repaired = _repair_task_record_drift(
+            task_id,
+            expected_state=to_state,
+            preferred_task=task,
+            source="task-transition",
+        )
+        if not repaired.get("repaired"):
+            raise RuntimeError(
+                f"task state mirror drift after transition: {task_id} expected {to_state}"
+            )
     append_transition(task_id, from_state, to_state, reason)
     append_event(
         task.get("role", "unknown"),
@@ -12511,8 +12661,12 @@ def tick_workflow_check():
     emit_runtime_metrics_snapshot(source="workflow-check")
 
     reaped = reap()
+    mirror_repair = repair_task_state_mirror_drifts(cfg=cfg, source="workflow-check")
     issues = []
     action_cache = {}
+    if mirror_repair.get("drifts"):
+        append_event("workflow-check", "task_state_mirror_drift_scan", details=mirror_repair)
+
 
     def cached_action(name, fn):
         if name not in action_cache:
@@ -12919,9 +13073,19 @@ def tick_workflow_check():
 
     report_path = _write_workflow_check_report(issues, reaped=reaped) if issues else None
     append_metric("workflow_check.issue_count", len(issues), source="workflow-check")
-    detail = f"issues={len(issues)} reaped={reaped} report={report_path.name if report_path else '-'}"
+    detail = (
+        f"issues={len(issues)} reaped={reaped} "
+        f"mirror_drifts={mirror_repair.get('drifts', 0)} "
+        f"mirror_repaired={mirror_repair.get('repaired', 0)} "
+        f"report={report_path.name if report_path else '-'}"
+    )
     write_agent_status("workflow-check", "idle", detail)
-    return {"issues": len(issues), "reaped": reaped, "report": str(report_path) if report_path else None}
+    return {
+        "issues": len(issues),
+        "reaped": reaped,
+        "report": str(report_path) if report_path else None,
+        "mirror_repair": mirror_repair,
+    }
 
 
 def _build_investigation_context(question):

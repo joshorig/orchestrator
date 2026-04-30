@@ -1,0 +1,10 @@
+{
+  "drift_detected_before": true,
+  "repair_drifts": 1,
+  "repair_repaired": 1,
+  "db_state": "queued",
+  "db_attempt": 2,
+  "fs_state": "queued",
+  "fs_attempt": 2,
+  "repair_event_written": true
+}

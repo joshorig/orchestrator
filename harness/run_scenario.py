@@ -51,7 +51,7 @@ def _scenario_cluster(name, scenario_kind):
     if scenario_kind == "workflow_e2e_story":
         return "workflow-e2e"
     if scenario_kind in {
-        "state_engine_mirror", "fs_to_engine_migration", "atomic_claim_concurrency", "atomic_claim_concurrency_10",
+        "state_engine_mirror", "fs_to_engine_migration", "state_engine_retry_reset_consistency", "state_engine_task_mirror_drift_repair", "atomic_claim_concurrency", "atomic_claim_concurrency_10",
         "kill9_integrity", "backup_roundtrip", "wal_backup_restore", "corrupt_db_fallback", "disk_full_insert",
         "eio_read", "db_deleted", "restore_active_rejected", "wal_growth_stalls", "migration_forward_drift",
         "migration_sha_mismatch", "migration_partial", "migration_idempotence", "fts5_recovery",
@@ -7124,6 +7124,170 @@ def _run_runner_version_budgets(repo_root, scenario_dir, scenario):
     }
 
 
+def _install_tmp_state_engine(orchestrator, root, db_path):
+    import os
+
+    old = {
+        "STATE_ROOT": orchestrator.STATE_ROOT,
+        "QUEUE_ROOT": orchestrator.QUEUE_ROOT,
+        "RUNTIME_DIR": orchestrator.RUNTIME_DIR,
+        "FEATURES_DIR": orchestrator.FEATURES_DIR,
+        "TRANSITIONS_LOG": orchestrator.TRANSITIONS_LOG,
+        "EVENTS_LOG": orchestrator.EVENTS_LOG,
+        "METRICS_LOG": orchestrator.METRICS_LOG,
+        "STATE_ENGINE_DB_PATH": orchestrator.STATE_ENGINE_DB_PATH,
+        "_STATE_ENGINE_CACHE": orchestrator._STATE_ENGINE_CACHE,
+        "_STATE_ENGINE_RECONCILE": orchestrator._STATE_ENGINE_RECONCILE,
+        "STATE_ENGINE_MODE_ENV": os.environ.get("STATE_ENGINE_MODE"),
+        "STATE_ENGINE_PATH_ENV": os.environ.get("STATE_ENGINE_PATH"),
+    }
+    queue_root = root / "queue"
+    runtime_dir = root / "runtime"
+    features_dir = root / "features"
+    for state in orchestrator.STATES:
+        (queue_root / state).mkdir(parents=True, exist_ok=True)
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    features_dir.mkdir(parents=True, exist_ok=True)
+    orchestrator.STATE_ROOT = root
+    orchestrator.QUEUE_ROOT = queue_root
+    orchestrator.RUNTIME_DIR = runtime_dir
+    orchestrator.FEATURES_DIR = features_dir
+    orchestrator.TRANSITIONS_LOG = runtime_dir / "transitions.jsonl"
+    orchestrator.EVENTS_LOG = runtime_dir / "events.jsonl"
+    orchestrator.METRICS_LOG = runtime_dir / "metrics.jsonl"
+    orchestrator.STATE_ENGINE_DB_PATH = db_path
+    orchestrator._STATE_ENGINE_CACHE = {"key": None, "engine": None}
+    orchestrator._STATE_ENGINE_RECONCILE = {"ts": 0.0, "active": False, "last": None}
+    os.environ["STATE_ENGINE_MODE"] = "primary"
+    os.environ["STATE_ENGINE_PATH"] = str(db_path)
+    return old
+
+
+def _restore_tmp_state_engine(orchestrator, old):
+    import os
+
+    orchestrator.STATE_ROOT = old["STATE_ROOT"]
+    orchestrator.QUEUE_ROOT = old["QUEUE_ROOT"]
+    orchestrator.RUNTIME_DIR = old["RUNTIME_DIR"]
+    orchestrator.FEATURES_DIR = old["FEATURES_DIR"]
+    orchestrator.TRANSITIONS_LOG = old["TRANSITIONS_LOG"]
+    orchestrator.EVENTS_LOG = old["EVENTS_LOG"]
+    orchestrator.METRICS_LOG = old["METRICS_LOG"]
+    orchestrator.STATE_ENGINE_DB_PATH = old["STATE_ENGINE_DB_PATH"]
+    orchestrator._STATE_ENGINE_CACHE = old["_STATE_ENGINE_CACHE"]
+    orchestrator._STATE_ENGINE_RECONCILE = old["_STATE_ENGINE_RECONCILE"]
+    if old["STATE_ENGINE_MODE_ENV"] is None:
+        os.environ.pop("STATE_ENGINE_MODE", None)
+    else:
+        os.environ["STATE_ENGINE_MODE"] = old["STATE_ENGINE_MODE_ENV"]
+    if old["STATE_ENGINE_PATH_ENV"] is None:
+        os.environ.pop("STATE_ENGINE_PATH", None)
+    else:
+        os.environ["STATE_ENGINE_PATH"] = old["STATE_ENGINE_PATH_ENV"]
+
+
+def _run_state_engine_retry_reset_consistency(repo_root, scenario):
+    orchestrator, _worker = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        db_path = root / "runtime" / "orchestrator.db"
+        old = _install_tmp_state_engine(orchestrator, root, db_path)
+        old_max = orchestrator.max_task_attempts
+        old_subprocess = orchestrator.reset_task_for_retry.__globals__["subprocess"]
+        old_nudge = orchestrator._nudge_engine_workers
+        try:
+            orchestrator.max_task_attempts = lambda cfg=None: 5
+            orchestrator._nudge_engine_workers = lambda engine: []
+            orchestrator.reset_task_for_retry.__globals__["subprocess"] = subprocess
+            engine = orchestrator.get_state_engine()
+            engine.initialize()
+            task = orchestrator.new_task(
+                role="implementer",
+                engine="codex",
+                project="lvc-standard",
+                summary="retry consistency",
+                source="scenario",
+                feature_id="feature-retry-consistency",
+            )
+            task["task_id"] = "task-retry-consistency"
+            task["state"] = "running"
+            task["attempt"] = 1
+            task["failure"] = "ULL lock guard violated"
+            orchestrator._write_task_record(task, "running")
+            out_path, out_task = orchestrator.reset_task_for_retry(
+                task["task_id"],
+                "running",
+                reason="ULL lock guard violated; retry with guard findings",
+                source="scenario",
+            )
+            db_row = engine.find_task(task["task_id"], states=orchestrator.STATES)
+            fs_queued = orchestrator.read_json(orchestrator.task_path(task["task_id"], "queued"), {})
+            running_exists = orchestrator.task_path(task["task_id"], "running").exists()
+            drift_after_reset = orchestrator._task_record_drift(task["task_id"]) is not None
+        finally:
+            orchestrator.max_task_attempts = old_max
+            orchestrator._nudge_engine_workers = old_nudge
+            orchestrator.reset_task_for_retry.__globals__["subprocess"] = old_subprocess
+            _restore_tmp_state_engine(orchestrator, old)
+    return {
+        "returned_state": out_task.get("state"),
+        "returned_attempt": out_task.get("attempt"),
+        "db_state": db_row[0] if db_row else None,
+        "db_attempt": (db_row[1] or {}).get("attempt") if db_row else None,
+        "fs_state": fs_queued.get("state"),
+        "fs_attempt": fs_queued.get("attempt"),
+        "running_mirror_removed": not running_exists,
+        "history_count": len(fs_queued.get("attempt_history") or []),
+        "drift_after_reset": drift_after_reset,
+    }
+
+
+def _run_state_engine_task_mirror_drift_repair(repo_root, scenario):
+    orchestrator, _worker = _load_repo_modules(repo_root)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        db_path = root / "runtime" / "orchestrator.db"
+        old = _install_tmp_state_engine(orchestrator, root, db_path)
+        try:
+            engine = orchestrator.get_state_engine()
+            engine.initialize()
+            running = orchestrator.new_task(
+                role="implementer",
+                engine="codex",
+                project="lvc-standard",
+                summary="stale db running",
+                source="scenario",
+                feature_id="feature-drift-repair",
+            )
+            running["task_id"] = "task-drift-repair"
+            running["state"] = "running"
+            running["attempt"] = 1
+            engine.upsert_task(running, state="running")
+            queued = dict(running)
+            queued["state"] = "queued"
+            queued["attempt"] = 2
+            queued["last_retry_reason"] = "ULL lock guard violated; retry with guard findings"
+            queued["attempt_history"] = [{"attempt": 1, "from_state": "running", "retry_reason": queued["last_retry_reason"]}]
+            orchestrator._write_json_mirror(orchestrator.task_path(queued["task_id"], "queued"), queued)
+            before = orchestrator._task_record_drift(queued["task_id"])
+            repair = orchestrator.repair_task_state_mirror_drifts(source="workflow-check")
+            db_row = engine.find_task(queued["task_id"], states=orchestrator.STATES)
+            fs_queued = orchestrator.read_json(orchestrator.task_path(queued["task_id"], "queued"), {})
+            events = orchestrator.read_events(role="workflow-check")
+        finally:
+            _restore_tmp_state_engine(orchestrator, old)
+    return {
+        "drift_detected_before": bool(before),
+        "repair_drifts": repair.get("drifts"),
+        "repair_repaired": repair.get("repaired"),
+        "db_state": db_row[0] if db_row else None,
+        "db_attempt": (db_row[1] or {}).get("attempt") if db_row else None,
+        "fs_state": fs_queued.get("state"),
+        "fs_attempt": fs_queued.get("attempt"),
+        "repair_event_written": any(e.get("event") == "task_state_mirror_repaired" for e in events),
+    }
+
+
 def _run_runner_summary(repo_root, scenario_dir, scenario):
     with tempfile.TemporaryDirectory() as tmp:
         runs_root = pathlib.Path(tmp)
@@ -8235,6 +8399,10 @@ def main(argv):
         actual = _run_workflow_e2e_story(repo_root, scenario)
     elif kind == "ull_lock_guard_retries_with_context":
         actual = _run_ull_lock_guard_retries_with_context(repo_root, scenario)
+    elif kind == "state_engine_retry_reset_consistency":
+        actual = _run_state_engine_retry_reset_consistency(repo_root, scenario)
+    elif kind == "state_engine_task_mirror_drift_repair":
+        actual = _run_state_engine_task_mirror_drift_repair(repo_root, scenario)
     else:
         raise SystemExit(f"unknown scenario kind: {kind}")
 

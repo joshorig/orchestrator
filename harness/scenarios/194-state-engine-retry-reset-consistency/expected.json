@@ -1,0 +1,11 @@
+{
+  "returned_state": "queued",
+  "returned_attempt": 2,
+  "db_state": "queued",
+  "db_attempt": 2,
+  "fs_state": "queued",
+  "fs_attempt": 2,
+  "running_mirror_removed": true,
+  "history_count": 1,
+  "drift_after_reset": false
+}
