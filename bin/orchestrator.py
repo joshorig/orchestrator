@@ -11279,7 +11279,30 @@ def _feature_child_metadata_complete(feature, workflow=None):
 
 def _live_workflow_issue_count(config, *, workflows=None, health=None):
     health = health or environment_health()
-    count = len([issue for issue in health.get("issues", []) if issue.get("severity") == "error"])
+    count = 0
+    for issue in health.get("issues", []):
+        if issue.get("severity") != "error":
+            continue
+        envelope = {
+            "kind": "environment_degraded",
+            "task_state": "idle",
+            "blocker": make_blocker(
+                issue.get("code") or "runtime_precondition_failed",
+                summary=issue.get("summary"),
+                detail=issue.get("detail"),
+                source="environment-health",
+                retryable=False,
+            ),
+            "diagnosis": issue.get("detail") or issue.get("summary") or "environment degraded",
+        }
+        project = {
+            "name": issue.get("project") or "global",
+            "path": str(STATE_ROOT),
+        }
+        _action, _diagnosis, policy = _workflow_policy_decision(envelope, None, project)
+        if policy == "runtime_env_credential_alert":
+            continue
+        count += 1
     if _canary_freshness_issue(config):
         count += 1
     if workflows is None:

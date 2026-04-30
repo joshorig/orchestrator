@@ -6776,6 +6776,47 @@ def _run_health_payload_prefers_live_state(repo_root, scenario):
     }
 
 
+def _run_health_payload_alert_credentials_not_workflow_issue(repo_root, scenario):
+    orchestrator, _worker = _load_repo_modules(repo_root)
+    old = {
+        "_queue_count_map": orchestrator._health_payload.__globals__["_queue_count_map"],
+        "environment_health": orchestrator._health_payload.__globals__["environment_health"],
+        "open_feature_workflow_summaries": orchestrator._health_payload.__globals__["open_feature_workflow_summaries"],
+        "_canary_freshness_issue": orchestrator._live_workflow_issue_count.__globals__["_canary_freshness_issue"],
+        "load_config": orchestrator._health_payload.__globals__["load_config"],
+        "now_iso": orchestrator._health_payload.__globals__["now_iso"],
+    }
+    try:
+        orchestrator._health_payload.__globals__["_queue_count_map"] = lambda: {"queued": 0}
+        orchestrator._health_payload.__globals__["environment_health"] = lambda: {
+            "ok": True,
+            "issues": [
+                {
+                    "project": None,
+                    "severity": "error",
+                    "code": "runtime_env_dirty_credential",
+                    "summary": "telegram bot token unavailable",
+                    "detail": "alert-channel credential missing",
+                }
+            ],
+        }
+        orchestrator._health_payload.__globals__["open_feature_workflow_summaries"] = lambda: []
+        orchestrator._live_workflow_issue_count.__globals__["_canary_freshness_issue"] = lambda _cfg: None
+        orchestrator._health_payload.__globals__["load_config"] = lambda: {"projects": []}
+        orchestrator._health_payload.__globals__["now_iso"] = lambda: "2026-05-01T00:15:00"
+        payload = orchestrator._health_payload()
+    finally:
+        for key, value in old.items():
+            if key == "_canary_freshness_issue":
+                orchestrator._live_workflow_issue_count.__globals__[key] = value
+            else:
+                orchestrator._health_payload.__globals__[key] = value
+    return {
+        "environment_error_count": payload["environment_error_count"],
+        "workflow_check_issue_count": payload["workflow_check_issue_count"],
+    }
+
+
 def _run_handoff_writer_contract_audit(repo_root, scenario):
     worker_path = pathlib.Path(repo_root) / "bin" / "worker.py"
     text = worker_path.read_text()
@@ -8289,6 +8330,8 @@ def main(argv):
         actual = _run_atomic_claim_feature_race_requeues_newer(repo_root, scenario)
     elif kind == "health_payload_prefers_live_state":
         actual = _run_health_payload_prefers_live_state(repo_root, scenario)
+    elif kind == "health_payload_alert_credentials_not_workflow_issue":
+        actual = _run_health_payload_alert_credentials_not_workflow_issue(repo_root, scenario)
     elif kind == "ull_lock_guard_findings":
         actual = _run_ull_lock_guard_findings(repo_root, scenario)
     elif kind == "circular_feature_lineage":
