@@ -910,6 +910,9 @@ CONFIG_DEFAULTS = {
     },
     "council": {
         "enabled": True,
+        "planner_parallel_agents": True,
+        "planner_parallel_timeout_sec": 300,
+        "planner_parallel_budget_usd": 0.25,
         "planner_panel": ("aristotle", "socrates", "meadows"),
         "review_panel": ("socrates", "kahneman", "torvalds"),
         "qa_panel": ("feynman", "kahneman", "ada"),

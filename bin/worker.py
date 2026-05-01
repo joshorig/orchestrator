@@ -1626,6 +1626,18 @@ def _retire_stale_contract_tasks(feature_id, active_hash, *, planner_task_id, pr
     return retired
 
 
+def _feature_has_running_other_design_contract(feature_id, active_hash, *, project_name):
+    if not feature_id or not active_hash:
+        return False
+    for task in o.iter_tasks(states=("claimed", "running"), project=project_name):
+        if task.get("feature_id") != feature_id:
+            continue
+        task_hash = (task.get("engine_args") or {}).get("design_contract_hash")
+        if task_hash and task_hash != active_hash:
+            return True
+    return False
+
+
 def _context_sources():
     return o.load_context_sources()
 
@@ -3403,6 +3415,10 @@ TRP_UI_COMPONENT_POSITIVE_PATTERNS = (
     "component", "page", ".tsx", "playwright", "a11y", "apps/",
     "ui", "types", "type update", "contract snapshot", "provenance matrix",
 )
+TRP_UI_STRONG_PATTERNS = (
+    "component", ".tsx", "playwright", "a11y", "apps/",
+    " ui ", "ui/", "ui-", "type update", "provenance matrix",
+)
 
 PROJECT_CROSS_MARKERS = {
     "lvc": ("dag-framework", "trade-research-platform", "apps/", ".tsx", "playwright", "a11y"),
@@ -3666,6 +3682,132 @@ def _strict_json_object_contract_block(example_json):
         "If you output markdown fences or any extra text, the task fails.\n"
         "Example shape:\n"
         f"{example_json}\n"
+    )
+
+
+def _planner_parallel_council_enabled(cfg, planner_mode):
+    council_cfg = (cfg.get("council") or {}) if cfg else {}
+    if not council_cfg.get("enabled", True):
+        return False
+    if not council_cfg.get("planner_parallel_agents", True):
+        return False
+    return planner_mode not in ("self-repair-plan",)
+
+
+def _planner_member_report_prompt(task, project, memory_ctx, member, user_prompt):
+    return (
+        f"PROJECT: {project['name']}\n"
+        f"TASK: {task.get('summary') or '-'}\n"
+        f"COUNCIL MEMBER: {member}\n\n"
+        "You are one independent planner-council agent. Do not synthesize the final plan. "
+        "Analyze the planning problem from your persona only and return a concise JSON report.\n\n"
+        "[PLANNING CONTEXT]\n"
+        f"{user_prompt}\n\n"
+        "[PROJECT MEMORY]\n"
+        f"{memory_ctx}\n\n"
+        "Return only JSON with keys: member, key_findings, concerns, recommendations, "
+        "design_contract_requirements, slice_guidance, confidence.\n"
+    )
+
+
+def _planner_member_system_prompt(member):
+    return (
+        f"You are council member {member} for the devmini planner.\n"
+        "You are running as a separate parallel council agent. "
+        "Return only one JSON object, no markdown fences and no prose outside JSON.\n\n"
+        + _strict_json_object_contract_block(
+            '{"member":"%s","key_findings":["..."],"concerns":["..."],'
+            '"recommendations":["..."],"design_contract_requirements":["..."],'
+            '"slice_guidance":["..."],"confidence":0.8}' % member
+        )
+        + "\n"
+        + _council_member_context(member)
+    )
+
+
+def _run_parallel_planner_council(task, project, memory_ctx, user_prompt, panel, cfg, logf):
+    if not panel:
+        return []
+    council_cfg = (cfg.get("council") or {}) if cfg else {}
+    timeout = int(council_cfg.get("planner_parallel_timeout_sec") or 300)
+    budget = str(council_cfg.get("planner_parallel_budget_usd") or 0.25)
+    started = []
+    for member in panel:
+        cmd = [
+            "claude",
+            "-p", _planner_member_report_prompt(task, project, memory_ctx, member, user_prompt),
+            "--dangerously-skip-permissions",
+            "--system-prompt", _planner_member_system_prompt(member),
+            "--output-format", "json",
+            "--model", "sonnet",
+            "--max-budget-usd", budget,
+            "--disallowedTools", "Bash,Read,Write,Edit,Grep,Glob,Agent,WebFetch,WebSearch",
+            "--no-session-persistence",
+        ]
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+                cwd="/tmp",
+                env=_claude_subprocess_env(),
+            )
+            started.append((member, proc))
+        except Exception as exc:
+            started.append((member, exc))
+
+    reports = []
+    deadline = time.monotonic() + timeout
+    for member, proc in started:
+        if isinstance(proc, Exception):
+            reports.append({"member": member, "error": f"start failed: {proc}"})
+            continue
+        remaining = max(1, deadline - time.monotonic())
+        try:
+            out, err = proc.communicate(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                out, err = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                out, err = proc.communicate()
+            reports.append({"member": member, "error": f"timeout {timeout}s"})
+            logf.write(f"\n# parallel council {member} timeout\n# stderr:\n{err or ''}\n# stdout:\n{out or ''}\n")
+            continue
+        logf.write(f"\n# parallel council {member} exit={proc.returncode}\n# stdout:\n{out or ''}\n# stderr:\n{err or ''}\n")
+        if proc.returncode != 0:
+            reports.append({"member": member, "error": f"claude exit {proc.returncode}"})
+            continue
+        try:
+            raw = _extract_claude_result_text(out or "")
+            parsed = _extract_json_fragment(_unwrap_exact_json_fence(raw), "object")
+            if isinstance(parsed, dict):
+                parsed.setdefault("member", member)
+                reports.append(parsed)
+            else:
+                reports.append({"member": member, "error": "non-object report"})
+        except Exception as exc:
+            reports.append({"member": member, "error": f"invalid report: {exc}"})
+    return reports
+
+
+def _render_parallel_council_reports(reports):
+    if not reports:
+        return ""
+    return (
+        "\n[PARALLEL COUNCIL REPORTS]\n"
+        "These reports came from separate council-agent invocations. Use them as evidence, "
+        "preserve named dissent, and do not collapse unresolved contradictions silently.\n"
+        f"{json.dumps(reports, indent=2, sort_keys=True, default=str)}\n"
     )
 
 
@@ -4194,6 +4336,11 @@ def _contains_any(text, patterns):
     return any(p in text for p in patterns)
 
 
+def _contains_ui_strong_marker(text):
+    padded = f" {text} "
+    return _contains_any(padded, TRP_UI_STRONG_PATTERNS)
+
+
 def _cross_project_reason(text, project_key):
     for marker in PROJECT_CROSS_MARKERS[project_key]:
         if marker in text:
@@ -4301,7 +4448,7 @@ def classify_slice(template, summary):
         reason = _cross_project_reason(s, "dag")
         if reason:
             return False, reason
-        if _contains_any(s, TRP_UI_COMPONENT_POSITIVE_PATTERNS):
+        if _contains_ui_strong_marker(s):
             return False, "ui slice misrouted to historian"
         if _contains_any(s, DAG_IMPLEMENT_NODE_POSITIVE_PATTERNS) and not _contains_any(s, DAG_HISTORIAN_POSITIVE_PATTERNS):
             return False, "implementation slice misrouted to historian"
@@ -4312,7 +4459,7 @@ def classify_slice(template, summary):
         reason = _cross_project_reason(s, "trp")
         if reason:
             return False, reason
-        if _contains_any(s, TRP_UI_COMPONENT_POSITIVE_PATTERNS):
+        if _contains_ui_strong_marker(s):
             return False, "ui slice misrouted to historian"
         if _contains_any(s, TRP_PIPELINE_STAGE_POSITIVE_PATTERNS):
             return False, "pipeline-stage slice misrouted to historian"
@@ -4342,7 +4489,7 @@ def classify_slice(template, summary):
             return False, "no ui-component keyword"
         return True, None
     if template == "lvc-historian-update":
-        if _contains_any(s, TRP_UI_COMPONENT_POSITIVE_PATTERNS):
+        if _contains_ui_strong_marker(s):
             return False, "ui slice misrouted to lvc historian"
         has_historian_context = _contains_any(s, DAG_HISTORIAN_POSITIVE_PATTERNS)
         if _contains_any(s, TRP_PIPELINE_STAGE_POSITIVE_PATTERNS) and not has_historian_context:
@@ -5566,25 +5713,36 @@ def run_claude_planner(task, cfg, timeout, log_path):
     else:
         system_prompt, user_prompt, council_members = planner_council_prompt(task, project, memory_ctx, cfg)
 
-    cmd = [
-        "claude",
-        "-p", user_prompt,
-        "--dangerously-skip-permissions",
-        "--system-prompt", system_prompt,
-        "--output-format", "json",
-        "--model", "opus" if planner_mode == "self-repair-plan" else "sonnet",
-        "--max-budget-usd", _claude_budget_flag("planner", cfg=cfg, task=task, mode=planner_mode),
-        "--disallowedTools", "Bash,Read,Write,Edit,Grep,Glob,Agent,WebFetch,WebSearch",
-        "--no-session-persistence",
-    ]
-
     def mut_running(t):
         t["started_at"] = o.now_iso()
         t["log_path"] = str(log_path)
     o.move_task(task_id, "claimed", "running", reason="claude planner", mutator=mut_running)
 
+    parallel_council_reports = []
     with log_path.open("w") as logf:
         logf.write(f"# claude planner task={task_id} project={project['name']}\n\n")
+        if _planner_parallel_council_enabled(cfg, planner_mode):
+            parallel_council_reports = _run_parallel_planner_council(
+                task,
+                project,
+                memory_ctx,
+                user_prompt,
+                council_members,
+                cfg,
+                logf,
+            )
+            user_prompt += _render_parallel_council_reports(parallel_council_reports)
+        cmd = [
+            "claude",
+            "-p", user_prompt,
+            "--dangerously-skip-permissions",
+            "--system-prompt", system_prompt,
+            "--output-format", "json",
+            "--model", "opus" if planner_mode == "self-repair-plan" else "sonnet",
+            "--max-budget-usd", _claude_budget_flag("planner", cfg=cfg, task=task, mode=planner_mode),
+            "--disallowedTools", "Bash,Read,Write,Edit,Grep,Glob,Agent,WebFetch,WebSearch",
+            "--no-session-persistence",
+        ]
         try:
             proc = _run_bounded(
                 cmd, stdout=subprocess.PIPE, stderr=logf, text=True, timeout=timeout,
@@ -5658,6 +5816,7 @@ def run_claude_planner(task, cfg, timeout, log_path):
     sibling_task_ids = []
     council_meta = {
         "panel": list(plan.get("panel") or council_members),
+        "parallel_reports": list(parallel_council_reports or plan.get("parallel_reports") or []),
         "key_agreements": list(plan.get("key_agreements") or []),
         "dissent": list(plan.get("dissent") or []),
         "execution_path": plan.get("execution_path") or "",
@@ -5858,16 +6017,24 @@ def run_claude_planner(task, cfg, timeout, log_path):
                 pass  # feature record lost; child still lives as orphan
 
     if feature_id and design_contract_hash and enqueued:
-        retired = _retire_stale_contract_tasks(
+        if planner_mode == "router-clarify" and _feature_has_running_other_design_contract(
             feature_id,
             design_contract_hash,
-            planner_task_id=task_id,
             project_name=project["name"],
-            exclude_task_ids=[task_id, *enqueued],
-        )
-        if retired:
+        ):
             with log_path.open("a") as logf:
-                logf.write(f"\n# retired {len(retired)} stale design-contract task(s): {', '.join(retired)}\n")
+                logf.write("\n# skipped stale design-contract retirement: active prior topology is still running\n")
+        else:
+            retired = _retire_stale_contract_tasks(
+                feature_id,
+                design_contract_hash,
+                planner_task_id=task_id,
+                project_name=project["name"],
+                exclude_task_ids=[task_id, *enqueued],
+            )
+            if retired:
+                with log_path.open("a") as logf:
+                    logf.write(f"\n# retired {len(retired)} stale design-contract task(s): {', '.join(retired)}\n")
 
     if dropped:
         with log_path.open("a") as logf:

@@ -4472,7 +4472,7 @@ def _run_planner_json_parse_retryable_block(repo_root, scenario):
         worker.o.move_task = fake_move
         with tempfile.TemporaryDirectory() as tmp:
             log_path = pathlib.Path(tmp) / "planner.log"
-            worker.run_claude_planner(dict(task), {"council": {}}, 30, log_path)
+            worker.run_claude_planner(dict(task), {"council": {"planner_parallel_agents": False}}, 30, log_path)
         blocked = moves[-1]
         blocker = orchestrator.task_blocker(blocked["task"])
 
@@ -4546,14 +4546,14 @@ def _run_planner_depends_on_format_error_blocks(repo_root, scenario):
         worker.o.move_task = fake_move
         with tempfile.TemporaryDirectory() as tmp:
             log_path = pathlib.Path(tmp) / "planner.log"
-            worker.run_claude_planner(dict(task), {"council": {}}, 30, log_path)
+            worker.run_claude_planner(dict(task), {"council": {"planner_parallel_agents": False}}, 30, log_path)
         blocked = moves[-1]
         blocker = orchestrator.task_blocker(blocked["task"])
         prompt_task = dict(blocked["task"])
         prompt_task["attempt"] = 2
         prompt_task["attempt_history"] = [{"snapshot": {"blocker": {"code": "planner_slice_format_error", "detail": "lvc-implement-operator: depends_on index out of range: 42"}}}]
         prompt_task["engine_args"] = {"roadmap_entry": {"id": "R-2", "title": "Title", "body": "Body"}}
-        _sys, prompt, _panel = old["planner_council_prompt"](prompt_task, {"name": "lvc-standard"}, "memory", {"council": {}})
+        _sys, prompt, _panel = old["planner_council_prompt"](prompt_task, {"name": "lvc-standard"}, "memory", {"council": {"planner_parallel_agents": False}})
     finally:
         for key, value in old.items():
             if key in {"get_project", "move_task", "now_iso"}:
@@ -4596,7 +4596,7 @@ def _run_classify_slice_misroute_enqueues_router_clarify(repo_root, scenario):
         worker.o.now_iso = lambda: "2026-04-24T01:00:00"
         worker.read_memory_context = lambda *args, **kwargs: "memory"
         worker.planner_council_prompt = lambda *args, **kwargs: ("system", "user", ("aristotle",))
-        worker._run_bounded = lambda *args, **kwargs: types.SimpleNamespace(returncode=0, stdout='{"type":"result","result":"{\\"execution_path\\":\\"slice-1 -> slice-2\\",\\"slices\\":[{\\"id\\":\\"slice-1\\",\\"summary\\":\\"Build trade-research-platform UI dashboard card\\",\\"braid_template\\":\\"lvc-historian-update\\"},{\\"id\\":\\"slice-2\\",\\"summary\\":\\"Optimize hot path poller zero alloc jmh gate\\",\\"braid_template\\":\\"lvc-implement-operator\\"}]}"}')
+        worker._run_bounded = lambda *args, **kwargs: types.SimpleNamespace(returncode=0, stdout='{"type":"result","result":"{\\"execution_path\\":\\"slice-1 -> slice-2\\",\\"design_contract\\":{\\"public_api\\":\\"Store.snapshot(Path)\\",\\"ownership_boundaries\\":\\"store module\\",\\"concurrency_protocol\\":\\"VarHandle/CAS gate\\",\\"persistence_protocol\\":\\"atomic move\\",\\"hard_constraints\\":[]},\\"slices\\":[{\\"id\\":\\"slice-1\\",\\"summary\\":\\"Build trade-research-platform UI dashboard card\\",\\"braid_template\\":\\"lvc-historian-update\\"},{\\"id\\":\\"slice-2\\",\\"summary\\":\\"Optimize hot path poller zero alloc jmh gate\\",\\"braid_template\\":\\"lvc-implement-operator\\"}]}"}')
         worker._record_task_costs_from_text = lambda *args, **kwargs: None
         worker.o.new_task = lambda **kwargs: {"task_id": f"task-{len(enqueued)+1}", **kwargs}
         worker.o.enqueue_task = lambda task_obj: enqueued.append(task_obj)
@@ -4608,7 +4608,7 @@ def _run_classify_slice_misroute_enqueues_router_clarify(repo_root, scenario):
             moves.append({"task_id": task_id, "to_state": to_state, "task": task_obj})
         worker.o.move_task = fake_move
         with tempfile.TemporaryDirectory() as tmp:
-            worker.run_claude_planner(dict(task), {"council": {}}, 30, pathlib.Path(tmp) / "planner.log")
+            worker.run_claude_planner(dict(task), {"council": {"planner_parallel_agents": False}}, 30, pathlib.Path(tmp) / "planner.log")
     finally:
         for key, value in old.items():
             if key in {"get_project", "move_task", "new_task", "enqueue_task", "append_feature_child", "now_iso"}:
@@ -5021,7 +5021,7 @@ def _run_planner_refine_missing_origin_context(repo_root, scenario):
         with tempfile.TemporaryDirectory() as tmp:
             worker.run_claude_planner(
                 {"task_id": "task-plan", "project": "demo", "engine_args": {"mode": "planner-refine", "planner_refine": {}}},
-                {"council": {}},
+                {"council": {"planner_parallel_agents": False}},
                 30,
                 pathlib.Path(tmp) / "planner.log",
             )
@@ -5051,7 +5051,7 @@ def _run_planner_context_block_inline(repo_root, scenario):
                 {"engine_args": {"roadmap_entry": {"id": "R-002", "title": "Snapshot/restore", "body": "body"}}},
                 {"name": "lvc-standard"},
                 "memory",
-                {"council": {}},
+                {"council": {"planner_parallel_agents": False}},
             )
         finally:
             worker.o.RUNTIME_DIR = old_runtime
@@ -5127,7 +5127,7 @@ def _run_planner_refine_scope_drift_blocks(repo_root, scenario):
 
         worker.o.move_task = fake_move
         with tempfile.TemporaryDirectory() as tmp:
-            worker.run_claude_planner(task, {"council": {}}, 30, pathlib.Path(tmp) / "planner.log")
+            worker.run_claude_planner(task, {"council": {"planner_parallel_agents": False}}, 30, pathlib.Path(tmp) / "planner.log")
     finally:
         for key, value in old.items():
             if key in {"read_memory_context", "_run_bounded", "_record_task_costs_from_text"}:
@@ -6840,7 +6840,7 @@ def _run_planner_prompt_json_contract(repo_root, scenario):
         {"engine_args": {"roadmap_entry": {"id": "R-002", "title": "Title", "body": "Body"}}},
         {"name": "lvc-standard"},
         "memory",
-        {"council": {}},
+        {"council": {"planner_parallel_agents": False}},
     )
     repair_system, repair_user, _members = worker.self_repair_council_prompt(
         {
@@ -8165,6 +8165,62 @@ def _run_planner_design_contracts(repo_root, scenario):
         return {
             "error_code": error.get("code") if error else None,
             "error_summary": error.get("summary") if error else None,
+        }
+    if case == "lvc_historian_per_page_allowed":
+        ok, reason = worker.classify_slice(
+            "lvc-historian-update",
+            "Append historian entry to RECENT_WORK.md for R-002 completion: document snapshot format, per-page CRC32C, and journal-cursor reconciliation.",
+        )
+        return {
+            "ok": ok,
+            "reason": reason,
+        }
+    if case == "parallel_council_reports_rendered":
+        reports = [
+            {"member": "aristotle", "key_findings": ["split format from restore"]},
+            {"member": "socrates", "concerns": ["snapshot consistency assumption"]},
+        ]
+        block = worker._render_parallel_council_reports(reports)
+        return {
+            "has_header": "[PARALLEL COUNCIL REPORTS]" in block,
+            "has_aristotle": "aristotle" in block,
+            "has_socrates": "socrates" in block,
+        }
+    if case == "router_clarify_skips_retire_when_prior_contract_running":
+        tasks = [
+            {"task_id": "old-running", "state": "running", "feature_id": "feature-x", "project": "lvc-standard", "engine_args": {"design_contract_hash": "old"}},
+            {"task_id": "old-queued", "state": "queued", "feature_id": "feature-x", "project": "lvc-standard", "engine_args": {"design_contract_hash": "old"}},
+        ]
+        moved = []
+        old = {
+            "iter_tasks": worker.o.iter_tasks,
+            "move_task": worker.o.move_task,
+        }
+        try:
+            worker.o.iter_tasks = lambda states=None, project=None, **kwargs: [
+                dict(t) for t in tasks
+                if (not states or t["state"] in states) and (project is None or t["project"] == project)
+            ]
+            worker.o.move_task = lambda *args, **kwargs: moved.append(args)
+            has_running = worker._feature_has_running_other_design_contract(
+                "feature-x",
+                "new",
+                project_name="lvc-standard",
+            )
+            retired = [] if has_running else worker._retire_stale_contract_tasks(
+                "feature-x",
+                "new",
+                planner_task_id="planner-new",
+                project_name="lvc-standard",
+                exclude_task_ids=[],
+            )
+        finally:
+            for key, value in old.items():
+                setattr(worker.o, key, value)
+        return {
+            "has_running_prior_contract": has_running,
+            "retired": retired,
+            "move_calls": len(moved),
         }
     if case == "non_ull_missing_contract_allowed":
         plan = {}
