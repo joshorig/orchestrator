@@ -1,0 +1,4 @@
+{
+  "error_code": "planner_contract_drift",
+  "error_summary": "planner contract changed without supersedes rationale"
+}

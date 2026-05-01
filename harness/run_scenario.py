@@ -8132,6 +8132,161 @@ def _run_c2_assumption_discharge_blocks(repo_root, scenario):
     }
 
 
+def _run_planner_design_contracts(repo_root, scenario):
+    orchestrator, worker = _load_repo_modules(repo_root)
+    case = scenario.get("case")
+    if case == "ull_injected":
+        plan = {
+            "design_contract": {
+                "public_api": "Store.snapshot(Path)",
+                "ownership_boundaries": "mmap stores own snapshot bytes",
+                "concurrency_protocol": "writers use VarHandle/CAS gate admission before copying pages",
+                "persistence_protocol": "write temp snapshot then atomic move",
+                "hard_constraints": [],
+                "forbidden_alternatives": [],
+                "acceptance_tests": ["round trip"],
+            }
+        }
+        slices = [{"id": "slice-1", "summary": "Implement snapshot quiesce gate", "braid_template": "lvc-implement-operator"}]
+        contract, error = worker._planner_contract_validation(plan, slices, "lvc-standard")
+        task = {"summary": "x", "engine_args": {"design_contract": contract, "design_contract_hash": worker._stable_hash(contract), "topology_generation": "gen-1"}}
+        prompt = worker.build_codex_prompt(task, "flowchart TD; A-->B;", "memory")
+        return {
+            "error": error,
+            "forbids_synchronized": any("synchronized" in item for item in contract.get("hard_constraints", [])),
+            "forbids_reentrantlock": any("ReentrantLock" in item for item in contract.get("hard_constraints", [])),
+            "prompt_has_design_contract": "[DESIGN CONTRACT]" in prompt,
+            "prompt_before_memory": prompt.find("[DESIGN CONTRACT]") < prompt.find("[PROJECT MEMORY]"),
+        }
+    if case == "missing_quiesce_protocol":
+        plan = {"design_contract": {"public_api": "Store.snapshot(Path)", "hard_constraints": []}}
+        slices = [{"id": "slice-1", "summary": "Implement snapshot quiesce gate", "braid_template": "lvc-implement-operator"}]
+        _contract, error = worker._planner_contract_validation(plan, slices, "lvc-standard")
+        return {
+            "error_code": error.get("code") if error else None,
+            "error_summary": error.get("summary") if error else None,
+        }
+    if case == "non_ull_missing_contract_allowed":
+        plan = {}
+        slices = [{"id": "slice-1", "summary": "Fix self repair queue routing", "braid_template": "orchestrator-self-repair"}]
+        contract, error = worker._planner_contract_validation(plan, slices, "devmini-orchestrator")
+        return {
+            "contract": contract,
+            "error": error,
+        }
+    if case == "review_protocol_routes_planner":
+        raw = '{"status":"ok","verdict":"request_change","summary":"Snapshot gate is not a correct write-quiesce protocol and can deadlock batch publish."}'
+        return {
+            "routes_to_planner": worker._review_should_route_to_planner(raw),
+        }
+    if case == "review_local_routes_coder":
+        raw = '{"status":"ok","verdict":"request_change","summary":"LvcMetricsRegistry.InstrumentedStore does not delegate snapshot/restore."}'
+        return {
+            "routes_to_planner": worker._review_should_route_to_planner(raw),
+        }
+    if case == "contract_drift_blocks":
+        origin = {"persistence_protocol": "atomic rename swap"}
+        plan = {
+            "design_contract": {
+                "public_api": "Store.snapshot(Path)",
+                "ownership_boundaries": "mmap stores own snapshot bytes",
+                "concurrency_protocol": "VarHandle gate",
+                "persistence_protocol": "in-place overwrite through mapped channel",
+                "hard_constraints": [],
+            }
+        }
+        slices = [{"id": "slice-1", "summary": "Implement snapshot restore", "braid_template": "lvc-implement-operator"}]
+        _contract, error = worker._planner_contract_validation(plan, slices, "lvc-standard", origin_contract=origin)
+        return {
+            "error_code": error.get("code") if error else None,
+            "error_summary": error.get("summary") if error else None,
+        }
+    if case == "retire_stale_contract_tasks":
+        tasks = [
+            {"task_id": "old-queued", "state": "queued", "feature_id": "feature-x", "project": "lvc-standard", "engine_args": {"design_contract_hash": "old"}},
+            {"task_id": "legacy-queued", "state": "queued", "feature_id": "feature-x", "project": "lvc-standard", "source": "slice-of:planner-old", "engine_args": {}},
+            {"task_id": "new-queued", "state": "queued", "feature_id": "feature-x", "project": "lvc-standard", "engine_args": {"design_contract_hash": "new"}},
+            {"task_id": "old-running", "state": "running", "feature_id": "feature-x", "project": "lvc-standard", "engine_args": {"design_contract_hash": "old"}},
+        ]
+        moved = []
+        removed = []
+        old = {
+            "iter_tasks": worker.o.iter_tasks,
+            "move_task": worker.o.move_task,
+            "remove_feature_children": worker.o.remove_feature_children,
+            "now_iso": worker.o.now_iso,
+        }
+        try:
+            worker.o.iter_tasks = lambda states=None, project=None, **kwargs: [
+                dict(t) for t in tasks
+                if (not states or t["state"] in states) and (project is None or t["project"] == project)
+            ]
+            worker.o.now_iso = lambda: "2026-05-01T20:40:00"
+            def fake_move(task_id, from_state, to_state, reason="", mutator=None):
+                body = next(dict(t) for t in tasks if t["task_id"] == task_id)
+                if mutator:
+                    mutator(body)
+                moved.append({"task_id": task_id, "from_state": from_state, "to_state": to_state, "reason": reason, "task": body})
+            worker.o.move_task = fake_move
+            worker.o.remove_feature_children = lambda feature_id, task_ids: removed.extend(task_ids)
+            retired = worker._retire_stale_contract_tasks(
+                "feature-x",
+                "new",
+                planner_task_id="planner-new",
+                project_name="lvc-standard",
+                exclude_task_ids=["new-queued"],
+            )
+        finally:
+            for key, value in old.items():
+                setattr(worker.o, key, value)
+        return {
+            "retired": retired,
+            "moved": [row["task_id"] for row in moved],
+            "removed": removed,
+            "running_retired": "old-running" in retired,
+        }
+    if case == "stale_review_block_shape":
+        target = {
+            "task_id": "target-old",
+            "feature_id": "feature-x",
+            "engine_args": {"design_contract_hash": "old"},
+        }
+        return {
+            "target_hash": (target.get("engine_args") or {}).get("design_contract_hash"),
+            "active_hash": "new",
+            "would_block": bool("new" and (target.get("engine_args") or {}).get("design_contract_hash") != "new"),
+            "legacy_would_block": bool("new" and None != "new"),
+            "blocker_code": "stale_design_contract",
+        }
+    if case == "ull_retry_context_prompt":
+        task = {
+            "task_id": "task-ull",
+            "summary": "retry",
+            "engine_args": {
+                "design_contract": {
+                    "public_api": "Store.snapshot(Path)",
+                    "concurrency_protocol": "CAS gate",
+                    "hard_constraints": list(worker.ULL_HARD_CONSTRAINTS),
+                },
+                "design_contract_hash": "h1",
+                "topology_generation": "g1",
+                "retry_context": {
+                    "kind": "ull_lock_guard",
+                    "reason": "Previous attempt hit guard",
+                    "findings": ["Foo.java: contains `synchronized`"],
+                },
+            },
+        }
+        prompt = worker.build_codex_prompt(task, "flowchart TD; A-->B;", "memory")
+        return {
+            "has_retry_context": "[RETRY CONTEXT]" in prompt,
+            "has_design_contract": "[DESIGN CONTRACT]" in prompt,
+            "mentions_synchronized": "synchronized" in prompt,
+            "mentions_no_synchronized": "No synchronized" in prompt,
+        }
+    raise SystemExit(f"unknown planner design contract case: {case}")
+
+
 def _run_blocker_registry_refined(repo_root, scenario):
     orchestrator, _worker = _load_repo_modules(repo_root)
     tier4 = sorted(code for code, tier in orchestrator.BLOCKER_TIER.items() if tier == 4)
@@ -8656,6 +8811,8 @@ def main(argv):
         actual = _run_blocker_tier_routing(repo_root, scenario)
     elif kind == "c2_assumption_discharge_blocks":
         actual = _run_c2_assumption_discharge_blocks(repo_root, scenario)
+    elif kind == "planner_design_contracts":
+        actual = _run_planner_design_contracts(repo_root, scenario)
     elif kind == "blocker_registry_refined":
         actual = _run_blocker_registry_refined(repo_root, scenario)
     elif kind == "tier4_credential_rotation_paged_not_auto":

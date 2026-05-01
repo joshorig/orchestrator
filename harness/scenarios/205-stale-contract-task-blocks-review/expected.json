@@ -1,0 +1,7 @@
+{
+  "target_hash": "old",
+  "active_hash": "new",
+  "would_block": true,
+  "legacy_would_block": true,
+  "blocker_code": "stale_design_contract"
+}

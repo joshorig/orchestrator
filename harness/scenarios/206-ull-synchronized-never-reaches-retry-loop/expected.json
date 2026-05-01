@@ -1,0 +1,6 @@
+{
+  "has_retry_context": true,
+  "has_design_contract": true,
+  "mentions_synchronized": true,
+  "mentions_no_synchronized": true
+}

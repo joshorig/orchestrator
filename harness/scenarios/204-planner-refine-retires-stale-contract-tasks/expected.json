@@ -1,0 +1,6 @@
+{
+  "retired": ["old-queued", "legacy-queued"],
+  "moved": ["old-queued", "legacy-queued"],
+  "removed": ["old-queued", "legacy-queued"],
+  "running_retired": false
+}

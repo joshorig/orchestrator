@@ -1462,6 +1462,169 @@ def _self_repair_deploy_mode(task, project_name):
 CONTEXT_RULE_FILES = ("AGENTS.md", "CLAUDE.md", "CODEX.md", "WARP.md")
 ULL_PROJECTS = {"lvc-standard", "dag-framework", "trade-research-platform"}
 
+ULL_HARD_CONSTRAINTS = (
+    "No synchronized blocks or synchronized methods in changed Java files.",
+    "No ReentrantLock, ReadWriteLock, ReentrantReadWriteLock, StampedLock, Semaphore, CountDownLatch, CyclicBarrier, BlockingQueue, ArrayBlockingQueue, or LinkedBlockingQueue.",
+    "Use VarHandle, volatile fields, Atomic* primitives, CAS, and ordered writes for ULL coordination.",
+    "If a correct lock-free protocol cannot be specified from the active design contract, emit BRAID_PLANNER_REFINE instead of inventing one.",
+)
+
+_CONCURRENCY_PROTOCOL_TERMS = (
+    "snapshot",
+    "restore",
+    "quiesce",
+    "quiescence",
+    "gate",
+    "batch",
+    "epoch",
+    "mmap",
+    "writer",
+)
+
+
+def _stable_hash(payload):
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:16]
+
+
+def _implementation_slice_present(project_name, slices):
+    templates = planner_implementer_templates(project_name)
+    return any((row or {}).get("braid_template") in templates for row in (slices or []))
+
+
+def _requires_concurrency_protocol(text):
+    lowered = str(text or "").lower()
+    return any(term in lowered for term in _CONCURRENCY_PROTOCOL_TERMS)
+
+
+def _planner_contract_validation(plan, slices, project_name, *, origin_contract=None):
+    """Return (contract, error) for planner output.
+
+    The contract remains intentionally small: it prevents the known failure mode
+    without forcing every planner to emit a large schema for non-ULL/non-Java work.
+    """
+    raw = (plan or {}).get("design_contract")
+    has_impl = _implementation_slice_present(project_name, slices)
+    combined = " ".join(str((row or {}).get("summary") or "") for row in (slices or []))
+    if not has_impl:
+        return {}, None
+    if project_name not in ULL_PROJECTS and not isinstance(raw, dict):
+        return {}, None
+    if not isinstance(raw, dict) or not raw:
+        return {}, {
+            "code": "planner_contract_incomplete",
+            "summary": "planner output missing design_contract",
+            "detail": "ULL implementation slices must carry design_contract with hard constraints and protocol fields",
+        }
+    contract = dict(raw)
+    hard = list(contract.get("hard_constraints") or [])
+    if project_name in ULL_PROJECTS:
+        for item in ULL_HARD_CONSTRAINTS:
+            if item not in hard:
+                hard.append(item)
+        contract["hard_constraints"] = hard
+        joined = "\n".join(hard).lower()
+        if "synchronized" not in joined or "reentrantlock" not in joined:
+            return contract, {
+                "code": "planner_contract_incomplete",
+                "summary": "ULL hard constraints missing",
+                "detail": "ULL implementation contract must explicitly forbid synchronized and lock primitives",
+            }
+    if project_name in ULL_PROJECTS and _requires_concurrency_protocol(combined):
+        if not str(contract.get("concurrency_protocol") or "").strip():
+            return contract, {
+                "code": "planner_contract_incomplete",
+                "summary": "planner output missing concurrency_protocol",
+                "detail": "snapshot/restore/quiesce style ULL work must define the concrete lock-free concurrency protocol",
+            }
+    if isinstance(origin_contract, dict) and origin_contract:
+        changed = []
+        for key in ("public_api", "ownership_boundaries", "concurrency_protocol", "persistence_protocol"):
+            if origin_contract.get(key) and contract.get(key) and origin_contract.get(key) != contract.get(key):
+                changed.append(key)
+        supersedes = contract.get("supersedes") or contract.get("supersedes_decision_ids")
+        if changed and not supersedes:
+            return contract, {
+                "code": "planner_contract_drift",
+                "summary": "planner contract changed without supersedes rationale",
+                "detail": "changed fields: " + ", ".join(changed),
+            }
+    return contract, None
+
+
+def _render_design_contract_block(task):
+    engine_args = task.get("engine_args") or {}
+    contract = engine_args.get("design_contract") or {}
+    if not isinstance(contract, dict) or not contract:
+        return ""
+    lines = [
+        "[DESIGN CONTRACT]",
+        f"hash: {engine_args.get('design_contract_hash') or '-'}",
+        f"topology_generation: {engine_args.get('topology_generation') or '-'}",
+    ]
+    for key in ("public_api", "ownership_boundaries", "concurrency_protocol", "persistence_protocol"):
+        if contract.get(key):
+            lines.append(f"{key}: {contract.get(key)}")
+    hard = [str(item) for item in (contract.get("hard_constraints") or []) if item]
+    forbidden = [str(item) for item in (contract.get("forbidden_alternatives") or []) if item]
+    tests = [str(item) for item in (contract.get("acceptance_tests") or []) if item]
+    lines.append("hard_constraints:")
+    lines.extend(f"- {item}" for item in hard) if hard else lines.append("- (none)")
+    if forbidden:
+        lines.append("forbidden_alternatives:")
+        lines.extend(f"- {item}" for item in forbidden)
+    if tests:
+        lines.append("acceptance_tests:")
+        lines.extend(f"- {item}" for item in tests)
+    return "\n".join(lines) + "\n\n"
+
+
+def _active_feature_contract_hash(feature_id, *, exclude_task_id=None):
+    if not feature_id:
+        return None
+    candidates = []
+    for state in ("queued", "claimed", "running", "awaiting-review", "awaiting-qa", "done"):
+        for task in o.iter_tasks(states=(state,)):
+            if task.get("feature_id") != feature_id or task.get("task_id") == exclude_task_id:
+                continue
+            hash_value = ((task.get("engine_args") or {}).get("design_contract_hash"))
+            if hash_value:
+                candidates.append((task.get("created_at") or task.get("claimed_at") or task.get("task_id") or "", hash_value))
+    return sorted(candidates)[-1][1] if candidates else None
+
+
+def _retire_stale_contract_tasks(feature_id, active_hash, *, planner_task_id, project_name, exclude_task_ids=()):
+    if not feature_id or not active_hash:
+        return []
+    excluded = set(exclude_task_ids or ())
+    retired = []
+    for state in ("queued", "claimed", "blocked", "failed", "awaiting-review", "awaiting-qa"):
+        for task in list(o.iter_tasks(states=(state,), project=project_name)):
+            if task.get("feature_id") != feature_id or task.get("task_id") in excluded:
+                continue
+            task_hash = (task.get("engine_args") or {}).get("design_contract_hash")
+            if task_hash == active_hash:
+                continue
+            if not task_hash and not str(task.get("source") or "").startswith(("slice-of:", "review-feedback:")):
+                continue
+            o.move_task(
+                task["task_id"],
+                state,
+                "abandoned",
+                reason="superseded by design contract",
+                mutator=lambda t, planner_task_id=planner_task_id, active_hash=active_hash: t.update(
+                    {
+                        "finished_at": o.now_iso(),
+                        "abandoned_reason": "superseded by design contract",
+                        "planner_refine_task_id": planner_task_id,
+                        "superseded_by_design_contract_hash": active_hash,
+                    }
+                ),
+            )
+            retired.append(task["task_id"])
+    if retired:
+        o.remove_feature_children(feature_id, retired)
+    return retired
+
 
 def _context_sources():
     return o.load_context_sources()
@@ -3520,6 +3683,7 @@ def planner_council_prompt(task, project, memory_ctx, cfg):
         "  key_agreements: list[str]\n"
         "  dissent: list[str]\n"
         "  execution_path: string\n"
+        "  design_contract: object for implementation slices\n"
         "  slices: list[object]\n"
         "Each slice object must include id, summary, and braid_template, and may include depends_on.\n"
         "Standardize ids exactly as slice-1, slice-2, slice-3 in emitted order.\n"
@@ -3531,6 +3695,7 @@ def planner_council_prompt(task, project, memory_ctx, cfg):
             '"key_agreements":["..."],'
             '"dissent":["..."],'
             '"execution_path":"slice-1 -> slice-2",'
+            '"design_contract":{"public_api":"...","ownership_boundaries":"...","concurrency_protocol":"...","persistence_protocol":"...","hard_constraints":["..."],"forbidden_alternatives":["..."],"acceptance_tests":["..."]},'
             '"slices":[{"id":"slice-1","summary":"...","braid_template":"lvc-implement-operator"}]}'
         )
         + "\n"
@@ -3552,6 +3717,9 @@ def planner_council_prompt(task, project, memory_ctx, cfg):
         "Keep at most 3 slices.\n"
         f"Allowed braid_template values: {allowed_templates}\n"
         "Preserve dissent when a risky slice is rejected or narrowed.\n"
+        "For implementation slices, include a top-level design_contract. "
+        "For ULL/Java work, hard_constraints must explicitly forbid synchronized and blocking lock primitives. "
+        "For snapshot/restore/quiesce/gate/batch/epoch/mmap work, concurrency_protocol must specify the concrete lock-free protocol and allowed primitives.\n"
         f"{_planner_prior_errors_block(task)}"
         "Return the JSON object directly. Do not use ```json fences.\n"
     )
@@ -4924,6 +5092,51 @@ def _extract_review_verdict(raw):
     return None
 
 
+def _review_payload(raw):
+    payload = _extract_braid_result_payload(raw)
+    return payload if isinstance(payload, dict) else {}
+
+
+def _review_should_route_to_planner(raw):
+    payload = _review_payload(raw)
+    routing = str(payload.get("routing") or "").strip().lower().replace("-", "_")
+    if routing == "planner_refine":
+        return True
+    if routing == "coder_patch":
+        return False
+    text = " ".join(
+        str(payload.get(key) or "")
+        for key in ("summary", "violated_invariant", "why_not_coder_patch", "required_fix_scope")
+    ) or str(raw or "")
+    lowered = text.lower()
+    architecture_terms = (
+        "protocol",
+        "api",
+        "atomic",
+        "quiesce",
+        "quiescence",
+        "journal cursor",
+        "topology",
+        "invariant",
+        "ownership",
+        "contract",
+        "concurrency",
+        "persistence",
+        "deadlock",
+        "remap",
+    )
+    local_terms = (
+        "does not delegate",
+        "missing delegation",
+        "exception type",
+        "test assertion",
+        "typo",
+    )
+    if any(term in lowered for term in local_terms) and not any(term in lowered for term in ("protocol", "invariant", "concurrency", "atomic")):
+        return False
+    return any(term in lowered for term in architecture_terms)
+
+
 def enqueue_braid_refine(task, project_name, trailer, *, from_state):
     refine = parse_braid_refine(trailer)
     if not refine:
@@ -5083,6 +5296,8 @@ def enqueue_braid_planner_refine(task, project_name, trailer, *, from_state):
                 "origin_task_id": task["task_id"],
                 "origin_parent_task_id": task.get("parent_task_id"),
                 "origin_slice": dict(task_engine_args.get("slice") or {}),
+                "origin_design_contract": dict(task_engine_args.get("design_contract") or {}),
+                "origin_design_contract_hash": task_engine_args.get("design_contract_hash"),
                 "summary": refine["summary"],
                 "question": refine["question"],
                 "context": str(task.get("review_exhaustion_context") or "")[:8000],
@@ -5490,6 +5705,36 @@ def run_claude_planner(task, cfg, timeout, log_path):
                 )
             o.move_task(task_id, "running", "blocked", reason="planner refine scope drift", mutator=mut_block)
             return
+    origin_contract = (planner_refine.get("origin_design_contract") or {}) if planner_mode == "planner-refine" else {}
+    design_contract, contract_error = _planner_contract_validation(
+        plan,
+        candidate_slices,
+        project["name"],
+        origin_contract=origin_contract,
+    )
+    if contract_error:
+        def mut_contract_block(t):
+            t["finished_at"] = o.now_iso()
+            t["planner_contract_error"] = dict(contract_error)
+            if design_contract:
+                t["design_contract"] = design_contract
+            o.set_task_blocker(
+                t,
+                contract_error["code"],
+                summary=contract_error["summary"],
+                detail=contract_error["detail"],
+                source="worker",
+                retryable=True,
+            )
+        o.move_task(task_id, "running", "blocked", reason=contract_error["summary"], mutator=mut_contract_block)
+        return
+    design_contract_hash = _stable_hash(design_contract) if design_contract else None
+    topology_generation = plan.get("topology_generation") or f"{task_id}:{design_contract_hash or 'no-contract'}"
+    if design_contract:
+        shared_engine_args["design_contract"] = design_contract
+        shared_engine_args["design_contract_hash"] = design_contract_hash
+        shared_engine_args["topology_generation"] = topology_generation
+        shared_engine_args["parent_planner_task_id"] = task_id
     candidate_slice_ids, slice_aliases = _slice_alias_maps(candidate_slices)
     normalized_slice_depends = []
     for idx, s in enumerate(candidate_slices):
@@ -5612,6 +5857,18 @@ def run_claude_planner(task, cfg, timeout, log_path):
             except FileNotFoundError:
                 pass  # feature record lost; child still lives as orphan
 
+    if feature_id and design_contract_hash and enqueued:
+        retired = _retire_stale_contract_tasks(
+            feature_id,
+            design_contract_hash,
+            planner_task_id=task_id,
+            project_name=project["name"],
+            exclude_task_ids=[task_id, *enqueued],
+        )
+        if retired:
+            with log_path.open("a") as logf:
+                logf.write(f"\n# retired {len(retired)} stale design-contract task(s): {', '.join(retired)}\n")
+
     if dropped:
         with log_path.open("a") as logf:
             logf.write(f"\n# dropped {len(dropped)} slice(s):\n")
@@ -5725,6 +5982,25 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
     candidates.sort(key=lambda x: x[0])
     target = candidates[0][1]
     target_id = target["task_id"]
+    active_hash = _active_feature_contract_hash(target.get("feature_id"), exclude_task_id=target_id)
+    target_hash = (target.get("engine_args") or {}).get("design_contract_hash")
+    if active_hash and target_hash != active_hash:
+        def mut_stale_contract(t):
+            t["finished_at"] = o.now_iso()
+            o.set_task_blocker(
+                t,
+                "stale_design_contract",
+                summary="review target used stale design contract",
+                detail=f"target={target_hash} active={active_hash}",
+                source="worker",
+                retryable=True,
+            )
+        o.move_task(target_id, "awaiting-review", "blocked", reason="stale design contract", mutator=mut_stale_contract)
+        def mut_self(t):
+            t["finished_at"] = o.now_iso()
+            t["log_path"] = str(log_path)
+        o.move_task(task_id, "claimed", "done", reason=f"blocked stale contract target {target_id}", mutator=mut_self)
+        return
 
     reviewer_template = o.project_reviewer_template(project_name)
     graph_body, graph_hash = o.braid_template_load(reviewer_template)
@@ -5783,6 +6059,7 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
     ratio_findings = _test_ratio_findings(changed_files, task=target, worktree=target_wt, cfg=cfg)
     validation_findings = _validation_evidence_findings(changed_files, task=target, worktree=target_wt, cfg=cfg)
     target_slice_ctx = _render_slice_context_block(target)
+    target_contract_ctx = _render_design_contract_block(target)
     feature = o.read_feature(target.get("feature_id")) if target.get("feature_id") else None
     roadmap_ctx = ""
     if feature:
@@ -5821,6 +6098,7 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
         f"FILES CHANGED vs {target_base}:\n{changed_files}\n\n"
         f"[DIFF vs {target_base}]\n{diff_text}\n\n"
         f"{roadmap_ctx}"
+        f"{target_contract_ctx}"
         + (
             "[PRE-CHECK POLICY FINDINGS]\n"
             + "\n".join(f"- {item}" for item in (policy_findings + secret_findings + supply_chain_findings + compile_findings + validation_findings + ratio_findings))
@@ -5852,6 +6130,7 @@ def run_claude_reviewer(task, cfg, timeout, log_path):
         f"FILES CHANGED vs {target_base}:\n{changed_files}\n\n"
         f"[DIFF vs {target_base}]\n{diff_text}\n\n"
         f"{roadmap_ctx}"
+        f"{target_contract_ctx}"
         + (
             "[PRE-CHECK POLICY FINDINGS]\n"
             + "\n".join(f"- {item}" for item in (policy_findings + secret_findings + supply_chain_findings + compile_findings + validation_findings + ratio_findings))
@@ -6196,6 +6475,30 @@ def _handle_review_request_change(reviewer_task_id, project_name, target, review
         json.dumps(review_findings, sort_keys=True, default=str).encode()
     ).hexdigest()[:16]
     prior_sigs = list(target.get("review_feedback_signatures") or [])
+    if _review_should_route_to_planner(review_findings):
+        def mut_protocol_refine(t):
+            mut_target(t)
+            t["review_feedback_rounds"] = rounds
+            t["review_feedback_signatures"] = (prior_sigs + [sig])[-4:]
+            t["review_feedback_routed_to_planner_at"] = o.now_iso()
+        o.update_task_in_place(o.task_path(target_id, "awaiting-review"), mut_protocol_refine)
+        target_for_refine = dict(target)
+        mut_protocol_refine(target_for_refine)
+        enqueue_review_exhausted_planner_refine(
+            target_for_refine,
+            project_name,
+            review_findings,
+            rounds=rounds,
+            reason="review_feedback_exhausted",
+        )
+        o._write_pr_alert(
+            project_name,
+            target_id,
+            target.get("pr_number") or "review-feedback",
+            f"review finding changes design contract; planner refine requested",
+            target.get("pr_url"),
+        )
+        return
     if prior_sigs and prior_sigs[-1] == sig:
         def mut_loop(t):
             mut_target(t)
@@ -7742,6 +8045,7 @@ def build_codex_prompt(task, graph_body, memory_ctx):
             ""
         )
         + _render_slice_context_block(task)
+        + _render_design_contract_block(task)
         + _render_retry_context_block(task)
         +
         "[REPO LAYOUT]\n"

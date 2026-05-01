@@ -1,0 +1,7 @@
+{
+  "error": null,
+  "forbids_synchronized": true,
+  "forbids_reentrantlock": true,
+  "prompt_has_design_contract": true,
+  "prompt_before_memory": true
+}
