@@ -8200,6 +8200,17 @@ def _run_c2_assumption_discharge_blocks(repo_root, scenario):
 
 def _run_planner_design_contracts(repo_root, scenario):
     orchestrator, worker = _load_repo_modules(repo_root)
+    cfg = {
+        "projects": [
+            {
+                "name": "lvc-standard",
+                "path": str(repo_root),
+                "planning_contract": {"profile": "ull"},
+            }
+        ]
+    }
+    orchestrator.load_config = lambda: cfg
+    worker.o.load_config = lambda: cfg
     case = scenario.get("case")
     if case == "ull_injected":
         plan = {
@@ -8344,6 +8355,67 @@ def _run_planner_design_contracts(repo_root, scenario):
                     "Using MappedByteBuffer.force() as a substitute for atomic rename because force is not atomic",
                     "Files.move without StandardCopyOption.ATOMIC_MOVE",
                 ],
+                "acceptance_tests": ["snapshot round trip", "CRC corruption rejected"],
+            }
+        }
+        slices = [{"id": "slice-1", "summary": "Implement snapshot mmap writer", "braid_template": "lvc-implement-operator", "touches": ["store/src/main/java"], "forbidden_paths": ["core/src/main/java"]}]
+        _contract, error = worker._planner_contract_validation(plan, slices, "lvc-standard")
+        return {"error_code": error.get("code") if error else None, "error_summary": error.get("summary") if error else None}
+    if case == "atomic_move_required_in_forbidden_text_allowed":
+        plan = {
+            "design_contract": {
+                "public_api": "Store.snapshot(Path)",
+                "ownership_boundaries": "store module",
+                "concurrency_protocol": "CAS gate rejects concurrent snapshots deterministically",
+                "persistence_protocol": "snapshot uses CRC per page and atomic move",
+                "hard_constraints": [],
+                "forbidden_alternatives": [
+                    "In-place mmap overwrite during restore is forbidden; restore must use .tmp-then-ATOMIC_MOVE exclusively",
+                    "Files.copy or manual delete-then-copy as the final atomicity mechanism for file placement (ATOMIC_MOVE required)",
+                ],
+                "acceptance_tests": ["snapshot round trip", "CRC corruption rejected"],
+            }
+        }
+        slices = [{"id": "slice-1", "summary": "Implement snapshot mmap writer", "braid_template": "lvc-implement-operator", "touches": ["store/src/main/java"], "forbidden_paths": ["core/src/main/java"]}]
+        _contract, error = worker._planner_contract_validation(plan, slices, "lvc-standard")
+        return {"error_code": error.get("code") if error else None, "error_summary": error.get("summary") if error else None}
+    if case == "explicit_atomic_move_ban_rejected":
+        plan = {
+            "design_contract": {
+                "public_api": "Store.snapshot(Path)",
+                "ownership_boundaries": "store module",
+                "concurrency_protocol": "CAS gate rejects concurrent snapshots deterministically",
+                "persistence_protocol": "snapshot uses CRC per page and atomic move",
+                "hard_constraints": [],
+                "forbidden_alternatives": ["Do not use atomic move for final file placement"],
+                "acceptance_tests": ["snapshot round trip", "CRC corruption rejected"],
+            }
+        }
+        slices = [{"id": "slice-1", "summary": "Implement snapshot mmap writer", "braid_template": "lvc-implement-operator", "touches": ["store/src/main/java"], "forbidden_paths": ["core/src/main/java"]}]
+        _contract, error = worker._planner_contract_validation(plan, slices, "lvc-standard")
+        return {"error_code": error.get("code") if error else None, "error_summary": error.get("summary") if error else None}
+    if case == "restore_lifecycle_ambiguity_rejected":
+        plan = {
+            "design_contract": {
+                "public_api": "Store.restore(Path) added as an instance method",
+                "ownership_boundaries": "store module",
+                "concurrency_protocol": "CAS gate rejects concurrent snapshots deterministically",
+                "persistence_protocol": "restore is cold-start only on a fresh store and uses CRC per page",
+                "hard_constraints": [],
+                "acceptance_tests": ["restore round trip", "CRC corruption rejected"],
+            }
+        }
+        slices = [{"id": "slice-1", "summary": "Implement restore mmap writer", "braid_template": "lvc-implement-operator", "touches": ["store/src/main/java"], "forbidden_paths": ["core/src/main/java"]}]
+        _contract, error = worker._planner_contract_validation(plan, slices, "lvc-standard")
+        return {"error_code": error.get("code") if error else None, "error_summary": error.get("summary") if error else None}
+    if case == "project_forbidden_crc_rejected":
+        plan = {
+            "design_contract": {
+                "public_api": "Store.snapshot(Path)",
+                "ownership_boundaries": "store module",
+                "concurrency_protocol": "CAS gate rejects concurrent snapshots deterministically",
+                "persistence_protocol": "snapshot uses CRC per page",
+                "hard_constraints": ["Use one java.util.zip.CRC32C instance per call"],
                 "acceptance_tests": ["snapshot round trip", "CRC corruption rejected"],
             }
         }

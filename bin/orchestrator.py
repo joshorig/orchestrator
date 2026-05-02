@@ -848,6 +848,25 @@ CONFIG_DEFAULTS = {
             "template_overrides": {},
         },
     },
+    "planning_contract_profiles": {
+        "ull": {
+            "require_design_contract": True,
+            "require_explicit_slice_scope": True,
+            "require_concurrency_protocol": True,
+            "hot_path_allocation": "zero",
+            "preferred_crc": ("agrona", "UnsafeBuffer"),
+            "forbidden_crc": ("java.util.zip.CRC32", "java.util.zip.CRC32C"),
+            "forbidden_primitives": (
+                "synchronized",
+                "ReentrantLock",
+                "ReadWriteLock",
+                "StampedLock",
+                "Semaphore",
+                "CountDownLatch",
+                "BlockingQueue",
+            ),
+        },
+    },
     "skills": {
         "trusted_root": ".claude/skills",
         "trusted_skills": (),

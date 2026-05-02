@@ -119,6 +119,31 @@
     ]
   },
   "workflow_repair_policy": "default",
+  "planning_contract_profiles": {
+    "ull": {
+      "require_design_contract": true,
+      "require_explicit_slice_scope": true,
+      "require_concurrency_protocol": true,
+      "hot_path_allocation": "zero",
+      "preferred_crc": [
+        "agrona",
+        "UnsafeBuffer"
+      ],
+      "forbidden_crc": [
+        "java.util.zip.CRC32",
+        "java.util.zip.CRC32C"
+      ],
+      "forbidden_primitives": [
+        "synchronized",
+        "ReentrantLock",
+        "ReadWriteLock",
+        "StampedLock",
+        "Semaphore",
+        "CountDownLatch",
+        "BlockingQueue"
+      ]
+    }
+  },
   "review_policy": {
     "test_to_code_ratio": {
       "min_ratio": 0.5,
@@ -222,6 +247,9 @@
           "sun"
         ],
         "regression_threshold_pct": 3
+      },
+      "planning_contract": {
+        "profile": "ull"
       }
     }
   ]

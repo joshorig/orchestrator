@@ -1460,7 +1460,6 @@ def _self_repair_deploy_mode(task, project_name):
 # --- memory context ---------------------------------------------------------
 
 CONTEXT_RULE_FILES = ("AGENTS.md", "CLAUDE.md", "CODEX.md", "WARP.md")
-ULL_PROJECTS = {"lvc-standard", "dag-framework", "trade-research-platform"}
 
 ULL_HARD_CONSTRAINTS = (
     "No synchronized blocks or synchronized methods in changed Java files.",
@@ -1468,6 +1467,20 @@ ULL_HARD_CONSTRAINTS = (
     "Use VarHandle, volatile fields, Atomic* primitives, CAS, and ordered writes for ULL coordination.",
     "If a correct lock-free protocol cannot be specified from the active design contract, emit BRAID_PLANNER_REFINE instead of inventing one.",
 )
+ULL_PLANNING_CONTRACT_DEFAULTS = {
+    "hot_path_allocation": "zero",
+    "forbidden_crc": ("java.util.zip.CRC32", "java.util.zip.CRC32C"),
+    "preferred_crc": ("agrona", "UnsafeBuffer"),
+    "forbidden_primitives": (
+        "synchronized",
+        "ReentrantLock",
+        "ReadWriteLock",
+        "StampedLock",
+        "Semaphore",
+        "CountDownLatch",
+        "BlockingQueue",
+    ),
+}
 
 _CONCURRENCY_PROTOCOL_TERMS = (
     "snapshot",
@@ -1514,7 +1527,7 @@ def _list_field(row, *names):
 
 
 def _planner_slice_scope_error(slices, project_name):
-    if project_name not in ULL_PROJECTS:
+    if not _project_requires_explicit_slice_scope(project_name):
         return None
     for row in slices or []:
         if (row or {}).get("braid_template") not in planner_implementer_templates(project_name):
@@ -1560,9 +1573,118 @@ def _planner_historian_dependency_error(slices, project_name):
     return None
 
 
-def _planner_contract_semantic_error(contract, slices, project_name):
-    if project_name not in ULL_PROJECTS:
+def _project_planning_contract(project_name):
+    """Return project-level planner contract policy.
+
+    Projects can opt into domain constraints through their config entry:
+      {"planning_contract": {"forbidden_crc": [...], ...}}
+
+    ULL projects keep their existing safety profile as defaults, but explicit
+    config values override/extend the profile so future projects are not forced
+    through LVC-specific code paths.
+    """
+    try:
+        cfg = o.load_config()
+    except Exception:
+        cfg = {}
+    profiles = dict(cfg.get("planning_contract_profiles") or {})
+    policy = {}
+    for project in cfg.get("projects", []) or []:
+        if project.get("name") != project_name:
+            continue
+        custom = project.get("planning_contract") or {}
+        profile_names = custom.get("profiles") or custom.get("profile") or ()
+        if isinstance(profile_names, str):
+            profile_names = [profile_names]
+        if profile_names:
+            policy["_profiles"] = list(profile_names)
+        for profile_name in profile_names:
+            if profile_name == "ull":
+                profile = ULL_PLANNING_CONTRACT_DEFAULTS
+            else:
+                profile = profiles.get(profile_name) or {}
+            for key, value in profile.items():
+                if isinstance(value, (list, tuple)):
+                    base = list(policy.get(key) or [])
+                    policy[key] = base + [item for item in value if item not in base]
+                else:
+                    policy[key] = value
+        for key, value in custom.items():
+            if key in ("profile", "profiles"):
+                continue
+            if isinstance(value, list):
+                base = list(policy.get(key) or [])
+                policy[key] = base + [item for item in value if item not in base]
+            else:
+                policy[key] = value
+        break
+    return policy
+
+
+def _project_uses_planning_profile(project_name, profile):
+    policy = _project_planning_contract(project_name)
+    return str(profile) in {str(item) for item in (policy.get("_profiles") or [])}
+
+
+def _project_requires_design_contract(project_name):
+    policy = _project_planning_contract(project_name)
+    return bool(policy.get("require_design_contract") or policy)
+
+
+def _project_requires_explicit_slice_scope(project_name):
+    policy = _project_planning_contract(project_name)
+    return bool(policy.get("require_explicit_slice_scope") or policy.get("hot_path_allocation") == "zero")
+
+
+def _project_requires_concurrency_protocol(project_name):
+    policy = _project_planning_contract(project_name)
+    return bool(policy.get("require_concurrency_protocol") or policy.get("hot_path_allocation") == "zero")
+
+
+def _policy_forbidden_term_used(text, terms):
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        lowered = line.lower()
+        if not any(str(term).lower() in lowered for term in terms or []):
+            continue
+        if re.search(r"\b(forbid|forbidden|must\s+not|do\s+not\s+use|disallow|reject|avoid)\b", lowered):
+            continue
+        return True
+    return False
+
+
+def _planner_project_policy_error(contract, project_name):
+    policy = _project_planning_contract(project_name)
+    if not policy:
         return None
+    contract_text = "\n".join(
+        str(value)
+        for key, value in (contract or {}).items()
+        if key in ("public_api", "ownership_boundaries", "concurrency_protocol", "persistence_protocol")
+    )
+    contract_text += "\n" + "\n".join(str(item) for item in (contract.get("hard_constraints") or []))
+    contract_text += "\n" + "\n".join(str(item) for item in (contract.get("forbidden_alternatives") or []))
+
+    forbidden_crc = policy.get("forbidden_crc") or ()
+    if forbidden_crc and _policy_forbidden_term_used(contract_text, forbidden_crc):
+        preferred = ", ".join(str(item) for item in (policy.get("preferred_crc") or [])) or "the project-approved CRC path"
+        return {
+            "code": "planner_contract_incomplete",
+            "summary": "contract uses project-forbidden CRC primitive",
+            "detail": f"planning_contract forbids {', '.join(forbidden_crc)}; specify {preferred} instead",
+            "metadata": {
+                "category": "project_policy_violation",
+                "policy_key": "forbidden_crc",
+                "forbidden": list(forbidden_crc),
+                "preferred": list(policy.get("preferred_crc") or []),
+            },
+        }
+    return None
+
+
+def _planner_contract_semantic_error(contract, slices, project_name):
     protocol = str(contract.get("concurrency_protocol") or "").lower()
     persistence = str(contract.get("persistence_protocol") or "").lower()
     public_api = str(contract.get("public_api") or "").lower()
@@ -1599,25 +1721,96 @@ def _planner_contract_semantic_error(contract, slices, project_name):
             "summary": "CRC persistence lacks corruption test",
             "detail": "acceptance_tests must include CRC/corruption behavior when persistence_protocol uses CRC",
         }
-    if "atomic" in persistence and _forbids_atomic_persistence(forbidden_items):
+    lifecycle_error = _planner_api_lifecycle_error(public_api, contract)
+    if lifecycle_error:
+        return lifecycle_error
+    required_mechanisms = _required_persistence_mechanisms(persistence)
+    forbidden_mechanisms = _forbidden_persistence_mechanisms(forbidden_items)
+    overlap = sorted(required_mechanisms & forbidden_mechanisms)
+    if overlap:
         return {
             "code": "planner_contract_drift",
             "summary": "contract contradicts atomic persistence",
-            "detail": "persistence_protocol requires atomic behavior while forbidden_alternatives forbids it",
+            "detail": "persistence_protocol requires mechanisms also listed as forbidden: " + ", ".join(overlap),
+            "metadata": {
+                "category": "mechanism_contradiction",
+                "required_mechanisms": sorted(required_mechanisms),
+                "forbidden_mechanisms": sorted(forbidden_mechanisms),
+                "overlap": overlap,
+            },
         }
+    policy_error = _planner_project_policy_error(contract, project_name)
+    if policy_error:
+        return policy_error
     return None
 
 
-def _forbids_atomic_persistence(forbidden_items):
+def _planner_api_lifecycle_error(public_api, contract):
+    combined = " ".join(
+        str(contract.get(key) or "")
+        for key in ("public_api", "ownership_boundaries", "concurrency_protocol", "persistence_protocol")
+    ).lower()
+    if "restore" not in public_api:
+        return None
+    cold_terms = ("closed", "fresh", "freshly constructed", "cold-start", "before open", "not open")
+    if not any(term in combined for term in cold_terms):
+        return None
+    explicit_failure = any(term in combined for term in ("throws", "throw ", "fails", "precondition", "exception", "illegalstate"))
+    explicit_lifecycle = any(term in combined for term in ("static", "factory", "constructor", "instance method", "called on"))
+    if explicit_failure and explicit_lifecycle:
+        return None
+    return {
+        "code": "planner_contract_incomplete",
+        "summary": "restore API lifecycle is ambiguous",
+        "detail": "cold-start/closed restore APIs must state callable lifecycle and failure mode for live/open stores",
+        "metadata": {"category": "api_lifecycle_ambiguity", "api": "restore"},
+    }
+
+
+def _required_persistence_mechanisms(persistence_text):
+    text = re.sub(r"[_-]+", " ", str(persistence_text or "").lower())
+    mechanisms = set()
+    if re.search(r"\batomic\s+(move|rename|swap|file\s+replacement|persistence)\b", text) or "standardcopyoption.atomic move" in text or "atomic_move" in str(persistence_text or "").lower():
+        mechanisms.add("atomic_move")
+    if re.search(r"\b(force|fsync|filechannel\.force)\b", text):
+        mechanisms.add("fsync")
+    if "crc" in text:
+        mechanisms.add("crc")
+    if re.search(r"\b(no|never|without)\s+in\s+place\b", text) or "no in-place" in str(persistence_text or "").lower():
+        mechanisms.add("no_in_place_restore")
+    return mechanisms
+
+
+def _forbidden_persistence_mechanisms(forbidden_items):
+    mechanisms = set()
     for raw in forbidden_items or []:
         text = re.sub(r"[_-]+", " ", str(raw).lower())
-        if re.search(r"\b(non atomic|not atomic|without\b.{0,80}\batomic|lack(?:s|ing)?\b.{0,40}\batomic)\b", text):
+        if _forbidden_item_is_remedial_requirement(text):
             continue
-        if re.search(r"\batomic\s+(move|rename|swap|persistence|file\s+swap)\b", text):
-            return True
-        if re.search(r"\b(forbid|forbidden|avoid|disallow|reject)\b.{0,80}\batomic\b", text):
-            return True
-    return False
+        if re.search(r"\b(no|not|non)\s+atomic\b", text):
+            continue
+        if re.fullmatch(r"\s*atomic\s+(move|rename|swap|persistence|file\s+swap)\s*", text):
+            mechanisms.add("atomic_move")
+        elif re.search(r"\b(forbid|forbidden|avoid|disallow|reject|do\s+not\s+use|must\s+not\s+use)\b.{0,80}\batomic\s+(move|rename|swap|persistence|file\s+swap)?\b", text):
+            mechanisms.add("atomic_move")
+        if re.search(r"\b(forbid|forbidden|avoid|disallow|reject|do\s+not\s+use|must\s+not\s+use)\b.{0,80}\b(fsync|filechannel\.force|force\(true\))\b", text):
+            mechanisms.add("fsync")
+        if re.search(r"\b(forbid|forbidden|avoid|disallow|reject|do\s+not\s+use|must\s+not\s+use)\b.{0,80}\bcrc\b", text):
+            mechanisms.add("crc")
+    return mechanisms
+
+
+def _forbidden_item_is_remedial_requirement(text):
+    if (
+        re.search(r"\b(must|require|required|via|exclusively|instead)\b.{0,80}\batomic\s+(move|rename|swap)|atomic\s+(move|rename|swap).{0,80}\b(must|require|required|via|exclusively|instead)\b", text)
+        or re.search(r"\bwithout\s+standardcopyoption\.atomic\s+move\b", text)
+    ):
+        return True
+    if re.search(r"\b(do\s+not\s+use|must\s+not\s+use|forbid|forbidden|avoid|disallow|reject)\b.{0,80}\batomic\s+(move|rename|swap)\b", text):
+        return False
+    return bool(
+        re.search(r"\b(non atomic|not atomic|without\b.{0,80}\batomic|lack(?:s|ing)?\b.{0,40}\batomic)\b", text)
+    )
 
 
 def _planner_contract_validation(plan, slices, project_name, *, origin_contract=None):
@@ -1629,9 +1822,10 @@ def _planner_contract_validation(plan, slices, project_name, *, origin_contract=
     raw = (plan or {}).get("design_contract")
     has_impl = _implementation_slice_present(project_name, slices)
     combined = " ".join(str((row or {}).get("summary") or "") for row in (slices or []))
+    requires_contract = _project_requires_design_contract(project_name)
     if not has_impl:
         return {}, None
-    if project_name not in ULL_PROJECTS and not isinstance(raw, dict):
+    if not requires_contract and not isinstance(raw, dict):
         return {}, None
     if not isinstance(raw, dict) or not raw:
         return {}, {
@@ -1647,24 +1841,29 @@ def _planner_contract_validation(plan, slices, project_name, *, origin_contract=
     if historian_error:
         return contract, historian_error
     hard = list(contract.get("hard_constraints") or [])
-    if project_name in ULL_PROJECTS:
-        for item in ULL_HARD_CONSTRAINTS:
+    if requires_contract:
+        policy = _project_planning_contract(project_name)
+        default_constraints = list(ULL_HARD_CONSTRAINTS if "ull" in (policy.get("_profiles") or []) else ())
+        default_constraints.extend(str(item) for item in (policy.get("hard_constraints") or []) if item)
+        for item in default_constraints:
             if item not in hard:
                 hard.append(item)
         contract["hard_constraints"] = hard
         joined = "\n".join(hard).lower()
-        if "synchronized" not in joined or "reentrantlock" not in joined:
+        forbidden_primitives = [str(item).lower() for item in (policy.get("forbidden_primitives") or ())]
+        missing_primitives = [item for item in forbidden_primitives if item not in joined]
+        if missing_primitives:
             return contract, {
                 "code": "planner_contract_incomplete",
-                "summary": "ULL hard constraints missing",
-                "detail": "ULL implementation contract must explicitly forbid synchronized and lock primitives",
+                "summary": "project hard constraints missing",
+                "detail": "implementation contract must explicitly forbid project-configured primitives: " + ", ".join(missing_primitives),
             }
-    if project_name in ULL_PROJECTS and _requires_concurrency_protocol(combined):
+    if _project_requires_concurrency_protocol(project_name) and _requires_concurrency_protocol(combined):
         if not str(contract.get("concurrency_protocol") or "").strip():
             return contract, {
                 "code": "planner_contract_incomplete",
                 "summary": "planner output missing concurrency_protocol",
-                "detail": "snapshot/restore/quiesce style ULL work must define the concrete lock-free concurrency protocol",
+                "detail": "snapshot/restore/quiesce style work must define the concrete concurrency protocol required by project policy",
             }
     semantic_error = _planner_contract_semantic_error(contract, slices, project_name)
     if semantic_error:
@@ -1841,7 +2040,7 @@ def _requested_external_skills(project_name, *, gate_name=None, changed_files_te
     files = _changed_file_list(changed_files_text or "")
     requested = []
     if not files:
-        if project_name in ULL_PROJECTS:
+        if _project_uses_planning_profile(project_name, "ull"):
             requested.append("performance-profiler")
         if project_name in {"devmini-orchestrator", "trade-research-platform"}:
             requested.append("code-reviewer")
@@ -1925,7 +2124,7 @@ def _project_policy_context(project_name, project_path, *, task_id=None, gate_na
             parts.append(f"### {name}\n{body}")
 
     skill_names = ["claude-code-cowork", "codex-delegation"]
-    if project_name in ULL_PROJECTS:
+    if _project_uses_planning_profile(project_name, "ull"):
         skill_names.extend(["ull-java-core", "ull-performance"])
     if project_name == "trade-research-platform":
         skill_names.append("ui-development-design")
@@ -2322,6 +2521,7 @@ def _retry_planner_validation_failure(task_id, from_state, *, code, summary, det
             f"code: {code}\n"
             f"summary: {summary}\n"
             f"detail: {detail or '-'}\n"
+            f"metadata: {json.dumps(metadata or {}, sort_keys=True, default=str)}\n"
             "Required correction: regenerate the plan so it satisfies the design-contract validator. "
             "Do not leave this as a blocked planner task.\n"
         )
@@ -2607,7 +2807,7 @@ def _changed_java_files(worktree, base_ref):
 
 def _policy_findings_for_diff(project_name, worktree, base_ref):
     findings = []
-    if project_name not in ULL_PROJECTS:
+    if not _project_uses_planning_profile(project_name, "ull"):
         return findings
     blocking_patterns = [
         (re.compile(r"\bsynchronized\b"), "contains `synchronized`; ULL/hot-path code must avoid monitor-based locking."),
@@ -3247,7 +3447,7 @@ def _qa_scope_expectations(project_name, changed_files, diff_text):
 
     if any(path.endswith(".java") for path in files):
         expectations.append("unit-or-gradle-tests")
-    if project_name in ULL_PROJECTS and any(path.endswith(".java") for path in files):
+    if _project_uses_planning_profile(project_name, "ull") and any(path.endswith(".java") for path in files):
         expectations.append("benchmark-or-jmh")
         expectations.append("concurrency-policy-review")
     if any(path.endswith((".ts", ".tsx", ".js", ".jsx")) for path in files):
@@ -3828,6 +4028,21 @@ def _planner_contract_blocks(project_name):
     return "\n\n".join(block for block in blocks if block)
 
 
+def _planner_project_policy_block(project_name):
+    policy = _project_planning_contract(project_name)
+    if not policy:
+        return ""
+    public_policy = {k: v for k, v in policy.items() if not str(k).startswith("_")}
+    if not public_policy:
+        return ""
+    return (
+        "[PROJECT PLANNING CONTRACT]\n"
+        "This project has opted into additional planner validation policy. "
+        "Treat these as structured requirements, not prose hints.\n"
+        f"{json.dumps(public_policy, indent=2, sort_keys=True, default=str)}\n"
+    )
+
+
 def _council_member_context(member):
     agent_dir = _council_agent_dir()
     if agent_dir is None:
@@ -4005,6 +4220,7 @@ def planner_council_prompt(task, project, memory_ctx, cfg):
     council_ctx = "\n\n".join(_council_member_context(member) for member in panel)
     allowed_templates = ", ".join(f'"{name}"' for name in planner_template_roles(project["name"]).keys())
     contract_block = _planner_contract_blocks(project["name"])
+    project_policy_block = _planner_project_policy_block(project["name"])
     system_prompt = (
         "You are the planner council for the devmini orchestrator.\n"
         "Run a compact internal council before emitting implementation slices.\n"
@@ -4031,6 +4247,7 @@ def planner_council_prompt(task, project, memory_ctx, cfg):
             '"slices":[{"id":"slice-1","summary":"...","braid_template":"lvc-implement-operator","touches":["..."],"forbidden_paths":["..."]}]}'
         )
         + "\n"
+        + (project_policy_block + "\n" if project_policy_block else "")
         + (contract_block + "\n\n" if contract_block else "")
         + "[COUNCIL PERSONAS]\n"
         f"{council_ctx}\n"
@@ -4055,6 +4272,11 @@ def planner_council_prompt(task, project, memory_ctx, cfg):
         "For ULL/Java work, hard_constraints must explicitly forbid synchronized and blocking lock primitives. "
         "For snapshot/restore/quiesce/gate/batch/epoch/mmap work, concurrency_protocol must specify the concrete lock-free protocol and allowed primitives. "
         "Do not use vague or unsafe protocol language such as best-effort, eventual consistency, or proceed after N retries unless the invariant is proven in the contract.\n"
+        "[PLANNER SELF-CHECK]\n"
+        "- For every persistence mechanism required by persistence_protocol, ensure it is not listed as forbidden_alternatives.\n"
+        "- If forbidden_alternatives mentions a required mechanism only as the required replacement, move that requirement to hard_constraints or phrase it unambiguously.\n"
+        "- For public APIs, specify callable lifecycle, ownership, and failure mode for invalid object states.\n"
+        "- For project planning_contract policy, do not mention forbidden primitives as allowed implementation choices; list them only as explicit prohibitions.\n"
         f"{_planner_prior_errors_block(task)}"
         "Return the JSON object directly. Do not use ```json fences.\n"
     )
@@ -5077,12 +5299,17 @@ def _render_retry_context_block(task):
     for item in retry_ctx.get("findings") or []:
         if item:
             findings.append(f"- {str(item)}")
+    metadata = retry_ctx.get("metadata") if isinstance(retry_ctx.get("metadata"), dict) else {}
+    metadata_block = ""
+    if metadata:
+        metadata_block = "metadata:\n" + json.dumps(metadata, indent=2, sort_keys=True, default=str) + "\n"
     return (
         "[RETRY CONTEXT]\n"
         f"kind: {kind}\n"
         f"reason: {reason}\n"
         "findings:\n"
-        f"{chr(10).join(findings) if findings else '- (none)'}\n\n"
+        f"{chr(10).join(findings) if findings else '- (none)'}\n"
+        f"{metadata_block}\n"
     )
 
 
@@ -6097,6 +6324,7 @@ def run_claude_planner(task, cfg, timeout, log_path):
             code=contract_error["code"],
             summary=contract_error["summary"],
             detail=contract_error["detail"],
+            metadata=contract_error.get("metadata"),
         )
         return
     design_contract_hash = _stable_hash(design_contract) if design_contract else None
