@@ -1,0 +1,4 @@
+{
+  "error_code": "planner_contract_incomplete",
+  "error_summary": "stateful resource lifecycle missing"
+}

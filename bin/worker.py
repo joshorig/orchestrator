@@ -1493,6 +1493,40 @@ _CONCURRENCY_PROTOCOL_TERMS = (
     "mmap",
     "writer",
 )
+_STATEFUL_RESOURCE_TERMS = (
+    "abort",
+    "activewriter",
+    "active writer",
+    "activewriters",
+    "admission",
+    "claim",
+    "commit",
+    "counter",
+    "drain",
+    "gate",
+    "handle",
+    "in-flight",
+    "inflight",
+    "lease",
+    "lock",
+    "normalise",
+    "normalize",
+    "quiesce",
+    "quiescing",
+    "recover",
+    "recovery",
+    "refcount",
+    "reopen",
+    "rollback",
+    "session",
+    "transaction",
+)
+_RESOURCE_LIFECYCLE_KEYS = (
+    "resource_lifecycle",
+    "resource_lifecycles",
+    "ownership_lifecycle",
+    "stateful_resources",
+)
 _PLANNER_SCORE_DIMENSIONS = (
     "completeness",
     "topology_risk",
@@ -1514,6 +1548,11 @@ def _implementation_slice_present(project_name, slices):
 def _requires_concurrency_protocol(text):
     lowered = str(text or "").lower()
     return any(term in lowered for term in _CONCURRENCY_PROTOCOL_TERMS)
+
+
+def _requires_resource_lifecycle(text):
+    lowered = re.sub(r"[_-]+", " ", str(text or "").lower())
+    return any(term in lowered for term in _STATEFUL_RESOURCE_TERMS)
 
 
 def _list_field(row, *names):
@@ -1758,6 +1797,99 @@ def _planner_contract_semantic_error(contract, slices, project_name):
     policy_error = _planner_project_policy_error(contract, project_name)
     if policy_error:
         return policy_error
+    lifecycle_error = _planner_resource_lifecycle_error(contract, slices)
+    if lifecycle_error:
+        return lifecycle_error
+    return None
+
+
+def _flatten_contract_text(value):
+    if isinstance(value, dict):
+        return "\n".join(
+            f"{key}: {_flatten_contract_text(nested)}"
+            for key, nested in value.items()
+        )
+    if isinstance(value, (list, tuple, set)):
+        return "\n".join(_flatten_contract_text(item) for item in value)
+    return str(value or "")
+
+
+def _planner_resource_lifecycle_error(contract, slices):
+    contract_text = "\n".join(
+        _flatten_contract_text(contract.get(key))
+        for key in ("public_api", "ownership_boundaries", "concurrency_protocol", "persistence_protocol")
+    )
+    slice_text = "\n".join(
+        str((row or {}).get("summary") or "")
+        for row in (slices or [])
+        if (row or {}).get("summary")
+    )
+    if not _requires_resource_lifecycle(contract_text + "\n" + slice_text):
+        return None
+
+    lifecycle = None
+    lifecycle_key = None
+    for key in _RESOURCE_LIFECYCLE_KEYS:
+        value = contract.get(key)
+        if value:
+            lifecycle = value
+            lifecycle_key = key
+            break
+    if not lifecycle:
+        return {
+            "code": "planner_contract_incomplete",
+            "summary": "stateful resource lifecycle missing",
+            "detail": "plans touching claims, gates, counters, commit/abort, recovery, or similar stateful mechanisms must include resource_lifecycle with ownership and failure semantics",
+            "metadata": {"category": "resource_lifecycle_missing"},
+        }
+
+    lifecycle_text = _flatten_contract_text(lifecycle).lower()
+    required_groups = {
+        "resource": ("resource", "state", "counter", "claim", "gate", "handle", "session", "transaction"),
+        "acquire": ("acquire", "admit", "entry", "enter", "claim", "open"),
+        "release": ("release", "exit", "clear", "close", "commit", "abort", "rollback"),
+        "failure": ("fail", "exception", "invalid", "stale", "timeout", "error"),
+        "invariant": ("invariant", "exactly-once", "exactly once", "non-negative", "never negative", "idempotent"),
+    }
+    missing = [
+        group
+        for group, terms in required_groups.items()
+        if not any(term in lifecycle_text for term in terms)
+    ]
+    if missing:
+        return {
+            "code": "planner_contract_incomplete",
+            "summary": "stateful resource lifecycle incomplete",
+            "detail": f"{lifecycle_key} must specify: " + ", ".join(missing),
+            "metadata": {
+                "category": "resource_lifecycle_incomplete",
+                "missing": missing,
+            },
+        }
+
+    combined_tests = "\n".join(str(item).lower() for item in (contract.get("acceptance_tests") or []))
+    test_requirements = {
+        "stale_or_invalid": ("stale", "invalid"),
+        "double_release": ("double", "idempotent", "exactly-once", "exactly once"),
+        "failure_path": ("fail", "exception", "rollback", "abort"),
+        "recovery_or_normalization": ("recover", "recovery", "normalise", "normalize", "reopen"),
+        "invariant": ("invariant", "non-negative", "never negative", "counter", "ownership"),
+    }
+    missing_tests = [
+        name
+        for name, terms in test_requirements.items()
+        if not any(term in combined_tests for term in terms)
+    ]
+    if missing_tests:
+        return {
+            "code": "planner_contract_incomplete",
+            "summary": "stateful lifecycle lacks edge-case acceptance tests",
+            "detail": "acceptance_tests must cover: " + ", ".join(missing_tests),
+            "metadata": {
+                "category": "resource_lifecycle_tests_incomplete",
+                "missing": missing_tests,
+            },
+        }
     return None
 
 
@@ -4415,7 +4547,8 @@ def _planner_member_report_prompt(task, project, memory_ctx, member, user_prompt
         "Score candidate plans from 0.0 to 1.0 on: completeness, topology_risk, ull_safety, testability, slice_width. "
         "For topology_risk and slice_width, higher means safer/narrower. "
         "Return only JSON with keys: member, scores, key_findings, concerns, recommendations, "
-        "design_contract_requirements, slice_guidance, confidence.\n"
+        "design_contract_requirements, resource_lifecycle_requirements, acceptance_test_matrix, "
+        "red_flags, slice_guidance, confidence.\n"
     )
 
 
@@ -4428,6 +4561,7 @@ def _planner_member_system_prompt(member):
             '{"member":"%s","scores":{"completeness":0.8,"topology_risk":0.7,"ull_safety":0.9,"testability":0.8,"slice_width":0.7},'
             '"key_findings":["..."],"concerns":["..."],'
             '"recommendations":["..."],"design_contract_requirements":["..."],'
+            '"resource_lifecycle_requirements":["..."],"acceptance_test_matrix":["..."],"red_flags":["..."],'
             '"slice_guidance":["..."],"confidence":0.8}' % member
         )
         + "\n"
@@ -4557,7 +4691,7 @@ def planner_council_prompt(task, project, memory_ctx, cfg):
             '"key_agreements":["..."],'
             '"dissent":["..."],'
             '"execution_path":"slice-1 -> slice-2",'
-            '"design_contract":{"public_api":"...","ownership_boundaries":"...","concurrency_protocol":"...","persistence_protocol":"...","hard_constraints":["..."],"forbidden_alternatives":["..."],"acceptance_tests":["..."]},'
+            '"design_contract":{"public_api":"...","ownership_boundaries":"...","concurrency_protocol":"...","persistence_protocol":"...","resource_lifecycle":{"resources":["..."],"acquire":["..."],"release":["..."],"failure_semantics":["..."],"invariants":["..."],"recovery":["..."]},"hard_constraints":["..."],"forbidden_alternatives":["..."],"acceptance_tests":["..."]},'
             '"slices":[{"id":"slice-1","summary":"...","braid_template":"lvc-implement-operator","touches":["..."],"forbidden_paths":["..."]}]}'
         )
         + "\n"
@@ -4582,6 +4716,9 @@ def planner_council_prompt(task, project, memory_ctx, cfg):
         "Preserve dissent when a risky slice is rejected or narrowed.\n"
         "For implementation slices, include a top-level design_contract. "
         "Every implementation slice must name exact files/modules it may touch and files/modules it must not touch. "
+        "When the plan touches claims, gates, counters, sessions, handles, locks, leases, transactions, commit/abort/rollback, recovery, normalization, or quiescing, "
+        "design_contract must include resource_lifecycle with named resources, acquire sites, release sites, exactly-once/idempotency invariants, stale/invalid handle behavior, failure semantics, and recovery/normalization behavior. "
+        "Acceptance tests must bind to those lifecycle invariants and cover stale/invalid operations, double release/idempotency, failure paths, recovery/normalization, and invariant assertions. "
         "Historian slices must depend_on all implementation slices whose results they describe. "
         "For ULL/Java work, hard_constraints must explicitly forbid synchronized and blocking lock primitives. "
         "For snapshot/restore/quiesce/gate/batch/epoch/mmap work, concurrency_protocol must specify the concrete lock-free protocol and allowed primitives. "

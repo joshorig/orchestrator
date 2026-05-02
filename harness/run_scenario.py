@@ -8284,6 +8284,25 @@ def _run_planner_design_contracts(repo_root, scenario):
     orchestrator.load_config = lambda: cfg
     worker.o.load_config = lambda: cfg
     case = scenario.get("case")
+    lifecycle_fields = {
+        "resource_lifecycle": {
+            "resources": ["snapshot admission gate and active writer state"],
+            "acquire": ["writers acquire admission through the CAS gate before mutating mmap state"],
+            "release": ["commit, abort, and close release ownership exactly once"],
+            "failure_semantics": ["stale or invalid handles fail without releasing ownership they do not hold"],
+            "invariants": ["ownership release is idempotent and counters never become negative"],
+            "recovery": ["reopen and normalization reconcile owned state before allowing snapshot progress"],
+        },
+        "acceptance_tests": [
+            "snapshot round trip",
+            "CRC corruption rejected",
+            "stale invalid handle does not release ownership",
+            "double release is idempotent and exactly-once",
+            "failed commit abort path preserves ownership invariant",
+            "recovery normalize reopen reconciles ownership counter",
+            "counter invariant never negative",
+        ],
+    }
     if case == "ull_injected":
         plan = {
             "design_contract": {
@@ -8293,7 +8312,7 @@ def _run_planner_design_contracts(repo_root, scenario):
                 "persistence_protocol": "write temp snapshot then atomic move",
                 "hard_constraints": [],
                 "forbidden_alternatives": [],
-                "acceptance_tests": ["snapshot round trip"],
+                **lifecycle_fields,
             }
         }
         slices = [{"id": "slice-1", "summary": "Implement snapshot quiesce gate", "braid_template": "lvc-implement-operator", "touches": ["store/src/main/java"], "forbidden_paths": ["core/src/main/java"]}]
@@ -8427,7 +8446,7 @@ def _run_planner_design_contracts(repo_root, scenario):
                     "Using MappedByteBuffer.force() as a substitute for atomic rename because force is not atomic",
                     "Files.move without StandardCopyOption.ATOMIC_MOVE",
                 ],
-                "acceptance_tests": ["snapshot round trip", "CRC corruption rejected"],
+                **lifecycle_fields,
             }
         }
         slices = [{"id": "slice-1", "summary": "Implement snapshot mmap writer", "braid_template": "lvc-implement-operator", "touches": ["store/src/main/java"], "forbidden_paths": ["core/src/main/java"]}]
@@ -8445,7 +8464,7 @@ def _run_planner_design_contracts(repo_root, scenario):
                     "In-place mmap overwrite during restore is forbidden; restore must use .tmp-then-ATOMIC_MOVE exclusively",
                     "Files.copy or manual delete-then-copy as the final atomicity mechanism for file placement (ATOMIC_MOVE required)",
                 ],
-                "acceptance_tests": ["snapshot round trip", "CRC corruption rejected"],
+                **lifecycle_fields,
             }
         }
         slices = [{"id": "slice-1", "summary": "Implement snapshot mmap writer", "braid_template": "lvc-implement-operator", "touches": ["store/src/main/java"], "forbidden_paths": ["core/src/main/java"]}]
@@ -8492,6 +8511,56 @@ def _run_planner_design_contracts(repo_root, scenario):
             }
         }
         slices = [{"id": "slice-1", "summary": "Implement restore mmap writer", "braid_template": "lvc-implement-operator", "touches": ["store/src/main/java"], "forbidden_paths": ["core/src/main/java"]}]
+        _contract, error = worker._planner_contract_validation(plan, slices, "lvc-standard")
+        return {"error_code": error.get("code") if error else None, "error_summary": error.get("summary") if error else None}
+    if case == "stateful_lifecycle_required":
+        plan = {
+            "design_contract": {
+                "public_api": "Store.snapshot(Path)",
+                "ownership_boundaries": "store module",
+                "concurrency_protocol": "CAS gate drains active writers before snapshot",
+                "persistence_protocol": "snapshot uses Agrona UnsafeBuffer CRC per page and atomic move",
+                "hard_constraints": [],
+                "acceptance_tests": ["snapshot round trip", "CRC corruption rejected"],
+            }
+        }
+        slices = [{"id": "slice-1", "summary": "Implement active writer counter and snapshot gate", "braid_template": "lvc-implement-operator", "touches": ["store/src/main/java"], "forbidden_paths": ["core/src/main/java"]}]
+        _contract, error = worker._planner_contract_validation(plan, slices, "lvc-standard")
+        return {"error_code": error.get("code") if error else None, "error_summary": error.get("summary") if error else None}
+    if case == "stateful_lifecycle_tests_required":
+        plan = {
+            "design_contract": {
+                "public_api": "Store.snapshot(Path)",
+                "ownership_boundaries": "store module",
+                "concurrency_protocol": "CAS gate drains active writers before snapshot",
+                "persistence_protocol": "snapshot uses Agrona UnsafeBuffer CRC per page and atomic move",
+                "hard_constraints": [],
+                "resource_lifecycle": {
+                    "resources": ["active writer counter and snapshot gate state"],
+                    "acquire": ["writer entry acquires admission through the CAS gate"],
+                    "release": ["commit or abort releases the writer claim exactly once"],
+                    "failure_semantics": ["stale invalid handles fail without releasing ownership"],
+                    "invariants": ["release is idempotent and the active writer counter is non-negative"],
+                    "recovery": ["normalization and reopen reconcile claims before snapshot proceeds"],
+                },
+                "acceptance_tests": ["snapshot round trip", "CRC corruption rejected"],
+            }
+        }
+        slices = [{"id": "slice-1", "summary": "Implement active writer counter and snapshot gate", "braid_template": "lvc-implement-operator", "touches": ["store/src/main/java"], "forbidden_paths": ["core/src/main/java"]}]
+        _contract, error = worker._planner_contract_validation(plan, slices, "lvc-standard")
+        return {"error_code": error.get("code") if error else None, "error_summary": error.get("summary") if error else None}
+    if case == "ull_profile_alone_does_not_require_lifecycle":
+        plan = {
+            "design_contract": {
+                "public_api": "MetricsRegistry.addGauge(String, Supplier)",
+                "ownership_boundaries": "metrics package owns gauge registration API",
+                "concurrency_protocol": "",
+                "persistence_protocol": "",
+                "hard_constraints": [],
+                "acceptance_tests": ["metrics gauge registration delegates supplier value"],
+            }
+        }
+        slices = [{"id": "slice-1", "summary": "Add metrics gauge registration helper", "braid_template": "lvc-implement-operator", "touches": ["metrics/src/main/java"], "forbidden_paths": ["store/src/main/java"]}]
         _contract, error = worker._planner_contract_validation(plan, slices, "lvc-standard")
         return {"error_code": error.get("code") if error else None, "error_summary": error.get("summary") if error else None}
     if case == "project_forbidden_crc_rejected":
@@ -8551,8 +8620,8 @@ def _run_planner_design_contracts(repo_root, scenario):
                 "ownership_boundaries": "mmap stores own snapshot bytes",
                 "concurrency_protocol": "VarHandle gate",
                 "persistence_protocol": "in-place overwrite through mapped channel",
-                "acceptance_tests": ["snapshot restore round trip"],
                 "hard_constraints": [],
+                **lifecycle_fields,
             }
         }
         slices = [{"id": "slice-1", "summary": "Implement snapshot restore", "braid_template": "lvc-implement-operator", "touches": ["store/src/main/java"], "forbidden_paths": ["core/src/main/java"]}]
