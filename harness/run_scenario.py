@@ -8331,6 +8331,25 @@ def _run_planner_design_contracts(repo_root, scenario):
         slices = [{"id": "slice-1", "summary": "Implement snapshot mmap writer", "braid_template": "lvc-implement-operator", "touches": ["store/src/main/java"], "forbidden_paths": ["core/src/main/java"]}]
         _contract, error = worker._planner_contract_validation(plan, slices, "lvc-standard")
         return {"error_code": error.get("code") if error else None, "error_summary": error.get("summary") if error else None}
+    if case == "atomic_negation_not_contradiction":
+        plan = {
+            "design_contract": {
+                "public_api": "Store.snapshot(Path)",
+                "ownership_boundaries": "store module",
+                "concurrency_protocol": "CAS gate rejects concurrent snapshots deterministically",
+                "persistence_protocol": "snapshot uses CRC per page and atomic move",
+                "hard_constraints": [],
+                "forbidden_alternatives": [
+                    "Non-atomic Files.copy fallback",
+                    "Using MappedByteBuffer.force() as a substitute for atomic rename because force is not atomic",
+                    "Files.move without StandardCopyOption.ATOMIC_MOVE",
+                ],
+                "acceptance_tests": ["snapshot round trip", "CRC corruption rejected"],
+            }
+        }
+        slices = [{"id": "slice-1", "summary": "Implement snapshot mmap writer", "braid_template": "lvc-implement-operator", "touches": ["store/src/main/java"], "forbidden_paths": ["core/src/main/java"]}]
+        _contract, error = worker._planner_contract_validation(plan, slices, "lvc-standard")
+        return {"error_code": error.get("code") if error else None, "error_summary": error.get("summary") if error else None}
     if case == "historian_depends_on_impl_required":
         plan = {
             "design_contract": {

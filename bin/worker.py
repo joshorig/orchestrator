@@ -1567,7 +1567,8 @@ def _planner_contract_semantic_error(contract, slices, project_name):
     persistence = str(contract.get("persistence_protocol") or "").lower()
     public_api = str(contract.get("public_api") or "").lower()
     tests = "\n".join(str(item).lower() for item in (contract.get("acceptance_tests") or []))
-    forbidden = "\n".join(str(item).lower() for item in (contract.get("forbidden_alternatives") or []))
+    forbidden_items = [str(item).lower() for item in (contract.get("forbidden_alternatives") or [])]
+    forbidden = "\n".join(forbidden_items)
     if re.search(r"(proceed|continue|accept|succeed)\s+(after|following)\s+\d+\s+(retry|retries|attempt|attempts)", protocol):
         return {
             "code": "planner_contract_incomplete",
@@ -1598,13 +1599,25 @@ def _planner_contract_semantic_error(contract, slices, project_name):
             "summary": "CRC persistence lacks corruption test",
             "detail": "acceptance_tests must include CRC/corruption behavior when persistence_protocol uses CRC",
         }
-    if "atomic" in persistence and "atomic" in forbidden:
+    if "atomic" in persistence and _forbids_atomic_persistence(forbidden_items):
         return {
             "code": "planner_contract_drift",
             "summary": "contract contradicts atomic persistence",
             "detail": "persistence_protocol requires atomic behavior while forbidden_alternatives forbids it",
         }
     return None
+
+
+def _forbids_atomic_persistence(forbidden_items):
+    for raw in forbidden_items or []:
+        text = re.sub(r"[_-]+", " ", str(raw).lower())
+        if re.search(r"\b(non atomic|not atomic|without\b.{0,80}\batomic|lack(?:s|ing)?\b.{0,40}\batomic)\b", text):
+            continue
+        if re.search(r"\batomic\s+(move|rename|swap|persistence|file\s+swap)\b", text):
+            return True
+        if re.search(r"\b(forbid|forbidden|avoid|disallow|reject)\b.{0,80}\batomic\b", text):
+            return True
+    return False
 
 
 def _planner_contract_validation(plan, slices, project_name, *, origin_contract=None):
