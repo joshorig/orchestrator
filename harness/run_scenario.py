@@ -8348,7 +8348,7 @@ def _run_planner_design_contracts(repo_root, scenario):
                 "public_api": "Store.snapshot(Path)",
                 "ownership_boundaries": "store module",
                 "concurrency_protocol": "CAS gate rejects concurrent snapshots deterministically",
-                "persistence_protocol": "snapshot uses CRC per page and atomic move",
+                "persistence_protocol": "snapshot uses Agrona UnsafeBuffer CRC per page and atomic move",
                 "hard_constraints": [],
                 "forbidden_alternatives": [
                     "Non-atomic Files.copy fallback",
@@ -8367,12 +8367,26 @@ def _run_planner_design_contracts(repo_root, scenario):
                 "public_api": "Store.snapshot(Path)",
                 "ownership_boundaries": "store module",
                 "concurrency_protocol": "CAS gate rejects concurrent snapshots deterministically",
-                "persistence_protocol": "snapshot uses CRC per page and atomic move",
+                "persistence_protocol": "snapshot uses Agrona UnsafeBuffer CRC per page and atomic move",
                 "hard_constraints": [],
                 "forbidden_alternatives": [
                     "In-place mmap overwrite during restore is forbidden; restore must use .tmp-then-ATOMIC_MOVE exclusively",
                     "Files.copy or manual delete-then-copy as the final atomicity mechanism for file placement (ATOMIC_MOVE required)",
                 ],
+                "acceptance_tests": ["snapshot round trip", "CRC corruption rejected"],
+            }
+        }
+        slices = [{"id": "slice-1", "summary": "Implement snapshot mmap writer", "braid_template": "lvc-implement-operator", "touches": ["store/src/main/java"], "forbidden_paths": ["core/src/main/java"]}]
+        _contract, error = worker._planner_contract_validation(plan, slices, "lvc-standard")
+        return {"error_code": error.get("code") if error else None, "error_summary": error.get("summary") if error else None}
+    if case == "project_preferred_crc_required":
+        plan = {
+            "design_contract": {
+                "public_api": "Store.snapshot(Path)",
+                "ownership_boundaries": "store module",
+                "concurrency_protocol": "CAS gate rejects concurrent snapshots deterministically",
+                "persistence_protocol": "snapshot uses CRC per page",
+                "hard_constraints": ["Use one reusable CRC calculator per call"],
                 "acceptance_tests": ["snapshot round trip", "CRC corruption rejected"],
             }
         }

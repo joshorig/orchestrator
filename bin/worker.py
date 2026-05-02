@@ -1681,6 +1681,22 @@ def _planner_project_policy_error(contract, project_name):
                 "preferred": list(policy.get("preferred_crc") or []),
             },
         }
+    preferred_crc = policy.get("preferred_crc") or ()
+    if preferred_crc and "crc" in contract_text.lower():
+        lowered = contract_text.lower()
+        missing = [str(item) for item in preferred_crc if str(item).lower() not in lowered]
+        if missing:
+            return {
+                "code": "planner_contract_incomplete",
+                "summary": "contract omits project-preferred CRC primitive",
+                "detail": "planning_contract requires CRC work to name preferred primitives: " + ", ".join(missing),
+                "metadata": {
+                    "category": "project_policy_violation",
+                    "policy_key": "preferred_crc",
+                    "required": list(preferred_crc),
+                    "missing": missing,
+                },
+            }
     return None
 
 
