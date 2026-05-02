@@ -2538,7 +2538,17 @@ def _record_token_savior_event(status, *, task_id=None, project_name=None, role=
                 "tool_counts": dict(native_stats.get("tool_counts") or {}),
                 "latest_session": dict(native_stats.get("latest_session") or {}),
             }
+    event_payload = {
+        "ts": o.now_iso(),
+        "role": "skills",
+        "event": "token_savior_checked",
+        "task_id": task_id,
+        "feature_id": None,
+        "details": details,
+    }
     o.append_event("skills", "token_savior_checked", task_id=task_id, details=details)
+    if hasattr(o, "append_token_savior_event"):
+        o.append_token_savior_event(event_payload)
     o.append_metric(
         "token_savior.context_checked",
         1,

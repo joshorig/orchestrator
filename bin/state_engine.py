@@ -488,6 +488,45 @@ class StateEngine:
                 ),
             )
 
+    def record_token_savior_event(self, row: dict[str, Any], *, conn: sqlite3.Connection | None = None) -> None:
+        conn = conn or self.connect()
+        details = row.get("details") or {}
+        native = details.get("native_stats") or {}
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO token_savior_events (
+                    ts, ts_epoch, task_id, feature_id, project, role, status,
+                    query_present, sections_json, rows_found, context_chars,
+                    estimated_context_tokens, estimated_full_read_chars,
+                    estimated_tokens_saved, native_total_calls, native_tokens_used,
+                    native_tokens_naive, native_tokens_saved, payload_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row.get("ts") or "",
+                    _iso_to_epoch(row.get("ts")),
+                    row.get("task_id"),
+                    row.get("feature_id"),
+                    details.get("project"),
+                    details.get("role"),
+                    details.get("status") or "unknown",
+                    1 if details.get("query_present") else 0,
+                    json.dumps(list(details.get("sections") or []), sort_keys=True),
+                    int(details.get("rows_found") or 0),
+                    int(details.get("context_chars") or 0),
+                    int(details.get("estimated_context_tokens") or 0),
+                    int(details.get("estimated_full_read_chars") or 0),
+                    int(details.get("estimated_tokens_saved") or 0),
+                    int(native.get("total_calls") or 0),
+                    int(native.get("total_tokens_used") or 0),
+                    int(native.get("total_tokens_naive") or 0),
+                    int(native.get("total_tokens_saved") or 0),
+                    json.dumps(row, sort_keys=True),
+                ),
+            )
+
     def record_metric(self, row: dict[str, Any], *, conn: sqlite3.Connection | None = None) -> None:
         conn = conn or self.connect()
         with conn:

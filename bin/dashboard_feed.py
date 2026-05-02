@@ -38,6 +38,14 @@ def _conn():
     return engine, engine.connect()
 
 
+def _table_exists(conn, name):
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?",
+        (name,),
+    ).fetchone()
+    return bool(row)
+
+
 def _read_task_log(task_id, *, tail_lines=80, max_chars=12000):
     log_path = o.LOGS_DIR / f"{task_id}.log"
     if not log_path.exists():
@@ -827,46 +835,93 @@ def _memory_observations():
     token_savior_recent = []
     token_savior_tokens_saved = 0
     token_savior_native_tokens_saved = 0
-    for row in o.read_events(role="skills", limit=500):
-        event = row.get("event")
-        if event not in {"token_savior_used", "token_savior_checked"}:
-            continue
-        try:
-            row_dt = dt.datetime.fromisoformat(str(row.get("ts") or "").replace("Z", "+00:00"))
-        except Exception:
-            row_dt = None
-        if row_dt and row_dt.tzinfo is None:
-            row_dt = row_dt.replace(tzinfo=dt.timezone.utc)
-        if row_dt and row_dt < since_dt:
-            continue
-        details = row.get("details") or {}
-        project = str(details.get("project") or "unknown")
-        if event == "token_savior_used":
-            token_savior_by_project[project] += 1
-        if event == "token_savior_checked":
+
+    if _table_exists(conn, "token_savior_events"):
+        since_epoch = int(since_dt.timestamp())
+        ts_rows = conn.execute(
+            """
+            SELECT
+                ts, task_id, feature_id, project, role, status, sections_json,
+                rows_found, estimated_context_tokens, estimated_tokens_saved,
+                native_tokens_saved
+              FROM token_savior_events
+             WHERE ts_epoch >= ?
+             ORDER BY ts_epoch ASC, id ASC
+             LIMIT 500
+            """,
+            (since_epoch,),
+        ).fetchall()
+        for row in ts_rows:
+            project = str(row["project"] or "unknown")
             token_savior_checked_by_project[project] += 1
-            token_savior_statuses[str(details.get("status") or "unknown")] += 1
-            token_savior_tokens_saved += int(details.get("estimated_tokens_saved") or 0)
-            native = details.get("native_stats") or {}
+            if row["status"] == "used":
+                token_savior_by_project[project] += 1
+            token_savior_statuses[str(row["status"] or "unknown")] += 1
+            token_savior_tokens_saved += int(row["estimated_tokens_saved"] or 0)
             token_savior_native_tokens_saved = max(
                 token_savior_native_tokens_saved,
-                int(native.get("total_tokens_saved") or 0),
+                int(row["native_tokens_saved"] or 0),
             )
-        for section in details.get("sections") or []:
-            token_savior_sections[str(section)] += 1
-        token_savior_recent.append(
-            {
-                "ts": row.get("ts"),
-                "project": project,
-                "task_id": row.get("task_id"),
-                "role": details.get("role"),
-                "status": details.get("status"),
-                "sections": list(details.get("sections") or []),
-                "rows_found": details.get("rows_found"),
-                "estimated_context_tokens": details.get("estimated_context_tokens"),
-                "estimated_tokens_saved": details.get("estimated_tokens_saved"),
-            }
-        )
+            try:
+                sections = json.loads(row["sections_json"] or "[]")
+            except Exception:
+                sections = []
+            for section in sections:
+                token_savior_sections[str(section)] += 1
+            token_savior_recent.append(
+                {
+                    "ts": row["ts"],
+                    "project": project,
+                    "task_id": row["task_id"],
+                    "role": row["role"],
+                    "status": row["status"],
+                    "sections": list(sections),
+                    "rows_found": row["rows_found"],
+                    "estimated_context_tokens": row["estimated_context_tokens"],
+                    "estimated_tokens_saved": row["estimated_tokens_saved"],
+                }
+            )
+    else:
+        for row in o.read_events(role="skills", limit=500):
+            event = row.get("event")
+            if event not in {"token_savior_used", "token_savior_checked"}:
+                continue
+            try:
+                row_dt = dt.datetime.fromisoformat(str(row.get("ts") or "").replace("Z", "+00:00"))
+            except Exception:
+                row_dt = None
+            if row_dt and row_dt.tzinfo is None:
+                row_dt = row_dt.replace(tzinfo=dt.timezone.utc)
+            if row_dt and row_dt < since_dt:
+                continue
+            details = row.get("details") or {}
+            project = str(details.get("project") or "unknown")
+            if event == "token_savior_used":
+                token_savior_by_project[project] += 1
+            if event == "token_savior_checked":
+                token_savior_checked_by_project[project] += 1
+                token_savior_statuses[str(details.get("status") or "unknown")] += 1
+                token_savior_tokens_saved += int(details.get("estimated_tokens_saved") or 0)
+                native = details.get("native_stats") or {}
+                token_savior_native_tokens_saved = max(
+                    token_savior_native_tokens_saved,
+                    int(native.get("total_tokens_saved") or 0),
+                )
+            for section in details.get("sections") or []:
+                token_savior_sections[str(section)] += 1
+            token_savior_recent.append(
+                {
+                    "ts": row.get("ts"),
+                    "project": project,
+                    "task_id": row.get("task_id"),
+                    "role": details.get("role"),
+                    "status": details.get("status"),
+                    "sections": list(details.get("sections") or []),
+                    "rows_found": details.get("rows_found"),
+                    "estimated_context_tokens": details.get("estimated_context_tokens"),
+                    "estimated_tokens_saved": details.get("estimated_tokens_saved"),
+                }
+            )
     return {
         "total_count": total,
         "by_project": [

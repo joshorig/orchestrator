@@ -1,0 +1,22 @@
+{
+  "story": "planner_attempt_exhausted_replans_without_stale_child",
+  "new_planner_enqueued": true,
+  "new_planner_role": "planner",
+  "new_planner_mode": "planner-refine",
+  "origin_task_id": "task-plan-exhausted",
+  "context_has_attempt_history": true,
+  "context_mentions_attempt_cap": true,
+  "child_contains_new_planner": true,
+  "workflow_attempt_recorded": true,
+  "snapshots": [
+    {
+      "label": "planner-exhausted",
+      "kind": "planner_attempts_exhausted",
+      "task_id": "task-plan-exhausted",
+      "task_state": "abandoned",
+      "blocker_code": "attempt_exhausted",
+      "action": "replan_feature_with_attempt_history_summary",
+      "policy": "planner_attempt_exhausted_replan_from_scratch"
+    }
+  ]
+}

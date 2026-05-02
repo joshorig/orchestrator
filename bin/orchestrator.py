@@ -696,6 +696,13 @@ WORKFLOW_REPAIR_POLICY = (
         "diagnosis": "attempt cap hit; replanning feature with attempt-history summary as input",
     },
     {
+        "name": "planner_attempt_exhausted_replan_from_scratch",
+        "kind": "planner_attempts_exhausted",
+        "blocker_code": "attempt_exhausted",
+        "action": "replan_feature_with_attempt_history_summary",
+        "diagnosis": "planner attempt cap hit; starting a fresh planner lane with attempt-history summary as input",
+    },
+    {
         "name": "environment_bypass_budget_transient_cooldown",
         "blocker_code": "environment_bypass_budget_exceeded_transient",
         "action": "pause_project_for_cooldown_then_retry",
@@ -1913,6 +1920,15 @@ def _mirror_event_row(row, *, cfg=None):
     engine = get_state_engine(cfg=cfg)
     engine.initialize()
     engine.record_event(row)
+    return True
+
+
+def _mirror_token_savior_event_row(row, *, cfg=None):
+    if not _state_engine_write_enabled(cfg=cfg):
+        return False
+    engine = get_state_engine(cfg=cfg)
+    engine.initialize()
+    engine.record_token_savior_event(row)
     return True
 
 
@@ -3348,6 +3364,10 @@ def append_event(role, event, *, task_id=None, feature_id=None, details=None):
         with EVENTS_LOG.open("a") as f:
             f.write(json.dumps(payload, sort_keys=True) + "\n")
     _mirror_event_row(payload)
+
+
+def append_token_savior_event(payload):
+    return _mirror_token_savior_event_row(payload)
 
 
 def _read_project_hard_stops():
@@ -12494,6 +12514,35 @@ def _workflow_issue_from_summary(feature, workflow, config):
                     "frontier_task": frontier_task,
                     "frontier_state": frontier_state,
                 }
+
+    if (
+        feature_status == "open"
+        and planner.get("task_id")
+        and planner.get("state") == "abandoned"
+        and not workflow.get("has_live_work")
+    ):
+        found_planner = find_task(planner["task_id"])
+        if found_planner:
+            planner_state, planner_task = found_planner
+            planner_blocker = task_blocker(planner_task)
+            if (planner_blocker or {}).get("code") == "attempt_exhausted":
+                issue = {
+                    "feature_id": feature_id,
+                    "project": project["name"],
+                    "summary": feature.get("summary") or feature_id,
+                    "issue_key": f"planner-exhausted-replan:{planner_task['task_id']}",
+                    "kind": "planner_attempts_exhausted",
+                    "task_id": planner_task["task_id"],
+                    "task_state": planner_state,
+                    "blocker": planner_blocker,
+                    "diagnosis": (
+                        "latest planner exhausted its bounded attempts and no live work remains; "
+                        "start a fresh planner lane with the attempt history and terminal blocker as context"
+                    ),
+                    "workflow": workflow,
+                    "task": planner_task,
+                }
+                return _issue_with_policy(issue, planner_task, project)
 
     if feature_status == "open":
         if not feature.get("child_task_ids"):

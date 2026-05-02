@@ -5782,6 +5782,63 @@ def _run_workflow_e2e_story(repo_root, scenario):
                     "snapshots": snapshots,
                 }
 
+            elif story == "planner_attempt_exhausted_replans_without_stale_child":
+                exhausted_planner = add_task(
+                    "task-plan-exhausted",
+                    "abandoned",
+                    role="planner",
+                    engine="claude",
+                    source="planner-refine-for:task-old",
+                    blocker=orchestrator.make_blocker(
+                        "attempt_exhausted",
+                        summary="task attempt limit exhausted",
+                        detail="planner validation retry: lifecycle tests missing (attempt 5 >= max 5)",
+                        source="planner-validation",
+                        retryable=False,
+                        metadata={"attempt": 5, "max_attempts": 5},
+                    ),
+                    braid_template="lvc-implement-operator",
+                    engine_args={
+                        "mode": "planner-refine",
+                        "planner_refine": {
+                            "context": "previous planner exhausted after validator findings",
+                            "origin_task_id": "task-old",
+                        },
+                    },
+                )
+                exhausted_planner["attempt"] = 5
+                exhausted_planner["attempt_history"] = [
+                    {
+                        "attempt": 4,
+                        "from_state": "blocked",
+                        "retry_reason": "planner validation retry: lifecycle tests missing",
+                        "retry_source": "planner-validation",
+                    }
+                ]
+                orchestrator.write_json_atomic(orchestrator.task_path("task-plan-exhausted", "abandoned"), exhausted_planner)
+                orchestrator.update_feature("feature-e2e", lambda f: f.update({"planner_task_id": exhausted_planner["task_id"]}))
+                snapshots.append(issue_snapshot("planner-exhausted"))
+                orchestrator.tick_workflow_check()
+                new_planners = [
+                    t for t in orchestrator.iter_tasks(states=("queued",), role="planner")
+                    if t.get("task_id") not in {"task-plan", "task-plan-exhausted"}
+                ]
+                new_planner = new_planners[0] if new_planners else {}
+                planner_refine = ((new_planner.get("engine_args") or {}).get("planner_refine") or {})
+                feature_after = read_feature()
+                return {
+                    "story": story,
+                    "new_planner_enqueued": bool(new_planner),
+                    "new_planner_role": new_planner.get("role"),
+                    "new_planner_mode": (new_planner.get("engine_args") or {}).get("mode"),
+                    "origin_task_id": planner_refine.get("origin_task_id"),
+                    "context_has_attempt_history": "[ATTEMPT HISTORY]" in str(planner_refine.get("context") or ""),
+                    "context_mentions_attempt_cap": "attempt cap" in str(planner_refine.get("context") or ""),
+                    "child_contains_new_planner": new_planner.get("task_id") in (feature_after.get("child_task_ids") or []),
+                    "workflow_attempt_recorded": bool(((feature_after.get("workflow_check") or {}).get("attempts") or {})),
+                    "snapshots": snapshots,
+                }
+
             elif story == "reviewer_protocol_error_recovers":
                 blocker = orchestrator.make_blocker(
                     "review_gate_protocol_error",
@@ -9087,14 +9144,17 @@ def _run_token_savior_code_search_telemetry(repo_root, scenario):
             "code_import_error": "",
         }
         events = []
+        token_events = []
         metrics = []
         old = {
             "_load_token_savior_modules": worker._load_token_savior_modules,
             "append_event": orchestrator.append_event,
+            "append_token_savior_event": orchestrator.append_token_savior_event,
             "append_metric": orchestrator.append_metric,
         }
         worker._load_token_savior_modules = lambda: (modules, "ok")
         orchestrator.append_event = lambda *args, **kwargs: events.append({"args": args, "kwargs": kwargs})
+        orchestrator.append_token_savior_event = lambda payload: token_events.append(payload) or True
         orchestrator.append_metric = lambda *args, **kwargs: metrics.append({"args": args, "kwargs": kwargs}) or {}
         try:
             ctx = worker._token_savior_context(
@@ -9106,6 +9166,7 @@ def _run_token_savior_code_search_telemetry(repo_root, scenario):
             )
             events.clear()
             metrics.clear()
+            token_events.clear()
             memory_ctx = worker.read_memory_context(
                 "demo",
                 str(root),
@@ -9116,6 +9177,7 @@ def _run_token_savior_code_search_telemetry(repo_root, scenario):
         finally:
             worker._load_token_savior_modules = old["_load_token_savior_modules"]
             orchestrator.append_event = old["append_event"]
+            orchestrator.append_token_savior_event = old["append_token_savior_event"]
             orchestrator.append_metric = old["append_metric"]
         checked_row = [
             row for row in events
@@ -9134,6 +9196,8 @@ def _run_token_savior_code_search_telemetry(repo_root, scenario):
             "checked_rows_found": checked.get("rows_found"),
             "checked_sections": checked.get("sections"),
             "used_sections": used.get("sections"),
+            "structured_event_count": len(token_events),
+            "structured_event_status": (token_events[-1].get("details") or {}).get("status") if token_events else None,
             "metric_names": [row["args"][0] for row in metrics],
         }
     finally:

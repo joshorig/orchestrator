@@ -12,6 +12,8 @@
     "token_savior.context_tokens_injected",
     "token_savior.context_used"
   ],
+  "structured_event_count": 1,
+  "structured_event_status": "used",
   "used_sections": [
     "code_search"
   ]
