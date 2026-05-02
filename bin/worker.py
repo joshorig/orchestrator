@@ -2260,11 +2260,18 @@ def _planner_prior_errors_block(task):
         return ""
     messages = []
     blocker = o.task_blocker(task or {})
-    if blocker and blocker.get("code") in {"planner_slice_format_error", "model_output_invalid"}:
+    planner_retry_codes = {
+        "planner_contract_drift",
+        "planner_contract_incomplete",
+        "planner_refine_scope_drift",
+        "planner_slice_format_error",
+        "model_output_invalid",
+    }
+    if blocker and blocker.get("code") in planner_retry_codes:
         messages.append((blocker.get("detail") or blocker.get("summary") or "").strip())
     for entry in reversed(list((task or {}).get("attempt_history") or [])):
         snap = dict((entry.get("snapshot") or {}).get("blocker") or {})
-        if snap.get("code") in {"planner_slice_format_error", "model_output_invalid"}:
+        if snap.get("code") in planner_retry_codes:
             msg = (snap.get("detail") or snap.get("summary") or "").strip()
             if msg:
                 messages.append(msg)
@@ -2278,6 +2285,44 @@ def _planner_prior_errors_block(task):
         return ""
     body = "\n".join(f"- {msg[:240]}" for msg in seen[:3])
     return f"[PRIOR_ERRORS]\n{body}\n\n"
+
+
+def _retry_planner_validation_failure(task_id, from_state, *, code, summary, detail, metadata=None):
+    """Requeue planner validation failures immediately with explicit retry context."""
+    finding = f"{code}: {summary}"
+    if detail:
+        finding = f"{finding} — {detail}"
+
+    def mut_retry(t):
+        engine_args = dict(t.get("engine_args") or {})
+        retry_ctx = dict(engine_args.get("retry_context") or {})
+        retry_ctx["kind"] = "planner_validation_failure"
+        retry_ctx["reason"] = summary
+        retry_ctx["findings"] = [finding]
+        if metadata:
+            retry_ctx["metadata"] = dict(metadata)
+        engine_args["retry_context"] = retry_ctx
+        planner_refine = dict(engine_args.get("planner_refine") or {})
+        context = str(planner_refine.get("context") or "")
+        failure_block = (
+            "[PLANNER VALIDATION FAILURE]\n"
+            f"code: {code}\n"
+            f"summary: {summary}\n"
+            f"detail: {detail or '-'}\n"
+            "Required correction: regenerate the plan so it satisfies the design-contract validator. "
+            "Do not leave this as a blocked planner task.\n"
+        )
+        planner_refine["context"] = (context + "\n\n" + failure_block).strip()[:8000]
+        engine_args["planner_refine"] = planner_refine
+        t["engine_args"] = engine_args
+
+    o.reset_task_for_retry(
+        task_id,
+        from_state,
+        reason=f"planner validation retry: {summary}",
+        source="planner-validation",
+        mutator=mut_retry,
+    )
 
 
 def _planner_context_roadmap_id(task):
@@ -5998,6 +6043,18 @@ def run_claude_planner(task, cfg, timeout, log_path):
                     },
                 )
             o.move_task(task_id, "running", "blocked", reason="planner refine scope drift", mutator=mut_block)
+            _retry_planner_validation_failure(
+                task_id,
+                "blocked",
+                code="planner_refine_scope_drift",
+                summary="planner refine shrank slice topology without justification",
+                detail=drift["detail"],
+                metadata={
+                    "origin_slice_count": drift["origin_slice_count"],
+                    "refined_slice_count": drift["refined_slice_count"],
+                    "merged_count": drift["merged_count"],
+                },
+            )
             return
     origin_contract = (planner_refine.get("origin_design_contract") or {}) if planner_mode == "planner-refine" else {}
     design_contract, contract_error = _planner_contract_validation(
@@ -6021,6 +6078,13 @@ def run_claude_planner(task, cfg, timeout, log_path):
                 retryable=True,
             )
         o.move_task(task_id, "running", "blocked", reason=contract_error["summary"], mutator=mut_contract_block)
+        _retry_planner_validation_failure(
+            task_id,
+            "blocked",
+            code=contract_error["code"],
+            summary=contract_error["summary"],
+            detail=contract_error["detail"],
+        )
         return
     design_contract_hash = _stable_hash(design_contract) if design_contract else None
     topology_generation = plan.get("topology_generation") or f"{task_id}:{design_contract_hash or 'no-contract'}"

@@ -394,6 +394,27 @@ WORKFLOW_REPAIR_POLICY = (
         "diagnosis": "planner emitted slices with invalid structure; retry with the recorded prior errors",
     },
     {
+        "name": "planner_contract_drift_retry",
+        "kind": "planner_blocked",
+        "blocker_code": "planner_contract_drift",
+        "action": "retry_planner_with_blocker_context",
+        "diagnosis": "planner changed the design contract without supersedes rationale; retry immediately with the validator finding in context",
+    },
+    {
+        "name": "planner_contract_incomplete_retry",
+        "kind": "planner_blocked",
+        "blocker_code": "planner_contract_incomplete",
+        "action": "retry_planner_with_blocker_context",
+        "diagnosis": "planner output failed the design-contract validator; retry immediately with the validator finding in context",
+    },
+    {
+        "name": "planner_scope_drift_retry",
+        "kind": "planner_blocked",
+        "blocker_code": "planner_refine_scope_drift",
+        "action": "retry_planner_with_blocker_context",
+        "diagnosis": "planner refine shrank topology without required justification; retry immediately with the validator finding in context",
+    },
+    {
         "name": "invalid_braid_refine_retry",
         "kind": "frontier_task_blocked",
         "blocker_code": "invalid_braid_refine",
@@ -11605,6 +11626,44 @@ def _workflow_check_retry_task_with_context(task, state, reason, *, kind, findin
     return bool(found and found[0] in ("queued", "claimed", "running"))
 
 
+def _workflow_check_retry_planner_with_blocker_context(task, state, reason):
+    blocker = task_blocker(task)
+    finding = f"{(blocker or {}).get('code') or 'planner_blocked'}: {reason}"
+    detail = (blocker or {}).get("detail")
+    if detail:
+        finding = f"{finding} — {detail}"
+
+    def mut(t):
+        engine_args = dict(t.get("engine_args") or {})
+        retry_ctx = dict(engine_args.get("retry_context") or {})
+        retry_ctx["kind"] = "planner_validation_failure"
+        retry_ctx["reason"] = reason
+        retry_ctx["findings"] = [finding]
+        engine_args["retry_context"] = retry_ctx
+        planner_refine = dict(engine_args.get("planner_refine") or {})
+        context = str(planner_refine.get("context") or "")
+        failure_block = (
+            "[PLANNER VALIDATION FAILURE]\n"
+            f"code: {(blocker or {}).get('code') or '-'}\n"
+            f"summary: {(blocker or {}).get('summary') or reason}\n"
+            f"detail: {detail or '-'}\n"
+            "Required correction: regenerate a validator-compliant plan; do not wait for operator intervention.\n"
+        )
+        planner_refine["context"] = (context + "\n\n" + failure_block).strip()[:8000]
+        engine_args["planner_refine"] = planner_refine
+        t["engine_args"] = engine_args
+
+    reset_task_for_retry(
+        task["task_id"],
+        state,
+        reason=f"workflow-check planner retry: {reason}",
+        source="workflow-check",
+        mutator=mut,
+    )
+    found = find_task(task["task_id"])
+    return bool(found and found[0] in ("queued", "claimed", "running"))
+
+
 def _workflow_check_enqueue_feature_replan(feature, issue, *, reason, mode, context):
     project_name = issue.get("project") or feature.get("project")
     source = f"{mode}:{feature['feature_id']}:{issue.get('issue_key') or 'issue'}"
@@ -12325,6 +12384,40 @@ def _workflow_issue_from_summary(feature, workflow, config):
     canary = workflow.get("canary") or {}
     canary_cfg = config.get("synthetic_canary") or {}
     canary_stale_sec = int(float(canary_cfg.get("max_frontier_age_hours", 2) or 2) * 3600)
+    planner_blocker_codes = {
+        "planner_contract_drift",
+        "planner_contract_incomplete",
+        "planner_refine_scope_drift",
+    }
+
+    if feature_status == "open" and planner.get("task_id") and planner.get("state") in ("failed", "blocked"):
+        found = find_task(planner["task_id"])
+        if found:
+            state, task = found
+            blocker = task_blocker(task)
+            if (blocker or {}).get("code") in planner_blocker_codes:
+                action, diagnosis, policy = _workflow_policy_decision(
+                    {"kind": "planner_blocked", "task_state": state, "blocker": blocker},
+                    task,
+                    project,
+                )
+                return {
+                    "feature_id": feature_id,
+                    "project": project["name"],
+                    "summary": feature.get("summary") or feature_id,
+                    "issue_key": f"planner:{task['task_id']}:{state}:{(blocker or {}).get('code') or ''}",
+                    "kind": "planner_blocked",
+                    "task_id": task["task_id"],
+                    "task_state": state,
+                    "blocker": blocker,
+                    "diagnosis": diagnosis,
+                    "workflow": workflow,
+                    "action": action,
+                    "policy": policy,
+                    "task": task,
+                }
+    if feature_status == "open" and planner.get("task_id") and planner.get("state") in ("queued", "claimed", "running"):
+        return None
 
     if feature_status == "open":
         if not feature.get("child_task_ids"):
@@ -13021,6 +13114,13 @@ def tick_workflow_check():
                     reason=f"workflow-check: {issue['diagnosis'][:120]}",
                 )
                 outcome = "task requeued" if ok else "retry failed"
+            elif action == "retry_planner_with_blocker_context":
+                ok = _workflow_check_retry_planner_with_blocker_context(
+                    issue["task"],
+                    issue["task_state"],
+                    reason=issue["diagnosis"],
+                )
+                outcome = "planner requeued with blocker context" if ok else "planner retry failed"
             elif action == "replan_with_prior_false_claim_rebuttal":
                 blocker = issue.get("blocker") or {}
                 rebuttal = (

@@ -1,0 +1,28 @@
+{
+  "story": "planner_contract_block_retries_fast",
+  "planner_state": "queued",
+  "attempt": 2,
+  "retry_kind": "planner_validation_failure",
+  "retry_finding_has_drift": true,
+  "context_has_validation_failure": true,
+  "snapshots": [
+    {
+      "label": "planner-contract-blocked",
+      "kind": "planner_blocked",
+      "task_id": "task-plan-contract",
+      "task_state": "blocked",
+      "blocker_code": "planner_contract_drift",
+      "action": "retry_planner_with_blocker_context",
+      "policy": "planner_contract_drift_retry"
+    },
+    {
+      "label": "planner-contract-requeued",
+      "kind": null,
+      "task_id": null,
+      "task_state": null,
+      "blocker_code": null,
+      "action": null,
+      "policy": null
+    }
+  ]
+}

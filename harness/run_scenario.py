@@ -5072,6 +5072,7 @@ def _run_planner_refine_scope_drift_blocks(repo_root, scenario):
         "now_iso": worker.o.now_iso,
         "iter_tasks": worker.o.iter_tasks,
         "enqueue_task": worker.o.enqueue_task,
+        "reset_task_for_retry": worker.o.reset_task_for_retry,
         "read_memory_context": worker.read_memory_context,
         "_run_bounded": worker._run_bounded,
         "_record_task_costs_from_text": worker._record_task_costs_from_text,
@@ -5126,6 +5127,13 @@ def _run_planner_refine_scope_drift_blocks(repo_root, scenario):
             moves.append({"from": from_state, "to": to_state, "reason": reason, "task": body})
 
         worker.o.move_task = fake_move
+        def fake_reset(task_id, from_state, *, reason, source=None, mutator=None):
+            body = {"task_id": task_id, "engine_args": {}}
+            if mutator:
+                mutator(body)
+            moves.append({"from": from_state, "to": "queued", "reason": reason, "source": source, "task": body})
+            return body
+        worker.o.reset_task_for_retry = fake_reset
         with tempfile.TemporaryDirectory() as tmp:
             worker.run_claude_planner(task, {"council": {"planner_parallel_agents": False}}, 30, pathlib.Path(tmp) / "planner.log")
     finally:
@@ -5140,6 +5148,7 @@ def _run_planner_refine_scope_drift_blocks(repo_root, scenario):
         "blocked": blocked.get("to") == "blocked",
         "blocker_code": blocker.get("code"),
         "retryable": blocker.get("retryable"),
+        "requeued": any(move.get("to") == "queued" for move in moves),
         "enqueued_count": len(enqueued),
         "origin_slice_count": (((blocked.get("task") or {}).get("planner_refine_scope_drift") or {}).get("origin_slice_count")),
         "refined_slice_count": (((blocked.get("task") or {}).get("planner_refine_scope_drift") or {}).get("refined_slice_count")),
@@ -5601,6 +5610,63 @@ def _run_workflow_e2e_story(repo_root, scenario):
                 move("task-1", "queued", "running", "claimed")
                 move("task-1", "running", "done", "implemented")
                 set_feature_status("done")
+
+            elif story == "planner_contract_block_retries_fast":
+                stale_child = add_task(
+                    "task-stale-child",
+                    "blocked",
+                    summary="stale child from previous contract",
+                    blocker=orchestrator.make_blocker(
+                        "stale_design_contract",
+                        summary="review target used stale design contract",
+                        detail="target=old active=new",
+                        source="worker",
+                        retryable=True,
+                    ),
+                )
+                stale_child["created_at"] = "2026-04-25T06:01:00"
+                orchestrator.write_json_atomic(orchestrator.task_path("task-stale-child", "blocked"), stale_child)
+                planner = add_task(
+                    "task-plan-contract",
+                    "blocked",
+                    role="planner",
+                    engine="claude",
+                    source="planner-refine-for:task-stale-child",
+                    blocker=orchestrator.make_blocker(
+                        "planner_contract_drift",
+                        summary="planner contract changed without supersedes rationale",
+                        detail="changed fields: public_api, ownership_boundaries",
+                        source="worker",
+                        retryable=True,
+                    ),
+                    braid_template="lvc-implement-operator",
+                    engine_args={
+                        "mode": "planner-refine",
+                        "planner_refine": {
+                            "context": "review feedback exhausted",
+                            "origin_task_id": "task-stale-child",
+                        },
+                    },
+                )
+                planner["created_at"] = "2026-04-25T06:02:00"
+                orchestrator.write_json_atomic(orchestrator.task_path("task-plan-contract", "blocked"), planner)
+                orchestrator.append_feature_child("feature-e2e", "task-stale-child")
+                snapshots.append(issue_snapshot("planner-contract-blocked"))
+                orchestrator.tick_workflow_check()
+                found = orchestrator.find_task("task-plan-contract")
+                retried = found[1] if found else {}
+                retry_ctx = ((retried.get("engine_args") or {}).get("retry_context") or {})
+                planner_refine = ((retried.get("engine_args") or {}).get("planner_refine") or {})
+                snapshots.append(issue_snapshot("planner-contract-requeued"))
+                return {
+                    "story": story,
+                    "planner_state": found[0] if found else None,
+                    "attempt": retried.get("attempt"),
+                    "retry_kind": retry_ctx.get("kind"),
+                    "retry_finding_has_drift": any("planner_contract_drift" in str(item) for item in retry_ctx.get("findings") or []),
+                    "context_has_validation_failure": "[PLANNER VALIDATION FAILURE]" in str(planner_refine.get("context") or ""),
+                    "snapshots": snapshots,
+                }
 
             elif story == "reviewer_protocol_error_recovers":
                 blocker = orchestrator.make_blocker(
