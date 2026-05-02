@@ -500,6 +500,9 @@ def _skills():
     recent_events = []
     usage_counter = Counter()
     token_savior_count = 0
+    token_savior_checked = 0
+    token_savior_statuses = Counter()
+    token_savior_tokens_saved = 0
     skill_tasks = defaultdict(set)
     last_used_at = {}
     since_dt = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=7)
@@ -539,6 +542,21 @@ def _skills():
                     "task_id": row.get("task_id"),
                     "project": details.get("project"),
                     "role": details.get("role"),
+                    "sections": list(details.get("sections") or []),
+                }
+            )
+        elif event == "token_savior_checked":
+            token_savior_checked += 1
+            token_savior_statuses[str(details.get("status") or "unknown")] += 1
+            token_savior_tokens_saved += int(details.get("estimated_tokens_saved") or 0)
+            recent_events.append(
+                {
+                    "ts": row.get("ts"),
+                    "event": event,
+                    "task_id": row.get("task_id"),
+                    "project": details.get("project"),
+                    "role": details.get("role"),
+                    "status": details.get("status"),
                     "sections": list(details.get("sections") or []),
                 }
             )
@@ -615,6 +633,9 @@ def _skills():
         "latest_scan_at": (latest_scan or {}).get("scanned_at"),
         "latest_scan_counts": scan_counts,
         "token_savior_usage_7d": token_savior_count,
+        "token_savior_checked_7d": token_savior_checked,
+        "token_savior_status_7d": dict(token_savior_statuses),
+        "token_savior_estimated_tokens_saved_7d": token_savior_tokens_saved,
         "recent_usage": recent_events[-12:],
         "skills": rows,
     }
@@ -800,10 +821,15 @@ def _memory_observations():
     total = engine.memory_count()
     since_dt = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=7)
     token_savior_by_project = Counter()
+    token_savior_checked_by_project = Counter()
+    token_savior_statuses = Counter()
     token_savior_sections = Counter()
     token_savior_recent = []
+    token_savior_tokens_saved = 0
+    token_savior_native_tokens_saved = 0
     for row in o.read_events(role="skills", limit=500):
-        if row.get("event") != "token_savior_used":
+        event = row.get("event")
+        if event not in {"token_savior_used", "token_savior_checked"}:
             continue
         try:
             row_dt = dt.datetime.fromisoformat(str(row.get("ts") or "").replace("Z", "+00:00"))
@@ -815,7 +841,17 @@ def _memory_observations():
             continue
         details = row.get("details") or {}
         project = str(details.get("project") or "unknown")
-        token_savior_by_project[project] += 1
+        if event == "token_savior_used":
+            token_savior_by_project[project] += 1
+        if event == "token_savior_checked":
+            token_savior_checked_by_project[project] += 1
+            token_savior_statuses[str(details.get("status") or "unknown")] += 1
+            token_savior_tokens_saved += int(details.get("estimated_tokens_saved") or 0)
+            native = details.get("native_stats") or {}
+            token_savior_native_tokens_saved = max(
+                token_savior_native_tokens_saved,
+                int(native.get("total_tokens_saved") or 0),
+            )
         for section in details.get("sections") or []:
             token_savior_sections[str(section)] += 1
         token_savior_recent.append(
@@ -824,7 +860,11 @@ def _memory_observations():
                 "project": project,
                 "task_id": row.get("task_id"),
                 "role": details.get("role"),
+                "status": details.get("status"),
                 "sections": list(details.get("sections") or []),
+                "rows_found": details.get("rows_found"),
+                "estimated_context_tokens": details.get("estimated_context_tokens"),
+                "estimated_tokens_saved": details.get("estimated_tokens_saved"),
             }
         )
     return {
@@ -839,9 +879,17 @@ def _memory_observations():
         ],
         "token_savior": {
             "usage_7d": sum(token_savior_by_project.values()),
+            "checked_7d": sum(token_savior_checked_by_project.values()),
+            "status_7d": dict(token_savior_statuses),
+            "estimated_tokens_saved_7d": token_savior_tokens_saved,
+            "native_tokens_saved": token_savior_native_tokens_saved,
             "by_project": [
                 {"project": project, "count": count}
                 for project, count in token_savior_by_project.most_common(6)
+            ],
+            "checked_by_project": [
+                {"project": project, "count": count}
+                for project, count in token_savior_checked_by_project.most_common(6)
             ],
             "top_sections": [
                 {"section": section, "count": count}

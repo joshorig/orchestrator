@@ -2002,21 +2002,50 @@ def _council_agent_dir():
     return pathlib.Path(root) / "agents"
 
 
-def _load_token_savior_memory():
+def _load_token_savior_modules():
     root = (_context_sources().get("token_savior_root") or "").strip()
     if not root:
-        return None
+        return None, "not_configured"
     src = pathlib.Path(root) / "src"
     if not src.exists():
-        return None
+        return None, "missing_src"
     src_str = str(src)
     if src_str not in sys.path:
         sys.path.insert(0, src_str)
     try:
         from token_savior import memory_db  # type: ignore
     except Exception:
+        return None, "import_failed"
+    ProjectIndexer = None
+    create_project_query_functions = None
+    code_import_error = ""
+    try:
+        from token_savior.project_indexer import ProjectIndexer  # type: ignore
+        from token_savior.query_api import create_project_query_functions  # type: ignore
+    except Exception as exc:
+        code_import_error = f"{type(exc).__name__}: {exc}"
+    try:
+        from token_savior import server_state  # type: ignore
+        from token_savior import server_runtime  # type: ignore
+    except Exception:
+        server_state = None
+        server_runtime = None
+    return {
+        "memory_db": memory_db,
+        "ProjectIndexer": ProjectIndexer,
+        "create_project_query_functions": create_project_query_functions,
+        "server_state": server_state,
+        "server_runtime": server_runtime,
+        "code_available": ProjectIndexer is not None and create_project_query_functions is not None,
+        "code_import_error": code_import_error,
+    }, "ok"
+
+
+def _load_token_savior_memory():
+    modules, status = _load_token_savior_modules()
+    if status != "ok" or not modules:
         return None
-    return memory_db
+    return modules["memory_db"]
 
 
 def _read_text_if_exists(path, *, tail_lines=None, max_chars=None):
@@ -2180,49 +2209,318 @@ def _format_token_savior_rows(rows, *, limit=5):
     return "\n".join(out)
 
 
+_TOKEN_SAVIOR_STOPWORDS = {
+    "about", "after", "again", "agent", "agents", "also", "before", "block", "blocked",
+    "change", "changes", "code", "context", "create", "does", "done", "failed", "feature",
+    "files", "fix", "from", "have", "implement", "implementation", "into", "issue", "make",
+    "missing", "needs", "plan", "planner", "project", "review", "should", "state", "task",
+    "test", "tests", "that", "their", "there", "this", "token", "using", "what", "when",
+    "where", "with", "workflow", "would",
+}
+
+
+def _approx_tokens(text):
+    return max(1, math.ceil(len(text or "") / 4)) if text else 0
+
+
+def _token_savior_query_terms(query, *, limit=6):
+    query = query or ""
+    terms = []
+    for raw in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", query):
+        if raw.lower() in _TOKEN_SAVIOR_STOPWORDS:
+            continue
+        if raw not in terms:
+            terms.append(raw)
+        if len(terms) >= limit:
+            break
+    return terms
+
+
+def _format_token_savior_code_hits(hits, *, limit=10):
+    out = []
+    for hit in hits[:limit]:
+        content = str(hit.get("content") or "").strip().replace("\n", " ")
+        if len(content) > 180:
+            content = content[:180] + "..."
+        out.append(
+            f"- {hit.get('file')}:{hit.get('line_number') or hit.get('line')} "
+            f"`{hit.get('term')}` - {content}".rstrip(" - ")
+        )
+    return "\n".join(out)
+
+
+def _token_savior_native_stats(modules, project_root):
+    runtime = modules.get("server_runtime") if modules else None
+    if runtime is None:
+        return {}
+    try:
+        stats_file = runtime._get_stats_file(str(project_root))
+        stats = runtime._load_cumulative_stats(stats_file)
+    except Exception:
+        return {}
+    history = list(stats.get("history") or [])
+    latest = history[-1] if history else {}
+    total_chars = int(stats.get("total_chars_returned") or 0)
+    total_naive = int(stats.get("total_naive_chars") or 0)
+    return {
+        "stats_file": stats_file,
+        "total_calls": int(stats.get("total_calls") or 0),
+        "total_chars_returned": total_chars,
+        "total_naive_chars": total_naive,
+        "total_tokens_used": total_chars // 4,
+        "total_tokens_naive": total_naive // 4,
+        "total_tokens_saved": max(0, (total_naive - total_chars) // 4),
+        "savings_pct": round((1 - total_chars / total_naive) * 100.0, 2) if total_naive > total_chars > 0 else 0.0,
+        "tool_counts": dict(stats.get("tool_counts") or {}),
+        "latest_session": {
+            "query_calls": int(latest.get("query_calls") or 0),
+            "tokens_used": int(latest.get("tokens_used") or 0),
+            "tokens_naive": int(latest.get("tokens_naive") or 0),
+            "savings_pct": float(latest.get("savings_pct") or 0.0),
+        } if latest else {},
+    }
+
+
+def _token_savior_project_qfns(modules, project_root):
+    state = modules.get("server_state") if modules else None
+    if state is not None:
+        state._slot_mgr.register_roots([str(project_root)])
+        slot, err = state._slot_mgr.resolve(str(project_root))
+        if err or slot is None:
+            raise RuntimeError(err or "token-savior slot unavailable")
+        state._slot_mgr.ensure(slot)
+        state._slot_mgr.maybe_update(slot)
+        if slot.query_fns is None:
+            raise RuntimeError("token-savior query functions unavailable")
+        return slot.query_fns, slot
+    indexer = modules["ProjectIndexer"](str(project_root))
+    index = indexer.index()
+    return modules["create_project_query_functions"](index), None
+
+
+def _token_savior_count_tool_call(modules, slot, tool_name, arguments, result):
+    state = modules.get("server_state") if modules else None
+    runtime = modules.get("server_runtime") if modules else None
+    if state is None or runtime is None or slot is None:
+        return
+    try:
+        state._tool_call_counts[tool_name] = state._tool_call_counts.get(tool_name, 0) + 1
+        runtime._count_and_wrap_result(slot, tool_name, arguments, result)
+    except Exception:
+        pass
+
+
+def _token_savior_code_context(modules, project_path, query):
+    terms = _token_savior_query_terms(query)
+    if not terms:
+        return "", [], {"terms": [], "rows": 0, "searched": False, "estimated_full_read_chars": 0, "native_stats": {}}
+    if not modules.get("code_available"):
+        return "", [], {
+            "terms": terms,
+            "rows": 0,
+            "searched": False,
+            "estimated_full_read_chars": 0,
+            "native_stats": {},
+            "error": modules.get("code_import_error") or "code_search_unavailable",
+        }
+    project_root = pathlib.Path(project_path).resolve()
+    qfns, slot = _token_savior_project_qfns(modules, project_root)
+    search = qfns.get("search_codebase")
+    if not search:
+        return "", [], {"terms": terms, "rows": 0, "searched": False, "estimated_full_read_chars": 0, "native_stats": _token_savior_native_stats(modules, project_root)}
+    hits = []
+    seen = set()
+    for term in terms:
+        args = {"pattern": re.escape(term), "max_results": 6}
+        results = search(**args) or []
+        _token_savior_count_tool_call(modules, slot, "search_codebase", args, results)
+        for hit in results:
+            if hit.get("error"):
+                continue
+            key = (hit.get("file"), hit.get("line_number"), hit.get("content"))
+            if key in seen:
+                continue
+            seen.add(key)
+            item = dict(hit)
+            item["term"] = term
+            hits.append(item)
+            if len(hits) >= 12:
+                break
+        if len(hits) >= 12:
+            break
+    if not hits:
+        return "", [], {"terms": terms, "rows": 0, "searched": True, "estimated_full_read_chars": 0, "native_stats": _token_savior_native_stats(modules, project_root)}
+    files = {str(hit.get("file") or "") for hit in hits if hit.get("file")}
+    estimated_full_read_chars = 0
+    for rel in files:
+        try:
+            estimated_full_read_chars += len((project_root / rel).read_text(errors="replace"))
+        except OSError:
+            pass
+    text = "### token-savior code search\n" + _format_token_savior_code_hits(hits, limit=12)
+    return text, ["code_search"], {
+        "terms": terms,
+        "rows": len(hits),
+        "searched": True,
+        "estimated_full_read_chars": estimated_full_read_chars,
+        "native_stats": _token_savior_native_stats(modules, project_root),
+    }
+
+
+def _record_token_savior_event(status, *, task_id=None, project_name=None, role=None, query=None, sections=None, rows_found=0, context_text="", errors=None, code_stats=None):
+    if not task_id:
+        return
+    context_chars = len(context_text or "")
+    estimated_full_read_chars = int((code_stats or {}).get("estimated_full_read_chars") or 0)
+    estimated_saved_tokens = max(0, _approx_tokens("x" * estimated_full_read_chars) - _approx_tokens(context_text))
+    details = {
+        "project": project_name,
+        "role": role,
+        "status": status,
+        "query_present": bool((query or "").strip()),
+        "sections": list(sections or []),
+        "rows_found": int(rows_found or 0),
+        "context_chars": context_chars,
+        "estimated_context_tokens": _approx_tokens(context_text),
+        "estimated_full_read_chars": estimated_full_read_chars,
+        "estimated_tokens_saved": estimated_saved_tokens,
+    }
+    if errors:
+        details["errors"] = list(errors)[:4]
+    if code_stats:
+        details["code_search"] = {
+            "terms": list(code_stats.get("terms") or [])[:8],
+            "rows": int(code_stats.get("rows") or 0),
+            "searched": bool(code_stats.get("searched")),
+        }
+        if code_stats.get("error"):
+            details["code_search"]["error"] = str(code_stats.get("error"))[:240]
+        native_stats = code_stats.get("native_stats") or {}
+        if native_stats:
+            details["native_stats"] = {
+                "total_calls": int(native_stats.get("total_calls") or 0),
+                "total_tokens_used": int(native_stats.get("total_tokens_used") or 0),
+                "total_tokens_naive": int(native_stats.get("total_tokens_naive") or 0),
+                "total_tokens_saved": int(native_stats.get("total_tokens_saved") or 0),
+                "savings_pct": float(native_stats.get("savings_pct") or 0.0),
+                "tool_counts": dict(native_stats.get("tool_counts") or {}),
+                "latest_session": dict(native_stats.get("latest_session") or {}),
+            }
+    o.append_event("skills", "token_savior_checked", task_id=task_id, details=details)
+    o.append_metric(
+        "token_savior.context_checked",
+        1,
+        metric_type="counter",
+        tags={"project": project_name or "", "role": role or "", "status": status},
+        source="worker",
+    )
+    if context_chars:
+        o.append_metric(
+            "token_savior.context_tokens_injected",
+            details["estimated_context_tokens"],
+            metric_type="counter",
+            tags={"project": project_name or "", "role": role or ""},
+            source="worker",
+        )
+    if estimated_saved_tokens:
+        o.append_metric(
+            "token_savior.estimated_tokens_saved",
+            estimated_saved_tokens,
+            metric_type="counter",
+            tags={"project": project_name or "", "role": role or ""},
+            source="worker",
+        )
+
+
 def _token_savior_context(project_name, project_path, *, role=None, query=None, task_id=None):
-    memory_db = _load_token_savior_memory()
-    if memory_db is None:
+    modules, load_status = _load_token_savior_modules()
+    if load_status != "ok" or not modules:
+        _record_token_savior_event(load_status, task_id=task_id, project_name=project_name, role=role, query=query)
         return ""
+    memory_db = modules["memory_db"]
     project_root = str(pathlib.Path(project_path).resolve())
     query = (query or "").strip()
     parts = []
     sections = []
+    rows_found = 0
+    errors = []
     try:
         recent = memory_db.get_recent_index(project_root, limit=6)
         if recent:
             parts.append("### token-savior recent\n" + _format_token_savior_rows(recent, limit=6))
             sections.append("recent")
-    except Exception:
-        pass
+            rows_found += len(recent)
+    except Exception as exc:
+        errors.append(f"recent:{type(exc).__name__}")
     if query:
         try:
             found = memory_db.observation_search(project_root, query, limit=6)
             if found:
                 parts.append("### token-savior search\n" + _format_token_savior_rows(found, limit=6))
                 sections.append("search")
-        except Exception:
-            pass
+                rows_found += len(found)
+        except Exception as exc:
+            errors.append(f"search:{type(exc).__name__}")
         try:
             reasoning = memory_db.reasoning_search(project_root, query, limit=3)
             if reasoning:
                 parts.append("### token-savior reasoning\n" + _format_token_savior_rows(reasoning, limit=3))
                 sections.append("reasoning")
-        except Exception:
-            pass
+                rows_found += len(reasoning)
+        except Exception as exc:
+            errors.append(f"reasoning:{type(exc).__name__}")
         try:
             sessions = memory_db.session_summary_search(project_root, query, limit=3)
             if sessions:
                 parts.append("### token-savior session summaries\n" + _format_token_savior_rows(sessions, limit=3))
                 sections.append("sessions")
-        except Exception:
-            pass
+                rows_found += len(sessions)
+        except Exception as exc:
+            errors.append(f"sessions:{type(exc).__name__}")
+    code_stats = {}
+    try:
+        code_text, code_sections, code_stats = _token_savior_code_context(modules, project_path, query)
+        if code_stats.get("error"):
+            errors.append(f"code_search:{code_stats.get('error')}")
+        if code_text:
+            parts.append(code_text)
+            sections.extend(code_sections)
+            rows_found += int(code_stats.get("rows") or 0)
+    except Exception as exc:
+        errors.append(f"code_search:{type(exc).__name__}")
+    context_text = "\n\n".join(parts)
+    status = "used" if parts else ("error" if errors else "empty")
+    _record_token_savior_event(
+        status,
+        task_id=task_id,
+        project_name=project_name,
+        role=role,
+        query=query,
+        sections=sections,
+        rows_found=rows_found,
+        context_text=context_text,
+        errors=errors,
+        code_stats=code_stats,
+    )
     if parts and task_id:
         o.append_event(
             "skills",
             "token_savior_used",
             task_id=task_id,
-            details={"project": project_name, "role": role, "query": query, "sections": sections},
+            details={
+                "project": project_name,
+                "role": role,
+                "query": query,
+                "sections": sections,
+                "rows_found": rows_found,
+                "context_chars": len(context_text),
+                "estimated_context_tokens": _approx_tokens(context_text),
+                "estimated_tokens_saved": max(
+                    0,
+                    _approx_tokens("x" * int((code_stats or {}).get("estimated_full_read_chars") or 0))
+                    - _approx_tokens(context_text),
+                ),
+            },
         )
         o.append_metric(
             "token_savior.context_used",
@@ -2231,7 +2529,7 @@ def _token_savior_context(project_name, project_path, *, role=None, query=None, 
             tags={"project": project_name or "", "role": role or "", "sections": ",".join(sections)},
             source="worker",
         )
-    return "\n\n".join(parts)
+    return context_text
 
 
 def _memory_cfg():

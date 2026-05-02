@@ -8920,6 +8920,103 @@ def _run_runtime_unknown_project_alias(repo_root, scenario):
     }
 
 
+def _run_token_savior_code_search_telemetry(repo_root, scenario):
+    orchestrator, worker = _load_repo_modules(repo_root)
+    root = pathlib.Path(tempfile.mkdtemp(prefix="orch-token-savior-"))
+    try:
+        (root / "src").mkdir(parents=True)
+        (root / "src" / "service.py").write_text(
+            "def needle_handler():\n    return 'needle-result'\n",
+            encoding="utf-8",
+        )
+
+        class FakeMemoryDb:
+            @staticmethod
+            def get_recent_index(project_root, limit=6):
+                return []
+
+            @staticmethod
+            def observation_search(project_root, query, limit=6):
+                return []
+
+            @staticmethod
+            def reasoning_search(project_root, query, limit=3):
+                return []
+
+            @staticmethod
+            def session_summary_search(project_root, query, limit=3):
+                return []
+
+        class FakeIndexer:
+            def __init__(self, project_root):
+                self.project_root = project_root
+
+            def index(self):
+                return object()
+
+        def fake_create_qfns(index):
+            def search_codebase(pattern, max_results=100):
+                return [
+                    {
+                        "file": "src/service.py",
+                        "line_number": 1,
+                        "content": "def needle_handler():",
+                    }
+                ]
+
+            return {"search_codebase": search_codebase}
+
+        modules = {
+            "memory_db": FakeMemoryDb,
+            "ProjectIndexer": FakeIndexer,
+            "create_project_query_functions": fake_create_qfns,
+            "server_state": None,
+            "server_runtime": None,
+            "code_available": True,
+            "code_import_error": "",
+        }
+        events = []
+        metrics = []
+        old = {
+            "_load_token_savior_modules": worker._load_token_savior_modules,
+            "append_event": orchestrator.append_event,
+            "append_metric": orchestrator.append_metric,
+        }
+        worker._load_token_savior_modules = lambda: (modules, "ok")
+        orchestrator.append_event = lambda *args, **kwargs: events.append({"args": args, "kwargs": kwargs})
+        orchestrator.append_metric = lambda *args, **kwargs: metrics.append({"args": args, "kwargs": kwargs}) or {}
+        try:
+            ctx = worker._token_savior_context(
+                "demo",
+                str(root),
+                role="codex",
+                query="implement needle_handler",
+                task_id="task-token-savior",
+            )
+        finally:
+            worker._load_token_savior_modules = old["_load_token_savior_modules"]
+            orchestrator.append_event = old["append_event"]
+            orchestrator.append_metric = old["append_metric"]
+        checked = [
+            row for row in events
+            if row["args"][:2] == ("skills", "token_savior_checked")
+        ][0]["kwargs"]["details"]
+        used = [
+            row for row in events
+            if row["args"][:2] == ("skills", "token_savior_used")
+        ][0]["kwargs"]["details"]
+        return {
+            "context_has_code_search": "token-savior code search" in ctx,
+            "checked_status": checked.get("status"),
+            "checked_rows_found": checked.get("rows_found"),
+            "checked_sections": checked.get("sections"),
+            "used_sections": used.get("sections"),
+            "metric_names": [row["args"][0] for row in metrics],
+        }
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main(argv):
     if len(argv) < 2 or len(argv) > 3:
         raise SystemExit("usage: harness/run_scenario.py <scenario-dir> | summary [runs-dir]")
@@ -9243,6 +9340,8 @@ def main(argv):
         actual = _run_workflow_mirror_drift_reports(repo_root, scenario)
     elif kind == "workflow_standalone_green_regression_clears":
         actual = _run_workflow_standalone_green_regression_clears(repo_root, scenario)
+    elif kind == "token_savior_code_search_telemetry":
+        actual = _run_token_savior_code_search_telemetry(repo_root, scenario)
     else:
         raise SystemExit(f"unknown scenario kind: {kind}")
 
