@@ -4121,6 +4121,31 @@ def _run_planner_output_normalization(repo_root, scenario):
     }
 
 
+def _run_planner_trailing_member_repair(repo_root, scenario):
+    _, worker = _load_repo_modules(repo_root)
+    raw = (
+        '{"panel":["aristotle"],"execution_path":"slice-1","design_contract":{"public_api":"api"}}'
+        ',"slices":[{"id":"slice-1","summary":"writer","braid_template":"lvc-implement-operator"}]'
+    )
+    plan, slices = worker._parse_planner_output(raw, council_members=("aristotle",), self_repair=False)
+    raw_prose = (
+        '{"panel":["aristotle"],"execution_path":"slice-1","design_contract":{"public_api":"api"}}'
+        '\nHere are the slices.'
+    )
+    try:
+        worker._parse_planner_output(raw_prose, council_members=("aristotle",), self_repair=False)
+        prose_error = None
+    except Exception as exc:
+        prose_error = str(exc)
+    return {
+        "repair_marker": plan.get("parse_repair"),
+        "slice_count": len(slices),
+        "slice_id": slices[0].get("id"),
+        "design_contract_public_api": (plan.get("design_contract") or {}).get("public_api"),
+        "prose_still_rejected": "invalid json object" in (prose_error or ""),
+    }
+
+
 def _run_end_to_end_handoff_contract(repo_root, scenario):
     _, worker = _load_repo_modules(repo_root)
     raw = """
@@ -9367,6 +9392,8 @@ def main(argv):
         actual = _run_council_payload_normalization(repo_root, scenario)
     elif kind == "planner_output_normalization":
         actual = _run_planner_output_normalization(repo_root, scenario)
+    elif kind == "planner_trailing_member_repair":
+        actual = _run_planner_trailing_member_repair(repo_root, scenario)
     elif kind == "end_to_end_handoff_contract":
         actual = _run_end_to_end_handoff_contract(repo_root, scenario)
     elif kind == "braid_result_json_envelope":

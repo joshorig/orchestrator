@@ -4546,6 +4546,8 @@ def _strict_json_object_contract_block(example_json):
         "Do not wrap the JSON object in ``` fences.\n"
         "Do not prefix it with json.\n"
         "Do not add commentary before or after it.\n"
+        "All top-level fields, including slices, must be inside the same root object.\n"
+        "Never close the root object before emitting slices or design_contract.\n"
         "If you output markdown fences or any extra text, the task fails.\n"
         "Example shape:\n"
         f"{example_json}\n"
@@ -4705,8 +4707,9 @@ def planner_council_prompt(task, project, memory_ctx, cfg):
         "  key_agreements: list[str]\n"
         "  dissent: list[str]\n"
         "  execution_path: string\n"
-        "  design_contract: object for implementation slices\n"
         "  slices: list[object]\n"
+        "  design_contract: object for implementation slices\n"
+        "The root object must contain slices and design_contract as sibling fields; do not emit slices after a closed object.\n"
         "Each slice object must include id, summary, and braid_template, and may include depends_on.\n"
         "For implementation slices, each slice object must also include touches and forbidden_paths arrays.\n"
         "touches names exact files/modules the coder may edit. forbidden_paths names files/modules the coder must not touch.\n"
@@ -4719,8 +4722,9 @@ def planner_council_prompt(task, project, memory_ctx, cfg):
             '"key_agreements":["..."],'
             '"dissent":["..."],'
             '"execution_path":"slice-1 -> slice-2",'
+            '"slices":[{"id":"slice-1","summary":"...","braid_template":"lvc-implement-operator","touches":["..."],"forbidden_paths":["..."]}],'
             '"design_contract":{"public_api":"...","ownership_boundaries":"...","concurrency_protocol":"...","persistence_protocol":"...","resource_lifecycle":{"resources":["..."],"acquire":["..."],"release":["..."],"failure_semantics":["..."],"invariants":["..."],"recovery":["..."]},"hard_constraints":["..."],"forbidden_alternatives":["..."],"acceptance_tests":["..."]},'
-            '"slices":[{"id":"slice-1","summary":"...","braid_template":"lvc-implement-operator","touches":["..."],"forbidden_paths":["..."]}]}'
+            '"confidence":0.8}'
         )
         + "\n"
         + (project_policy_block + "\n" if project_policy_block else "")
@@ -4758,6 +4762,7 @@ def planner_council_prompt(task, project, memory_ctx, cfg):
         "- For project planning_contract policy, do not mention forbidden primitives as allowed implementation choices; list them only as explicit prohibitions.\n"
         f"{_planner_prior_errors_block(task)}"
         "Return the JSON object directly. Do not use ```json fences.\n"
+        "Before returning, verify that the final character closes the same root object that contains both slices and design_contract.\n"
     )
     return system_prompt, user_prompt, panel
 
@@ -6023,6 +6028,37 @@ def _extract_json_fragment(raw, kind="object"):
     return parsed
 
 
+def _repair_trailing_top_level_members(text):
+    """Repair a strict planner object split before trailing top-level fields.
+
+    The planner sometimes emits a valid root object and then appends fields as
+    `,"slices":[...]`. That is not valid JSON, but it is unambiguous when the
+    trailing text is only comma-prefixed object members. Do not accept prose or
+    a second object/array here; those should remain hard parse failures.
+    """
+    text = str(text or "").strip()
+    decoder = json.JSONDecoder()
+    try:
+        first, end = decoder.raw_decode(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(first, dict):
+        return None
+    rest = text[end:].strip()
+    if not rest.startswith(","):
+        return None
+    candidate = "{" + rest[1:].strip() + "}"
+    try:
+        trailing = json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(trailing, dict):
+        return None
+    repaired = dict(first)
+    repaired.update(trailing)
+    return repaired
+
+
 _STRICT_JSON_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL)
 
 
@@ -6057,7 +6093,11 @@ def _normalize_council_payload(parsed, *, panel, stage=None):
 
 def _parse_planner_output(raw, *, council_members, self_repair=False):
     normalized_raw = _unwrap_exact_json_fence(raw)
-    plan = _normalize_council_payload(_extract_json_fragment(normalized_raw, "object"), panel=council_members)
+    repaired = _repair_trailing_top_level_members(normalized_raw)
+    parsed = repaired if repaired is not None else _extract_json_fragment(normalized_raw, "object")
+    plan = _normalize_council_payload(parsed, panel=council_members)
+    if repaired is not None:
+        plan.setdefault("parse_repair", "trailing_top_level_members")
     slices = plan.get("slices")
     if not isinstance(slices, list):
         if self_repair:
