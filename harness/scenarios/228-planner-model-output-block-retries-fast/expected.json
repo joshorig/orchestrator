@@ -1,0 +1,29 @@
+{
+  "story": "planner_model_output_block_retries_fast",
+  "planner_state": "queued",
+  "attempt": 2,
+  "retry_kind": "planner_output_failure",
+  "retry_finding_has_output_error": true,
+  "context_has_output_failure": true,
+  "context_has_strict_json_instruction": true,
+  "snapshots": [
+    {
+      "label": "planner-output-blocked",
+      "kind": "planner_blocked",
+      "task_id": "task-plan-output",
+      "task_state": "blocked",
+      "blocker_code": "model_output_invalid",
+      "action": "retry_planner_with_blocker_context",
+      "policy": "planner_model_output_retry"
+    },
+    {
+      "label": "planner-output-requeued",
+      "kind": null,
+      "task_id": null,
+      "task_state": null,
+      "blocker_code": null,
+      "action": null,
+      "policy": null
+    }
+  ]
+}

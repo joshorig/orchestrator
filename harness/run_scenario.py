@@ -5668,6 +5668,48 @@ def _run_workflow_e2e_story(repo_root, scenario):
                     "snapshots": snapshots,
                 }
 
+            elif story == "planner_model_output_block_retries_fast":
+                planner = add_task(
+                    "task-plan-output",
+                    "blocked",
+                    role="planner",
+                    engine="claude",
+                    source="planner-refine-for:task-output",
+                    blocker=orchestrator.make_blocker(
+                        "model_output_invalid",
+                        summary="planner output invalid",
+                        detail="invalid json object: Extra data",
+                        source="worker",
+                        retryable=True,
+                    ),
+                    braid_template="lvc-implement-operator",
+                    engine_args={
+                        "mode": "planner-refine",
+                        "planner_refine": {
+                            "context": "planner previous attempt emitted invalid JSON",
+                            "origin_task_id": "task-output",
+                        },
+                    },
+                )
+                orchestrator.update_feature("feature-e2e", lambda f: f.update({"planner_task_id": planner["task_id"]}))
+                snapshots.append(issue_snapshot("planner-output-blocked"))
+                orchestrator.tick_workflow_check()
+                found = orchestrator.find_task("task-plan-output")
+                retried = found[1] if found else {}
+                retry_ctx = ((retried.get("engine_args") or {}).get("retry_context") or {})
+                planner_refine = ((retried.get("engine_args") or {}).get("planner_refine") or {})
+                snapshots.append(issue_snapshot("planner-output-requeued"))
+                return {
+                    "story": story,
+                    "planner_state": found[0] if found else None,
+                    "attempt": retried.get("attempt"),
+                    "retry_kind": retry_ctx.get("kind"),
+                    "retry_finding_has_output_error": any("model_output_invalid" in str(item) for item in retry_ctx.get("findings") or []),
+                    "context_has_output_failure": "[PLANNER OUTPUT FAILURE]" in str(planner_refine.get("context") or ""),
+                    "context_has_strict_json_instruction": "exactly one valid planner JSON object" in str(planner_refine.get("context") or ""),
+                    "snapshots": snapshots,
+                }
+
             elif story == "stale_contract_exhausted_planner_replans":
                 stale_child = add_task(
                     "task-stale-child",

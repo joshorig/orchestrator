@@ -401,6 +401,13 @@ WORKFLOW_REPAIR_POLICY = (
         "diagnosis": "planner changed the design contract without supersedes rationale; retry immediately with the validator finding in context",
     },
     {
+        "name": "planner_model_output_retry",
+        "kind": "planner_blocked",
+        "blocker_code": "model_output_invalid",
+        "action": "retry_planner_with_blocker_context",
+        "diagnosis": "planner output violated the response contract; retry immediately with the output failure in context",
+    },
+    {
         "name": "planner_contract_incomplete_retry",
         "kind": "planner_blocked",
         "blocker_code": "planner_contract_incomplete",
@@ -11647,26 +11654,40 @@ def _workflow_check_retry_task_with_context(task, state, reason, *, kind, findin
 
 def _workflow_check_retry_planner_with_blocker_context(task, state, reason):
     blocker = task_blocker(task)
+    blocker_code = (blocker or {}).get("code") or "planner_blocked"
     finding = f"{(blocker or {}).get('code') or 'planner_blocked'}: {reason}"
     detail = (blocker or {}).get("detail")
     if detail:
-        finding = f"{finding} — {detail}"
+        finding = f"{finding} - {detail}"
+    validation_codes = {
+        "planner_contract_drift",
+        "planner_contract_incomplete",
+        "planner_refine_scope_drift",
+    }
+    is_validation_failure = blocker_code in validation_codes
+    retry_kind = "planner_validation_failure" if is_validation_failure else "planner_output_failure"
+    failure_title = "[PLANNER VALIDATION FAILURE]" if is_validation_failure else "[PLANNER OUTPUT FAILURE]"
+    correction = (
+        "regenerate a validator-compliant plan; do not wait for operator intervention."
+        if is_validation_failure
+        else "return exactly one valid planner JSON object with no markdown, commentary, or trailing data; do not wait for operator intervention."
+    )
 
     def mut(t):
         engine_args = dict(t.get("engine_args") or {})
         retry_ctx = dict(engine_args.get("retry_context") or {})
-        retry_ctx["kind"] = "planner_validation_failure"
+        retry_ctx["kind"] = retry_kind
         retry_ctx["reason"] = reason
         retry_ctx["findings"] = [finding]
         engine_args["retry_context"] = retry_ctx
         planner_refine = dict(engine_args.get("planner_refine") or {})
         context = str(planner_refine.get("context") or "")
         failure_block = (
-            "[PLANNER VALIDATION FAILURE]\n"
-            f"code: {(blocker or {}).get('code') or '-'}\n"
+            f"{failure_title}\n"
+            f"code: {blocker_code}\n"
             f"summary: {(blocker or {}).get('summary') or reason}\n"
             f"detail: {detail or '-'}\n"
-            "Required correction: regenerate a validator-compliant plan; do not wait for operator intervention.\n"
+            f"Required correction: {correction}\n"
         )
         planner_refine["context"] = (context + "\n\n" + failure_block).strip()[:8000]
         engine_args["planner_refine"] = planner_refine
@@ -12407,6 +12428,7 @@ def _workflow_issue_from_summary(feature, workflow, config):
         "planner_contract_drift",
         "planner_contract_incomplete",
         "planner_refine_scope_drift",
+        "model_output_invalid",
     }
 
     if feature_status == "open" and planner.get("task_id") and planner.get("state") in ("failed", "blocked"):
