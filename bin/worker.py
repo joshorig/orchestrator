@@ -3928,7 +3928,13 @@ def _qa_log_scope_signals(log_tail):
 def _run_semantic_qa_gate(project_name, project_path, worktree, base_ref, target, qa_log_path, timeout):
     changed_files, diff_text = _git_diff_summary(worktree, base_ref, max_diff_chars=20000)
     log_tail = _read_text_if_exists(qa_log_path, tail_lines=120, max_chars=12000)
-    context = read_memory_context(project_name, project_path, role="qa", query=target.get("summary") or "")
+    context = read_memory_context(
+        project_name,
+        project_path,
+        role="qa",
+        query=target.get("summary") or "",
+        task_id=target.get("task_id") or task_id,
+    )
     scope_expectations = _qa_scope_expectations(project_name, changed_files, diff_text)
     scope_signals = _qa_log_scope_signals(log_tail)
     panel = _config_council_panel(o.load_config(), "qa_panel", ("feynman", "kahneman", "ada"))
@@ -3985,7 +3991,13 @@ def run_claude_template_gen(task, cfg, task_type, timeout, log_path):
     if project_name and project_name != "manual":
         try:
             project = o.get_project(cfg, project_name)
-            memory_ctx = read_memory_context(project["name"], project["path"])
+            memory_ctx = read_memory_context(
+                project["name"],
+                project["path"],
+                role="template-gen",
+                query=task.get("summary") or task_type,
+                task_id=task_id,
+            )
         except KeyError:
             memory_ctx = "(unknown project)"
 
@@ -4104,7 +4116,13 @@ def run_claude_template_refine(task, cfg, task_type, timeout, log_path):
     if project_name and project_name != "manual":
         try:
             project = o.get_project(cfg, project_name)
-            memory_ctx = read_memory_context(project["name"], project["path"])
+            memory_ctx = read_memory_context(
+                project["name"],
+                project["path"],
+                role="template-refine",
+                query=task.get("summary") or task_type,
+                task_id=task_id,
+            )
         except KeyError:
             memory_ctx = "(unknown project)"
 
@@ -6535,7 +6553,13 @@ def run_claude_planner(task, cfg, timeout, log_path):
             ],
         )
     )
-    memory_ctx = read_memory_context(project["name"], project["path"], role="planner", query=planner_query)
+    memory_ctx = read_memory_context(
+        project["name"],
+        project["path"],
+        role="planner",
+        query=planner_query,
+        task_id=task_id,
+    )
     if planner_mode == "self-repair-plan":
         system_prompt, user_prompt, council_members = self_repair_council_prompt(task, project, memory_ctx)
     elif planner_mode == "planner-refine":
@@ -7931,7 +7955,13 @@ def run_review_feedback_task(task, cfg, timeout, log_path):
     lock_fh = None
     try:
         lock_fh = acquire_lock(f"{project['name']}.lock", mode="shared", timeout_sec=60)
-        memory_ctx = read_memory_context(project["name"], project["path"])
+        memory_ctx = read_memory_context(
+            project["name"],
+            project["path"],
+            role="codex-feedback",
+            query=task.get("summary") or target_id,
+            task_id=task_id,
+        )
         diff_text = _git(wt, "diff", base_branch).stdout or ""
         if len(diff_text) > 30000:
             diff_text = diff_text[:30000] + "\n\n[...diff truncated at 30k chars...]\n"
@@ -8720,7 +8750,13 @@ def run_codex_slot(task, cfg):
             project["path"], task_id, base_branch=base_branch,
         )
 
-        memory_ctx = read_memory_context(project["name"], project["path"])
+        memory_ctx = read_memory_context(
+            project["name"],
+            project["path"],
+            role="codex",
+            query=task.get("summary") or "",
+            task_id=task_id,
+        )
         if mode == "feature-pr-feedback":
             prompt = build_feature_pr_feedback_prompt(
                 task=task,

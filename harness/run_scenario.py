@@ -9062,21 +9062,33 @@ def _run_token_savior_code_search_telemetry(repo_root, scenario):
                 query="implement needle_handler",
                 task_id="task-token-savior",
             )
+            events.clear()
+            metrics.clear()
+            memory_ctx = worker.read_memory_context(
+                "demo",
+                str(root),
+                role="planner",
+                query="plan needle_handler",
+                task_id="task-memory-context",
+            )
         finally:
             worker._load_token_savior_modules = old["_load_token_savior_modules"]
             orchestrator.append_event = old["append_event"]
             orchestrator.append_metric = old["append_metric"]
-        checked = [
+        checked_row = [
             row for row in events
             if row["args"][:2] == ("skills", "token_savior_checked")
-        ][0]["kwargs"]["details"]
+        ][0]
+        checked = checked_row["kwargs"]["details"]
         used = [
             row for row in events
             if row["args"][:2] == ("skills", "token_savior_used")
         ][0]["kwargs"]["details"]
         return {
             "context_has_code_search": "token-savior code search" in ctx,
+            "memory_context_has_code_search": "token-savior code search" in memory_ctx,
             "checked_status": checked.get("status"),
+            "checked_task_id": checked_row["kwargs"].get("task_id"),
             "checked_rows_found": checked.get("rows_found"),
             "checked_sections": checked.get("sections"),
             "used_sections": used.get("sections"),

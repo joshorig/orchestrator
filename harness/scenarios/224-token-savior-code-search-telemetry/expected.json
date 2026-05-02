@@ -4,7 +4,9 @@
     "code_search"
   ],
   "checked_status": "used",
+  "checked_task_id": "task-memory-context",
   "context_has_code_search": true,
+  "memory_context_has_code_search": true,
   "metric_names": [
     "token_savior.context_checked",
     "token_savior.context_tokens_injected",
