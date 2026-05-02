@@ -1480,6 +1480,13 @@ _CONCURRENCY_PROTOCOL_TERMS = (
     "mmap",
     "writer",
 )
+_PLANNER_SCORE_DIMENSIONS = (
+    "completeness",
+    "topology_risk",
+    "ull_safety",
+    "testability",
+    "slice_width",
+)
 
 
 def _stable_hash(payload):
@@ -1494,6 +1501,110 @@ def _implementation_slice_present(project_name, slices):
 def _requires_concurrency_protocol(text):
     lowered = str(text or "").lower()
     return any(term in lowered for term in _CONCURRENCY_PROTOCOL_TERMS)
+
+
+def _list_field(row, *names):
+    for name in names:
+        value = (row or {}).get(name)
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str) and value.strip():
+            return [value.strip()]
+    return []
+
+
+def _planner_slice_scope_error(slices, project_name):
+    if project_name not in ULL_PROJECTS:
+        return None
+    for row in slices or []:
+        if (row or {}).get("braid_template") not in planner_implementer_templates(project_name):
+            continue
+        touches = _list_field(row, "touches", "allowed_paths", "files", "modules")
+        forbidden = _list_field(row, "forbidden_paths", "must_not_touch", "out_of_scope_paths")
+        if not touches:
+            return {
+                "code": "planner_contract_incomplete",
+                "summary": "implementation slice missing explicit file scope",
+                "detail": f"{(row or {}).get('id') or 'slice'} must name exact files/modules it may touch",
+            }
+        if not forbidden:
+            return {
+                "code": "planner_contract_incomplete",
+                "summary": "implementation slice missing forbidden scope",
+                "detail": f"{(row or {}).get('id') or 'slice'} must name files/modules it must not touch",
+            }
+    return None
+
+
+def _planner_historian_dependency_error(slices, project_name):
+    historian_template = planner_historian_template(project_name)
+    implementer_templates = set(planner_implementer_templates(project_name))
+    impl_ids = [
+        str((row or {}).get("id") or "")
+        for row in (slices or [])
+        if (row or {}).get("braid_template") in implementer_templates
+    ]
+    if not impl_ids:
+        return None
+    for row in slices or []:
+        if (row or {}).get("braid_template") != historian_template:
+            continue
+        deps = set(str(item) for item in _list_field(row, "depends_on"))
+        missing = [sid for sid in impl_ids if sid and sid not in deps]
+        if missing:
+            return {
+                "code": "planner_contract_incomplete",
+                "summary": "historian slice missing implementation dependency",
+                "detail": f"{(row or {}).get('id') or 'historian slice'} must depend_on implementation slices: {', '.join(missing)}",
+            }
+    return None
+
+
+def _planner_contract_semantic_error(contract, slices, project_name):
+    if project_name not in ULL_PROJECTS:
+        return None
+    protocol = str(contract.get("concurrency_protocol") or "").lower()
+    persistence = str(contract.get("persistence_protocol") or "").lower()
+    public_api = str(contract.get("public_api") or "").lower()
+    tests = "\n".join(str(item).lower() for item in (contract.get("acceptance_tests") or []))
+    forbidden = "\n".join(str(item).lower() for item in (contract.get("forbidden_alternatives") or []))
+    if re.search(r"(proceed|continue|accept|succeed)\s+(after|following)\s+\d+\s+(retry|retries|attempt|attempts)", protocol):
+        return {
+            "code": "planner_contract_incomplete",
+            "summary": "concurrency protocol permits stale/unsafe progress",
+            "detail": "protocol must not proceed after a fixed retry count without proving the consistency invariant",
+        }
+    if any(term in protocol for term in ("best effort", "eventual consistency", "if possible", "should be safe")):
+        return {
+            "code": "planner_contract_incomplete",
+            "summary": "concurrency protocol is vague",
+            "detail": "protocol must specify deterministic acceptance/retry/failure semantics, not best-effort language",
+        }
+    if "restore" in public_api and "restore" not in tests:
+        return {
+            "code": "planner_contract_incomplete",
+            "summary": "restore API lacks acceptance coverage",
+            "detail": "acceptance_tests must include restore behavior when public_api includes restore",
+        }
+    if "snapshot" in public_api and "snapshot" not in tests:
+        return {
+            "code": "planner_contract_incomplete",
+            "summary": "snapshot API lacks acceptance coverage",
+            "detail": "acceptance_tests must include snapshot behavior when public_api includes snapshot",
+        }
+    if "crc" in persistence and not any(term in tests for term in ("crc", "corrupt", "corruption")):
+        return {
+            "code": "planner_contract_incomplete",
+            "summary": "CRC persistence lacks corruption test",
+            "detail": "acceptance_tests must include CRC/corruption behavior when persistence_protocol uses CRC",
+        }
+    if "atomic" in persistence and "atomic" in forbidden:
+        return {
+            "code": "planner_contract_drift",
+            "summary": "contract contradicts atomic persistence",
+            "detail": "persistence_protocol requires atomic behavior while forbidden_alternatives forbids it",
+        }
+    return None
 
 
 def _planner_contract_validation(plan, slices, project_name, *, origin_contract=None):
@@ -1516,6 +1627,12 @@ def _planner_contract_validation(plan, slices, project_name, *, origin_contract=
             "detail": "ULL implementation slices must carry design_contract with hard constraints and protocol fields",
         }
     contract = dict(raw)
+    slice_scope_error = _planner_slice_scope_error(slices, project_name)
+    if slice_scope_error:
+        return contract, slice_scope_error
+    historian_error = _planner_historian_dependency_error(slices, project_name)
+    if historian_error:
+        return contract, historian_error
     hard = list(contract.get("hard_constraints") or [])
     if project_name in ULL_PROJECTS:
         for item in ULL_HARD_CONSTRAINTS:
@@ -1536,6 +1653,9 @@ def _planner_contract_validation(plan, slices, project_name, *, origin_contract=
                 "summary": "planner output missing concurrency_protocol",
                 "detail": "snapshot/restore/quiesce style ULL work must define the concrete lock-free concurrency protocol",
             }
+    semantic_error = _planner_contract_semantic_error(contract, slices, project_name)
+    if semantic_error:
+        return contract, semantic_error
     if isinstance(origin_contract, dict) and origin_contract:
         changed = []
         for key in ("public_api", "ownership_boundaries", "concurrency_protocol", "persistence_protocol"):
@@ -3705,7 +3825,9 @@ def _planner_member_report_prompt(task, project, memory_ctx, member, user_prompt
         f"{user_prompt}\n\n"
         "[PROJECT MEMORY]\n"
         f"{memory_ctx}\n\n"
-        "Return only JSON with keys: member, key_findings, concerns, recommendations, "
+        "Score candidate plans from 0.0 to 1.0 on: completeness, topology_risk, ull_safety, testability, slice_width. "
+        "For topology_risk and slice_width, higher means safer/narrower. "
+        "Return only JSON with keys: member, scores, key_findings, concerns, recommendations, "
         "design_contract_requirements, slice_guidance, confidence.\n"
     )
 
@@ -3716,7 +3838,8 @@ def _planner_member_system_prompt(member):
         "You are running as a separate parallel council agent. "
         "Return only one JSON object, no markdown fences and no prose outside JSON.\n\n"
         + _strict_json_object_contract_block(
-            '{"member":"%s","key_findings":["..."],"concerns":["..."],'
+            '{"member":"%s","scores":{"completeness":0.8,"topology_risk":0.7,"ull_safety":0.9,"testability":0.8,"slice_width":0.7},'
+            '"key_findings":["..."],"concerns":["..."],'
             '"recommendations":["..."],"design_contract_requirements":["..."],'
             '"slice_guidance":["..."],"confidence":0.8}' % member
         )
@@ -3792,6 +3915,13 @@ def _run_parallel_planner_council(task, project, memory_ctx, user_prompt, panel,
             parsed = _extract_json_fragment(_unwrap_exact_json_fence(raw), "object")
             if isinstance(parsed, dict):
                 parsed.setdefault("member", member)
+                scores = parsed.get("scores")
+                if not isinstance(scores, dict):
+                    parsed["scores_error"] = "missing scores object"
+                else:
+                    missing = [name for name in _PLANNER_SCORE_DIMENSIONS if name not in scores]
+                    if missing:
+                        parsed["scores_error"] = "missing score dimensions: " + ", ".join(missing)
                 reports.append(parsed)
             else:
                 reports.append({"member": member, "error": "non-object report"})
@@ -3828,6 +3958,8 @@ def planner_council_prompt(task, project, memory_ctx, cfg):
         "  design_contract: object for implementation slices\n"
         "  slices: list[object]\n"
         "Each slice object must include id, summary, and braid_template, and may include depends_on.\n"
+        "For implementation slices, each slice object must also include touches and forbidden_paths arrays.\n"
+        "touches names exact files/modules the coder may edit. forbidden_paths names files/modules the coder must not touch.\n"
         "Standardize ids exactly as slice-1, slice-2, slice-3 in emitted order.\n"
         "If a slice depends on an earlier slice, depends_on must be a list of those slice ids "
         '(for example ["slice-1"]). Do not use numeric indexes.\n'
@@ -3838,7 +3970,7 @@ def planner_council_prompt(task, project, memory_ctx, cfg):
             '"dissent":["..."],'
             '"execution_path":"slice-1 -> slice-2",'
             '"design_contract":{"public_api":"...","ownership_boundaries":"...","concurrency_protocol":"...","persistence_protocol":"...","hard_constraints":["..."],"forbidden_alternatives":["..."],"acceptance_tests":["..."]},'
-            '"slices":[{"id":"slice-1","summary":"...","braid_template":"lvc-implement-operator"}]}'
+            '"slices":[{"id":"slice-1","summary":"...","braid_template":"lvc-implement-operator","touches":["..."],"forbidden_paths":["..."]}]}'
         )
         + "\n"
         + (contract_block + "\n\n" if contract_block else "")
@@ -3860,8 +3992,11 @@ def planner_council_prompt(task, project, memory_ctx, cfg):
         f"Allowed braid_template values: {allowed_templates}\n"
         "Preserve dissent when a risky slice is rejected or narrowed.\n"
         "For implementation slices, include a top-level design_contract. "
+        "Every implementation slice must name exact files/modules it may touch and files/modules it must not touch. "
+        "Historian slices must depend_on all implementation slices whose results they describe. "
         "For ULL/Java work, hard_constraints must explicitly forbid synchronized and blocking lock primitives. "
-        "For snapshot/restore/quiesce/gate/batch/epoch/mmap work, concurrency_protocol must specify the concrete lock-free protocol and allowed primitives.\n"
+        "For snapshot/restore/quiesce/gate/batch/epoch/mmap work, concurrency_protocol must specify the concrete lock-free protocol and allowed primitives. "
+        "Do not use vague or unsafe protocol language such as best-effort, eventual consistency, or proceed after N retries unless the invariant is proven in the contract.\n"
         f"{_planner_prior_errors_block(task)}"
         "Return the JSON object directly. Do not use ```json fences.\n"
     )

@@ -4596,7 +4596,7 @@ def _run_classify_slice_misroute_enqueues_router_clarify(repo_root, scenario):
         worker.o.now_iso = lambda: "2026-04-24T01:00:00"
         worker.read_memory_context = lambda *args, **kwargs: "memory"
         worker.planner_council_prompt = lambda *args, **kwargs: ("system", "user", ("aristotle",))
-        worker._run_bounded = lambda *args, **kwargs: types.SimpleNamespace(returncode=0, stdout='{"type":"result","result":"{\\"execution_path\\":\\"slice-1 -> slice-2\\",\\"design_contract\\":{\\"public_api\\":\\"Store.snapshot(Path)\\",\\"ownership_boundaries\\":\\"store module\\",\\"concurrency_protocol\\":\\"VarHandle/CAS gate\\",\\"persistence_protocol\\":\\"atomic move\\",\\"hard_constraints\\":[]},\\"slices\\":[{\\"id\\":\\"slice-1\\",\\"summary\\":\\"Build trade-research-platform UI dashboard card\\",\\"braid_template\\":\\"lvc-historian-update\\"},{\\"id\\":\\"slice-2\\",\\"summary\\":\\"Optimize hot path poller zero alloc jmh gate\\",\\"braid_template\\":\\"lvc-implement-operator\\"}]}"}')
+        worker._run_bounded = lambda *args, **kwargs: types.SimpleNamespace(returncode=0, stdout='{"type":"result","result":"{\\"execution_path\\":\\"slice-1 -> slice-2\\",\\"design_contract\\":{\\"public_api\\":\\"Store.snapshot(Path)\\",\\"ownership_boundaries\\":\\"store module\\",\\"concurrency_protocol\\":\\"VarHandle/CAS gate\\",\\"persistence_protocol\\":\\"atomic move\\",\\"acceptance_tests\\":[\\"snapshot round trip\\"],\\"hard_constraints\\":[]},\\"slices\\":[{\\"id\\":\\"slice-1\\",\\"summary\\":\\"Build trade-research-platform UI dashboard card\\",\\"braid_template\\":\\"lvc-historian-update\\",\\"depends_on\\":[\\"slice-2\\"]},{\\"id\\":\\"slice-2\\",\\"summary\\":\\"Optimize hot path poller zero alloc jmh gate\\",\\"braid_template\\":\\"lvc-implement-operator\\",\\"touches\\":[\\"store/src/main/java\\"],\\"forbidden_paths\\":[\\"core/src/main/java\\"]}]}"}')
         worker._record_task_costs_from_text = lambda *args, **kwargs: None
         worker.o.new_task = lambda **kwargs: {"task_id": f"task-{len(enqueued)+1}", **kwargs}
         worker.o.enqueue_task = lambda task_obj: enqueued.append(task_obj)
@@ -8144,10 +8144,10 @@ def _run_planner_design_contracts(repo_root, scenario):
                 "persistence_protocol": "write temp snapshot then atomic move",
                 "hard_constraints": [],
                 "forbidden_alternatives": [],
-                "acceptance_tests": ["round trip"],
+                "acceptance_tests": ["snapshot round trip"],
             }
         }
-        slices = [{"id": "slice-1", "summary": "Implement snapshot quiesce gate", "braid_template": "lvc-implement-operator"}]
+        slices = [{"id": "slice-1", "summary": "Implement snapshot quiesce gate", "braid_template": "lvc-implement-operator", "touches": ["store/src/main/java"], "forbidden_paths": ["core/src/main/java"]}]
         contract, error = worker._planner_contract_validation(plan, slices, "lvc-standard")
         task = {"summary": "x", "engine_args": {"design_contract": contract, "design_contract_hash": worker._stable_hash(contract), "topology_generation": "gen-1"}}
         prompt = worker.build_codex_prompt(task, "flowchart TD; A-->B;", "memory")
@@ -8160,7 +8160,7 @@ def _run_planner_design_contracts(repo_root, scenario):
         }
     if case == "missing_quiesce_protocol":
         plan = {"design_contract": {"public_api": "Store.snapshot(Path)", "hard_constraints": []}}
-        slices = [{"id": "slice-1", "summary": "Implement snapshot quiesce gate", "braid_template": "lvc-implement-operator"}]
+        slices = [{"id": "slice-1", "summary": "Implement snapshot quiesce gate", "braid_template": "lvc-implement-operator", "touches": ["store/src/main/java"], "forbidden_paths": ["core/src/main/java"]}]
         _contract, error = worker._planner_contract_validation(plan, slices, "lvc-standard")
         return {
             "error_code": error.get("code") if error else None,
@@ -8177,8 +8177,8 @@ def _run_planner_design_contracts(repo_root, scenario):
         }
     if case == "parallel_council_reports_rendered":
         reports = [
-            {"member": "aristotle", "key_findings": ["split format from restore"]},
-            {"member": "socrates", "concerns": ["snapshot consistency assumption"]},
+            {"member": "aristotle", "scores": {"completeness": 0.8, "topology_risk": 0.7, "ull_safety": 0.9, "testability": 0.8, "slice_width": 0.7}, "key_findings": ["split format from restore"]},
+            {"member": "socrates", "scores": {"completeness": 0.7, "topology_risk": 0.6, "ull_safety": 0.8, "testability": 0.8, "slice_width": 0.6}, "concerns": ["snapshot consistency assumption"]},
         ]
         block = worker._render_parallel_council_reports(reports)
         return {
@@ -8222,6 +8222,66 @@ def _run_planner_design_contracts(repo_root, scenario):
             "retired": retired,
             "move_calls": len(moved),
         }
+    if case == "fixed_retry_protocol_rejected":
+        plan = {
+            "design_contract": {
+                "public_api": "Store.snapshot(Path)",
+                "ownership_boundaries": "store module",
+                "concurrency_protocol": "copy page; retry page up to 3 times if epoch changed; proceed after 3 retries",
+                "persistence_protocol": "snapshot uses CRC per page and atomic move",
+                "hard_constraints": [],
+                "acceptance_tests": ["snapshot round trip", "CRC corruption rejected"],
+            }
+        }
+        slices = [{"id": "slice-1", "summary": "Implement snapshot epoch mmap writer", "braid_template": "lvc-implement-operator", "touches": ["store/src/main/java"], "forbidden_paths": ["core/src/main/java"]}]
+        _contract, error = worker._planner_contract_validation(plan, slices, "lvc-standard")
+        return {"error_code": error.get("code") if error else None, "error_summary": error.get("summary") if error else None}
+    if case == "implementation_scope_required":
+        plan = {
+            "design_contract": {
+                "public_api": "Store.snapshot(Path)",
+                "ownership_boundaries": "store module",
+                "concurrency_protocol": "CAS gate rejects concurrent snapshots deterministically",
+                "persistence_protocol": "snapshot uses CRC per page and atomic move",
+                "hard_constraints": [],
+                "acceptance_tests": ["snapshot round trip", "CRC corruption rejected"],
+            }
+        }
+        slices = [{"id": "slice-1", "summary": "Implement snapshot mmap writer", "braid_template": "lvc-implement-operator"}]
+        _contract, error = worker._planner_contract_validation(plan, slices, "lvc-standard")
+        return {"error_code": error.get("code") if error else None, "error_summary": error.get("summary") if error else None}
+    if case == "contract_contradiction_rejected":
+        plan = {
+            "design_contract": {
+                "public_api": "Store.snapshot(Path)",
+                "ownership_boundaries": "store module",
+                "concurrency_protocol": "CAS gate rejects concurrent snapshots deterministically",
+                "persistence_protocol": "snapshot uses CRC per page and atomic move",
+                "hard_constraints": [],
+                "forbidden_alternatives": ["atomic move"],
+                "acceptance_tests": ["snapshot round trip", "CRC corruption rejected"],
+            }
+        }
+        slices = [{"id": "slice-1", "summary": "Implement snapshot mmap writer", "braid_template": "lvc-implement-operator", "touches": ["store/src/main/java"], "forbidden_paths": ["core/src/main/java"]}]
+        _contract, error = worker._planner_contract_validation(plan, slices, "lvc-standard")
+        return {"error_code": error.get("code") if error else None, "error_summary": error.get("summary") if error else None}
+    if case == "historian_depends_on_impl_required":
+        plan = {
+            "design_contract": {
+                "public_api": "Store.snapshot(Path)",
+                "ownership_boundaries": "store module",
+                "concurrency_protocol": "CAS gate rejects concurrent snapshots deterministically",
+                "persistence_protocol": "snapshot uses CRC per page and atomic move",
+                "hard_constraints": [],
+                "acceptance_tests": ["snapshot round trip", "CRC corruption rejected"],
+            }
+        }
+        slices = [
+            {"id": "slice-1", "summary": "Implement snapshot mmap writer", "braid_template": "lvc-implement-operator", "touches": ["store/src/main/java"], "forbidden_paths": ["core/src/main/java"]},
+            {"id": "slice-2", "summary": "Append historian entry to RECENT_WORK", "braid_template": "lvc-historian-update"},
+        ]
+        _contract, error = worker._planner_contract_validation(plan, slices, "lvc-standard")
+        return {"error_code": error.get("code") if error else None, "error_summary": error.get("summary") if error else None}
     if case == "non_ull_missing_contract_allowed":
         plan = {}
         slices = [{"id": "slice-1", "summary": "Fix self repair queue routing", "braid_template": "orchestrator-self-repair"}]
@@ -8248,10 +8308,11 @@ def _run_planner_design_contracts(repo_root, scenario):
                 "ownership_boundaries": "mmap stores own snapshot bytes",
                 "concurrency_protocol": "VarHandle gate",
                 "persistence_protocol": "in-place overwrite through mapped channel",
+                "acceptance_tests": ["snapshot restore round trip"],
                 "hard_constraints": [],
             }
         }
-        slices = [{"id": "slice-1", "summary": "Implement snapshot restore", "braid_template": "lvc-implement-operator"}]
+        slices = [{"id": "slice-1", "summary": "Implement snapshot restore", "braid_template": "lvc-implement-operator", "touches": ["store/src/main/java"], "forbidden_paths": ["core/src/main/java"]}]
         _contract, error = worker._planner_contract_validation(plan, slices, "lvc-standard", origin_contract=origin)
         return {
             "error_code": error.get("code") if error else None,

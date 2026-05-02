@@ -1,0 +1,4 @@
+{
+  "error_code": "planner_contract_drift",
+  "error_summary": "contract contradicts atomic persistence"
+}
