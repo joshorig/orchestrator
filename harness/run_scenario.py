@@ -5668,6 +5668,78 @@ def _run_workflow_e2e_story(repo_root, scenario):
                     "snapshots": snapshots,
                 }
 
+            elif story == "stale_contract_exhausted_planner_replans":
+                stale_child = add_task(
+                    "task-stale-child",
+                    "blocked",
+                    summary="stale child from previous contract",
+                    blocker=orchestrator.make_blocker(
+                        "stale_design_contract",
+                        summary="review target used stale design contract",
+                        detail="target=old active=new",
+                        source="worker",
+                        retryable=True,
+                    ),
+                )
+                stale_child["created_at"] = "2026-04-25T06:01:00"
+                orchestrator.write_json_atomic(orchestrator.task_path("task-stale-child", "blocked"), stale_child)
+                exhausted_planner = add_task(
+                    "task-plan-exhausted",
+                    "abandoned",
+                    role="planner",
+                    engine="claude",
+                    source="planner-refine-for:task-stale-child",
+                    blocker=orchestrator.make_blocker(
+                        "attempt_exhausted",
+                        summary="task attempt limit exhausted",
+                        detail="planner validation retry: contract contradicts atomic persistence (attempt 5 >= max 5)",
+                        source="planner-validation",
+                        retryable=False,
+                        metadata={"attempt": 5, "max_attempts": 5},
+                    ),
+                    braid_template="lvc-implement-operator",
+                    engine_args={
+                        "mode": "planner-refine",
+                        "planner_refine": {
+                            "context": "previous planner exhausted after validator false positives",
+                            "origin_task_id": "task-stale-child",
+                        },
+                    },
+                )
+                exhausted_planner["attempt"] = 5
+                exhausted_planner["created_at"] = "2026-04-25T06:02:00"
+                exhausted_planner["attempt_history"] = [
+                    {
+                        "attempt": 4,
+                        "from_state": "blocked",
+                        "retry_reason": "planner validation retry: contract contradicts atomic persistence",
+                        "retry_source": "planner-validation",
+                    }
+                ]
+                orchestrator.write_json_atomic(orchestrator.task_path("task-plan-exhausted", "abandoned"), exhausted_planner)
+                orchestrator.append_feature_child("feature-e2e", "task-stale-child")
+                snapshots.append(issue_snapshot("stale-contract-planner-exhausted"))
+                orchestrator.tick_workflow_check()
+                new_planners = [
+                    t for t in orchestrator.iter_tasks(states=("queued",), role="planner")
+                    if t.get("task_id") not in {"task-plan", "task-plan-exhausted"}
+                ]
+                new_planner = new_planners[0] if new_planners else {}
+                planner_refine = ((new_planner.get("engine_args") or {}).get("planner_refine") or {})
+                feature_after = read_feature()
+                return {
+                    "story": story,
+                    "new_planner_enqueued": bool(new_planner),
+                    "new_planner_role": new_planner.get("role"),
+                    "new_planner_mode": (new_planner.get("engine_args") or {}).get("mode"),
+                    "origin_task_id": planner_refine.get("origin_task_id"),
+                    "context_has_attempt_history": "[ATTEMPT HISTORY]" in str(planner_refine.get("context") or ""),
+                    "context_mentions_stale_contract": "stale design contract" in str(planner_refine.get("context") or ""),
+                    "child_contains_new_planner": new_planner.get("task_id") in (feature_after.get("child_task_ids") or []),
+                    "workflow_attempt_recorded": bool(((feature_after.get("workflow_check") or {}).get("attempts") or {})),
+                    "snapshots": snapshots,
+                }
+
             elif story == "reviewer_protocol_error_recovers":
                 blocker = orchestrator.make_blocker(
                     "review_gate_protocol_error",

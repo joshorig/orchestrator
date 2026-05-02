@@ -1,0 +1,22 @@
+{
+  "story": "stale_contract_exhausted_planner_replans",
+  "new_planner_enqueued": true,
+  "new_planner_role": "planner",
+  "new_planner_mode": "planner-refine",
+  "origin_task_id": "task-plan-exhausted",
+  "context_has_attempt_history": true,
+  "context_mentions_stale_contract": true,
+  "child_contains_new_planner": true,
+  "workflow_attempt_recorded": true,
+  "snapshots": [
+    {
+      "label": "stale-contract-planner-exhausted",
+      "kind": "stale_design_contract_planner_exhausted",
+      "task_id": "task-plan-exhausted",
+      "task_state": "abandoned",
+      "blocker_code": "attempt_exhausted",
+      "action": "replan_feature_with_attempt_history_summary",
+      "policy": "stale_design_contract_attempt_exhausted_replan"
+    }
+  ]
+}

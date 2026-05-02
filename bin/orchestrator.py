@@ -12437,6 +12437,41 @@ def _workflow_issue_from_summary(feature, workflow, config):
                 }
     if feature_status == "open" and planner.get("task_id") and planner.get("state") in ("queued", "claimed", "running"):
         return None
+    if (
+        feature_status == "open"
+        and planner.get("task_id")
+        and planner.get("state") == "abandoned"
+        and frontier.get("task_id")
+        and frontier.get("state") == "blocked"
+        and (frontier.get("blocker") or {}).get("code") == "stale_design_contract"
+    ):
+        found_planner = find_task(planner["task_id"])
+        found_frontier = find_task(frontier["task_id"])
+        if found_planner and found_frontier:
+            planner_state, planner_task = found_planner
+            frontier_state, frontier_task = found_frontier
+            planner_blocker = task_blocker(planner_task)
+            if (planner_blocker or {}).get("code") == "attempt_exhausted":
+                return {
+                    "feature_id": feature_id,
+                    "project": project["name"],
+                    "summary": feature.get("summary") or feature_id,
+                    "issue_key": f"stale-contract-replan:{frontier_task['task_id']}:{planner_task['task_id']}",
+                    "kind": "stale_design_contract_planner_exhausted",
+                    "task_id": planner_task["task_id"],
+                    "task_state": planner_state,
+                    "blocker": planner_blocker,
+                    "diagnosis": (
+                        "frontier task is blocked on a stale design contract after the latest planner exhausted attempts; "
+                        "replan the feature from the current active contract and include planner attempt history"
+                    ),
+                    "workflow": workflow,
+                    "action": "replan_feature_with_attempt_history_summary",
+                    "policy": "stale_design_contract_attempt_exhausted_replan",
+                    "task": planner_task,
+                    "frontier_task": frontier_task,
+                    "frontier_state": frontier_state,
+                }
 
     if feature_status == "open":
         if not feature.get("child_task_ids"):
